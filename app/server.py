@@ -1224,7 +1224,7 @@ $("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
             next_path = "/dashboard"
         if (not hmac.compare_digest(email.encode("utf-8"), _ADMIN_EMAIL.encode("utf-8"))
                 or not hmac.compare_digest(pw.encode("utf-8"), _ADMIN_PW.encode("utf-8"))):
-            return self._send(200, {"ok": False, "error": "Wrong email or password"})
+            return self._send(401, {"ok": False, "error": "Wrong email or password"})
         security.LOGIN_LIMITER.clear(key)
         tok = self._new_session()
         data = json.dumps({"ok": True, "next": next_path}).encode("utf-8")
@@ -1819,9 +1819,14 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         market = (q.get("market") or [""])[0].strip()
         category = (q.get("category") or [""])[0].strip()
         top = int((q.get("top") or ["8"])[0])
-        if market:
-            amazon.set_market(market)
-        items, source = amazon.search(query, top=top, category=category)
+        prev_market = amazon.MARKET
+        try:
+            if market:
+                amazon.set_market(market)
+            items, source = amazon.search(query, top=top, category=category)
+        finally:
+            if amazon.MARKET != prev_market:
+                amazon.set_market(prev_market)
         return self._send(200, {"query": query, "market": amazon.MARKET,
                                 "source": source, "items": items, "count": len(items)})
 
@@ -1829,9 +1834,14 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         seed = (q.get("seed") or [""])[0].strip()
         market = (q.get("market") or [""])[0].strip()
         top = int((q.get("top") or ["8"])[0])
-        if market:
-            amazon.set_market(market)
-        niches, meta = niche.mine_niche(seed, top=top)
+        prev_market = amazon.MARKET
+        try:
+            if market:
+                amazon.set_market(market)
+            niches, meta = niche.mine_niche(seed, top=top)
+        finally:
+            if amazon.MARKET != prev_market:
+                amazon.set_market(prev_market)
         return self._send(200, {"niches": niches, "meta": meta})
 
     def _save_settings(self):
@@ -1884,7 +1894,15 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             tw = s.get("twitter") or {}
             for f in ("client_id", "client_secret", "access_token", "access_token_secret"):
                 if f in tw:
-                    _set_setting("social.key.twitter.%s" % f, tw[f])
+                    val = tw[f]
+                elif "twitter." + f in tw:
+                    val = tw["twitter." + f]
+                elif "twitter." + f in (s.get("keys") or {}):
+                    val = (s.get("keys") or {})["twitter." + f]
+                else:
+                    continue
+                if val:
+                    _set_setting("social.key.twitter.%s" % f, val)
         # Market-demography targeting profile (region / interest / persona).
         demo = body.get("demography")
         if isinstance(demo, dict):
@@ -2226,9 +2244,16 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             entries.append(("/" + page, "2026-08-28"))
         with _lock:
             conn = _db()
-            rows = conn.execute("SELECT keyword, created_at FROM niches").fetchall()
+            nrows = conn.execute(
+                "SELECT keyword, created_at, products FROM niches").fetchall()
             conn.close()
-        for r in rows:
+        live = set()
+        for r in nrows:
+            # Only indexable niches belong in the sitemap — a niche without
+            # products renders noindex and must never be listed.
+            prods = (r["products"] or "").strip()
+            if not prods or prods in ("[]", "{}"):
+                continue
             try:
                 kw = seo._slugify(r["keyword"])
             except Exception:
@@ -2236,11 +2261,17 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             lm = (r["created_at"] or "")[:10] or "2026-08-28"
             entries.append((f"/n/{kw}", lm))
             entries.append((f"/lp/{kw}", lm))
+            live.add(kw)
         with _lock:
             conn = _db()
             tro = conn.execute("SELECT parent_slug, slug, created_at FROM topics").fetchall()
             conn.close()
         for t in tro:
+            # Long-tail pages resolve products via their parent niche; if the
+            # parent is gone (or currently product-less) the page goes noindex,
+            # so it has no business in the sitemap.
+            if t["parent_slug"] not in live:
+                continue
             lm = (t["created_at"] or "")[:10] or "2026-08-28"
             entries.append((f"/n/{t['parent_slug']}/{t['slug']}", lm))
         return seo.render_sitemap(entries)
@@ -4200,7 +4231,7 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
             try:
                 row = conn.execute(
                     "SELECT * FROM social_posts WHERE lower(slug)=? AND utm_content=? "
-                    "AND status='published' ORDER BY id DESC LIMIT 1",
+                    "AND status IN ('published','scheduled') ORDER BY id DESC LIMIT 1",
                     (slug.lower(), code)).fetchone()
             finally:
                 conn.close()
@@ -4213,23 +4244,27 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
         link = d.get("link") or "/lp/" + slug
         when = (d.get("published_at") or d.get("created_at") or "").split(" ")[0]
         desc = (("%s · pstore" % keyword)[:160]) if keyword else title
+        status = (d.get("status") or "published")
+        status_note = ('<p class="hint" style="color:#c0392b">This post is queued but not yet live — '
+                       'it publishes on schedule and goes public then.</p>' if status == "scheduled" else "")
         head = seo._head(title, desc, "/social/%s/%s" % (slug, code),
                          "/social/%s/%s" % (slug, code), noindex=True)
-        page = f"""<!DOCTYPE html>
-<html lang="en"><head>{head.decode("utf-8")}</head><body>
+        mkup = f"""
 <header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
 <nav><a href="/">Home</a><a href="/blog">Blog</a><a href="/n/{seo._clean(slug)}">Full review</a></nav></header>
 <main class="wrap" style="max-width:720px;margin:0 auto;padding:24px">
 <section class="card">
   <p class="hint">📣 {seo._clean(d.get('platform') or 'Social')} · {seo._clean(when)}</p>
   <h1>{seo._clean(title)}</h1>
+  {status_note}
   <div style="font-size:15px;color:var(--text,#333);line-height:1.6">{body}</div>
   <p class="key" style="margin-top:16px"><a href="{seo._clean(link)}" rel="noopener" target="_blank">{seo._clean(link)}</a></p>
   <p class="hint">Best {seo._clean(keyword)} — researched live from Amazon.</p>
 </section>
 </main>
-</body></html>"""
-        return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
+"""
+        return self._send(200, head + mkup.encode("utf-8") + b"</body>\n</html>\n",
+                          "text/html; charset=utf-8")
 
     def _social_api(self, q):
         keyword = (q.get("keyword") or [""])[0].strip()
@@ -4668,7 +4703,7 @@ async function ampl(){{
 }}
 async function amptog(){{
   const r = await fetch("/api/social/amplify", {{method:"POST", headers:{{"Content-Type":"application/json"}},
-    body: JSON.stringify({{enable: document.querySelector("#amptog").dataset.on === undefined}})}});
+    body: JSON.stringify({{enable: document.querySelector("#amptog").dataset.on !== "1"}})}});
   const d = await r.json().catch(()=>({{ok:false}}));
   $("ampout").textContent = d && d.ok ? ("Auto-amplify is now " + (d.on ? "ON" : "OFF") + ".") : "Toggle failed.";
   setTimeout(()=>location.reload(), 900);
@@ -5098,6 +5133,22 @@ fresh();
         kw = str(body.get("keyword") or "").strip()
         if not kw:
             return self._send(400, {"error": "keyword required"})
+        with _lock:
+            conn = _db()
+            existing = conn.execute(
+                "SELECT id FROM niches WHERE lower(keyword)=lower(?)", (kw,)).fetchone()
+            conn.close()
+        if existing:
+            # Already mined before — never insert a duplicate row; hand back the
+            # live niche (and its page) instead of re-running the pipeline.
+            slug = seo._slugify(kw)
+            return self._send(200, {
+                "ok": True, "already_existed": True,
+                "keyword": kw, "id": existing["id"],
+                "slug": slug,
+                "topic_pages": 0,
+                "urls": ["/n/" + slug],
+            })
         try:
             res = suggest.build_route(kw)
         except Exception as e:
@@ -5207,7 +5258,7 @@ fresh();
             '<span id="suggmsg" class="msg"></span>'
             '<div id="sugg"></div>'
             '<script>'
-            'async function loadSuggest(){const m=$("suggmsg"),box=$("sugg");'
+            'async function loadSuggest(){const m=document.getElementById("suggmsg"),box=document.getElementById("sugg");'
             'm.textContent="Thinking about your audience…";m.className="msg";'
             'let r,d;'
             'try{r=await fetch("/api/suggest");d=await r.json();}'
@@ -5610,7 +5661,9 @@ fresh();
         tw_rows = "".join(
             '<label>%s <input type="password" name="key_%s" value="%s" '
             'placeholder="%s" autocomplete="off" data-masked="1" data-tw="1"></label>'
-            % (lbl, f, self._maskkv(f, "social.key.twitter.%s" % f), ph)
+            % (lbl, f.split(".")[-1],
+               self._maskkv(f.split(".")[-1], "social.key.twitter.%s" % f.split(".")[-1]),
+               ph)
             for f, lbl, ph in tw_meta)
         webhook_val = seo._clean(_get_setting("social.webhook"))
         pa_ready = "✅ ready" if pa["ready"] else "⚠️ incomplete — add the three PA-API values"
@@ -5691,9 +5744,11 @@ async function soc_save(){{
 
     def _maskkv(self, key, skey=None):
         """Short masked placeholder for an already-stored key so existing values
-        aren't echoed in plaintext in the form."""
+        aren't echoed in plaintext in the form. Empty string (not the literal
+        placeholder text) when nothing is stored, so a blank field can never be
+        saved back as a real key."""
         v = _get_setting(skey or ("social.key." + key))
-        return (v[:4] + "••••") if v else "paste API key/token"
+        return (v[:4] + "••••") if v else ""
 
     def _admin_opportunities(self, q):
         """Grow page: proven niches (real clicks) + one-click expansion that

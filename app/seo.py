@@ -105,12 +105,6 @@ def _website_jsonld():
     return {
         "@context": "https://schema.org", "@type": "WebSite",
         "name": SITE_NAME, "url": ORG_URL,
-        "potentialAction": {
-            "@type": "SearchAction",
-            "target": {"@type": "EntryPoint",
-                       "urlTemplate": ORG_URL + "/n/{search_term_string}"},
-            "query-input": "required name=search_term_string",
-        },
     }
 
 
@@ -208,7 +202,7 @@ CONTACT_EMAIL = os.environ.get("PSTORE_CONTACT", "hello@pstore-gxbv.onrender.com
 
 
 def _page_header():
-    return f"""<header id="top"><h1><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></h1>
+    return f"""<header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
 <p class="tagline">{_clean(SITE_DESC)}</p>
 <nav><a href="/">🏠 Home</a><a href="/about">About</a><a href="/contact">Contact</a></nav></header>
 """
@@ -377,15 +371,15 @@ def render_landing(saved_niches):
     """Storefront-style home: value prop, how-we-pick, niche index, FAQ."""
     jsonld = {
         "@context": "https://schema.org", "@graph": [
-            {"@type": "WebSite", "name": SITE_NAME, "url": BASE_URL,
-             "potentialAction": {"@type": "SearchAction",
-                                 "target": {"@type": "EntryPoint",
-                                            "urlTemplate": BASE_URL + "/n/{search_term_string}"},
-                                 "query-input": "required name=search_term_string"}},
+            {"@type": "WebSite", "name": SITE_NAME, "url": BASE_URL},
             {"@type": "Organization", "name": SITE_NAME, "url": BASE_URL},
         ],
     }
-    head = _head(SITE_DESC, SITE_DESC, "/", "/", jsonld=jsonld)
+    home_desc = ("Ranked, data-backed best-Amazon-pick guides by niche — live price, "
+                 "rating and review signals decide the ranking, and the verdict comes "
+                 "first. Honest picks, affiliate-tagged links, no filler.")
+    head = _head(home_desc, home_desc, "/", "/", jsonld=jsonld,
+                 og_image=BASE_URL + "/og/home.png")
     top_pick_niches = saved_niches or []
     # comparison preview of the single most-picked niche (scannable, table-flow pill)
     comp_kw = ""
@@ -396,7 +390,7 @@ def render_landing(saved_niches):
             comp_preview = editorial.comparison_html(n["products"])
             break
     body = f"""
-<header id="top"><h1><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></h1>
+<header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
 <p class="tagline">{_clean(SITE_DESC)}</p>
 <nav style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
 <a class="chip" href="#top-picks">🏆 Top picks</a>
@@ -491,13 +485,13 @@ def render_niche(keyword, niche, saved_niches=None, ab_headline=None, ab_variant
         graph.append(editorial.breadcrumb_jsonld(keyword))
     graph.append(_org_jsonld())
     jsonld = {"@context": "https://schema.org", "@graph": graph}
-    og = BASE_URL + "/og/" + _slugify(keyword)
+    og = BASE_URL + "/og/" + _slugify(keyword) + ".png"
     head = _head(title, desc, canonical, canonical, jsonld=jsonld, og_image=og,
                  noindex=not bool(items))
     headline = ab_headline or ("Best %s: ranked picks" % keyword)
     ab_attr = (' data-variant="%s"' % ab_variant) if ab_variant else ""
     body = f"""
-<header id="top"><h1><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></h1>
+<header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
 <nav><a href="/">🏠 Home</a><a href="/about">About</a><a href="/disclosure">Disclosure</a><a href="/lp/{_clean(_slugify(keyword))}">One-pager →</a></nav></header>
 <main data-niche="{_clean(_slugify(keyword))}" data-source="niche" data-keyword="{_clean(keyword)}"{ab_attr}>
 <div class="card">
@@ -577,14 +571,14 @@ def render_topic(term, parent_keyword, niche, parent_slug):
         graph.append(editorial.breadcrumb_jsonld(term or parent_keyword))
     graph.append(_org_jsonld())
     jsonld = {"@context": "https://schema.org", "@graph": graph}
-    og = BASE_URL + "/og/" + (term_slug or _slugify(parent_keyword))
+    og = BASE_URL + "/og/" + (term_slug or _slugify(parent_keyword)) + ".png"
     head = _head(title, desc, canonical, canonical, jsonld=jsonld, og_image=og,
                  noindex=not bool(items))
     ranked = "".join(editorial.pick_html(term or parent_keyword, it, idx, items)
                      for idx, it in enumerate(score_order(items)))
     hub = "/n/%s" % _slugify(parent_keyword)
     body = f"""
-<header id="top"><h1><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></h1>
+<header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
 <nav><a href="/">🏠 Home</a><a href="{_clean(hub)}">{_clean(parent_keyword.title())}: hub →</a><a href="/disclosure">Disclosure</a></nav></header>
 <main data-niche="{_clean(term_slug)}" data-source="topic" data-keyword="{_clean(term or parent_keyword)}">
 <div class="card">
@@ -629,7 +623,8 @@ def render_blog(saved_niches):
     (title/desc/canonical + indexable)."""
     niches = [n for n in (saved_niches or []) if n.get("products")]
     head = _head("The blog", "Ranked buying guides, data methodology and honest picks, niche by niche.",
-                 "/blog", "/blog", noindex=len(niches) == 0)
+                 "/blog", "/blog", noindex=len(niches) == 0,
+                 og_image=BASE_URL + "/og/blog.png")
     cards = ""
     for n in niches:
         slug = _slugify(n["keyword"])
@@ -644,7 +639,7 @@ def render_blog(saved_niches):
 </article>"""
     if not cards:
         cards = '<section class="card"><h2>Fresh guides on the way</h2><p class="hint">We\'re ranking new niches now. Check back soon or <a href="/">browse the picks</a>.</p></section>'
-    body = f"""<header id="top"><h1><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></h1>
+    body = f"""<header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
 <p class="tagline">{_clean(SITE_DESC)}</p>
 <nav><a href="/">🏠 Home</a><a href="/blog">📝 Blog</a><a href="/disclosure">Disclosure</a></nav></header>
 <main data-niche="blog" data-source="blog">
@@ -669,7 +664,12 @@ def render_sitemap(entries):
 
 
 def render_robots():
-    return f"User-agent: *\nAllow: /\nSitemap: {BASE_URL}/sitemap.xml\n".encode("utf-8")
+    return (f"User-agent: *\nAllow: /\n"
+            f"Disallow: /admin\nDisallow: /tool\nDisallow: /keys\n"
+            f"Disallow: /dashboard\nDisallow: /api/\nDisallow: /e/\n"
+            f"Disallow: /e/o\nDisallow: /social/\nDisallow: /_gated/\n"
+            f"Disallow: /og/\n"
+            f"Sitemap: {BASE_URL}/sitemap.xml\n").encode("utf-8")
 
 
 # ------------------------------------------------------------------ audit

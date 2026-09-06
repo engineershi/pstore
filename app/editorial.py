@@ -67,6 +67,17 @@ def _display(item):
     return item.get("title") or item.get("asin") or "this pick"
 
 
+def _aff(item):
+    """Affiliate-tagged URL for an item (see amazon.tagged_url). Falls back to
+    the stored URL when it isn't a recognizable Amazon product link."""
+    it = item or {}
+    url = it.get("url") or ""
+    asin = it.get("asin") or ""
+    if not url and asin:
+        return amazon.affiliate_url(asin)
+    return amazon.tagged_url(url) if url else ""
+
+
 def score_items(items):
     """Rank scoring: rating weight, log-scaled review volume, price closeness
     to the list median. Higher is better."""
@@ -202,7 +213,7 @@ def comparison_rows(items, start=1, top_asin=None):
             "price": _price(it) or "—",
             "stars": ("★ %s" % it["stars"]) if isinstance(it.get("stars"), (int, float)) else "—",
             "reviews": _review_hum(it["reviews"]) if isinstance(it.get("reviews"), (int, float)) and it["reviews"] >= 0 else "—",
-            "url": it.get("url") or "",
+            "url": _aff(it) or "",
             "top": bool(top_asin) and asin == top_asin,
             "badge": "Top pick" if asin == top_asin else ("Runner-up" if idx == 1 else "Picked"),
         })
@@ -304,20 +315,21 @@ def sticky_cta_html(keyword, best):
     """Sticky bottom CTA that appears once the visitor scrolls past the picks:
     hands them straight to the #1 pick's Amazon page. Returns '' when there's
     no best pick to send to."""
-    if not (best or {}).get("url"):
+    url = _aff(best)
+    if not url:
         return ""
-    url = best["url"]
     title = best.get("title") or (keyword + " top pick")
+    asin = best.get("asin") or ""
     price = _price(best)
     lbl = "See it on Amazon"
     if price:
         lbl += " · %s" % price
-    return ('<div class="sticky-cta" data-niche="{0}" data-source="niche">'
-            '<p class="sticky-line">Our #1 pick for <b>{1}</b></p>'
-            '<a class="cta warm" href="{2}" data-beacon="{2}" data-ev="sticky">{3}</a>'
-            '</div>'.format(
+    return ('<div class="sticky-cta" data-niche="%s" data-source="niche">'
+            '<p class="sticky-line">Our #1 pick for <b>%s</b></p>'
+            '<a class="cta warm" href="%s" data-beacon="sticky" data-ev="sticky" data-asin="%s">%s</a>'
+            '</div>' % (
                 _clean(_slug(keyword)), _clean(title)[:70],
-                url, _clean(lbl)))
+                url, _clean(asin), _clean(lbl)))
 
 
 def pick_html(keyword, item, idx, items):
@@ -330,10 +342,10 @@ def pick_html(keyword, item, idx, items):
     reviews = ('<span class="meta-strong">%s ratings</span>' % _review_hum(item.get("reviews"))) \
         if isinstance(item.get("reviews"), (int, float)) and item["reviews"] >= 0 else ""
     cta = ""
-    if item.get("url"):
+    if _aff(item):
         label = "Check price on Amazon" + (" — %s" % price if price else "")
         cta = '<a class="btn" href="%s" data-asin="%s" target="_blank" rel="nofollow sponsored noopener">%s</a>' \
-              % (_clean(item["url"]), _clean(item.get("asin") or ""), label)
+              % (_clean(_aff(item)), _clean(item.get("asin") or ""), label)
     return ('<div class="pick%s">'
             '<div class="pick-head"><span class="rank">#%d</span>'
             '<h3>%s</h3><span class="badge">%s</span></div>'
@@ -354,7 +366,7 @@ def upsell_block(items, keyword=""):
     total order value."""
     scored = score_items(items or [])
     def _link(it):
-        return it.get("url") or amazon.affiliate_url(it.get("asin") or "")
+        return _aff(it)
     scored = [it for it, _s in scored if it.get("asin") and _link(it)]
     if not scored:
         return ""
@@ -468,7 +480,7 @@ def featured_html(saved_niches):
     if not f:
         return ""
     top, _score, kw = f
-    url = top.get("url") or ""
+    url = _aff(top) or ""
     price = _price(top)
     stars = ('<span class="stars">★ %s</span>' % top.get("stars")) if isinstance(top.get("stars"), (int, float)) else ""
     price_txt = price and (" · " + price) or ""
@@ -514,9 +526,9 @@ def quick_picks_band(saved_niches, count=3):
         reviews = ('<span class="r-count">%s ratings</span>' % _review_hum(top.get("reviews"))) \
             if isinstance(top.get("reviews"), (int, float)) and top["reviews"] >= 0 else ""
         cta = ""
-        if top.get("url"):
+        if _aff(top):
             cta = '<a class="btn" href="%s" data-asin="%s" target="_blank" rel="nofollow sponsored noopener">Check price%s</a>' \
-                  % (_clean(top["url"]), _clean(top.get("asin") or ""),
+                  % (_clean(_aff(top)), _clean(top.get("asin") or ""),
                      ((" — " + price) if price else ""))
         cards.append(
             '<div class="qpick%s">'

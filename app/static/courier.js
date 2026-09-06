@@ -32,7 +32,21 @@
       if (note) note.textContent = "Please add an email address.";
       return;
     }
-    form.setAttribute("disabled", "disabled");
+    var btn = form.querySelector("button[type=submit], .courier-cta");
+    function lock(locked) {
+      if (!btn) return;
+      btn.disabled = locked;
+      if (locked) btn.setAttribute("aria-busy", "true");
+      else btn.removeAttribute("aria-busy");
+    }
+    function fail(msg) {
+      lock(false);
+      if (note) {
+        note.style.display = "block";
+        note.textContent = msg || "That didn't work — please try again.";
+      }
+    }
+    lock(true);
     fetch("/subscribe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -44,10 +58,15 @@
       })
     }).then(function (r) { return r.json(); })
       .then(function (d) {
-        if (note) {
-          note.style.display = "block";
-          if (d && d.ok) note.textContent = d.message || "You're in — check your inbox.";
-          else note.textContent = (d && d.error) || "That didn't work — please try again.";
+        if (d && d.ok) {
+          lock(true); /* stay locked — the lead is in */
+          if (note) {
+            note.style.display = "block";
+            note.textContent = d.message || "You're in — check your inbox.";
+          }
+        } else {
+          fail((d && d.error) || "That didn't work — please try again.");
+          return;
         }
         /* Email gate: on success, unlock the gated PDF download. */
         if (d && d.ok && form.classList.contains("gate-form")) {
@@ -60,7 +79,7 @@
           }
         }
       })
-      .catch(function () { if (note) note.textContent = "Network error — please try again."; });
+      .catch(function () { fail("Network error — please try again."); });
   });
 
   /* ---- click beacon: any on-page Amazon link reports (slug, source) ---- */

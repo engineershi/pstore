@@ -436,6 +436,23 @@ def affiliate_url(asin):
     return "https://%s/dp/%s?tag=%s" % (marketplace_info()["host"], asin, tag)
 
 
+_DP_ASIN_RE = re.compile(r"/(?:dp|gp/product|gp/aw/d)/[^/]*?([A-Z0-9]{10})", re.I)
+
+
+def tagged_url(url):
+    """Rebuild an Amazon product URL onto the active market + affiliate tag.
+
+    Extracts the ASIN from any stock Amazon URL shape (matches affiliate_url's
+    guarantee: direct, tagged, never cloaked) so links stay credited even when
+    the stored URL was captured before a tag was set. Recognizable Amazon URL;
+    otherwise returns the URL untouched.
+    """
+    m = _DP_ASIN_RE.search(url or "")
+    if not m:
+        return url
+    return affiliate_url(m.group(1))
+
+
 # ------------------------------------------------------------------ scraper providers
 def scraper_status():
     """Per-provider key presence (masked). Env wins over stored config."""

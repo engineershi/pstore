@@ -374,9 +374,9 @@ function renderFunnel(f, landing_url, socialKit){
     ta.readOnly=true; ta.rows=5; ta.value=bost.script;
     const row = document.createElement("div");
     row.style.display="flex"; row.style.flexWrap="wrap"; row.style.gap="8px";
-    const btns = [
-      {t:"▶ Run", cls:"", act:()=>runBoost(bost.name, b)},,
-      {t:"Copy", cls:"warm", act:()=>copyArea(ta, b)},
+const btns = [
+      {t:"▶ Run", cls:"", act:(btn)=>runBoost(bost.name, btn)},
+      {t:"Copy", cls:"warm", act:(btn)=>copyArea(ta, btn)},
     ];
     if (bost.link || bost.social){
       const a = document.createElement("a");
@@ -387,8 +387,8 @@ function renderFunnel(f, landing_url, socialKit){
     }
     btns.forEach(x=>{
       const b = document.createElement("button");
-      b.className=x.cls; b.textContent=x.t;
-      b.onclick = ()=>{ if(x.t==="▶ Run") runBoost(bost.name, b); else x.act(); };
+      b.className = x.cls; b.textContent = x.t;
+      b.onclick = () => x.act(b);
       row.appendChild(b);
     });
     box.appendChild(row); box.appendChild(ta);

@@ -1589,7 +1589,7 @@ class TestRoutes(unittest.TestCase):
     def test_login_wrong_password(self):
         st, _, set_cookie, body = self._raw(
             "/admin/login", "POST", body=b"email=owner@test.example&password=nope")
-        self.assertEqual(st, 200)
+        self.assertEqual(st, 401)
         payload = json.loads(body)
         self.assertFalse(payload["ok"])
         self.assertIsNone(set_cookie)
@@ -1597,7 +1597,7 @@ class TestRoutes(unittest.TestCase):
     def test_login_wrong_email(self):
         st, _, set_cookie, body = self._raw(
             "/admin/login", "POST", body=b"email=bad@test.example&password=test-pass-123")
-        self.assertEqual(st, 200)
+        self.assertEqual(st, 401)
         self.assertFalse(json.loads(body)["ok"])
         self.assertIsNone(set_cookie)
 
@@ -1773,7 +1773,7 @@ class TestSecurityAndOAuth(unittest.TestCase):
         for _ in range(security.LOGIN_LIMITER.limit):
             st, _, _, _, body = self._raw(
                 "/admin/login", "POST", body=b"email=x@test.example&password=wrong")
-            self.assertEqual(st, 200)
+            self.assertEqual(st, 401)
             self.assertFalse(json.loads(body)["ok"])
         st, _, _, _, _ = self._raw(
             "/admin/login", "POST", body=b"email=x@test.example&password=wrong")

@@ -380,7 +380,6 @@ def _section_html(section, ctx):
       <p class="gate-msg courier-msg" style="display:none"></p>
     </form>
     <a class="cta" id="gate-unlock" href="#" rel="noopener"
-       data-ev="gate_unlock"
        style="display:none;margin-top:14px">⬇ {e(pdf_head)}</a>
     {pdf_sub_html}
     <p class="hint">{e(privacy)}</p>
@@ -448,11 +447,13 @@ def _section_html(section, ctx):
                           '<div class="muted">This page’s price snapshot refreshes in — prices move daily</div>')
         counter_html = ""
         if counter:
-            import random
-            n = random.randint(17, 48)
-            counter_html = (f'<div class="muted" style="font-size:14px;margin-top:6px">'
-                            f'<b style="color:{style.get("accent","#ff6b2c")}">{n}</b> '
-                            f'{e(counter_label)} right now</div>')
+            # Honest social proof only: the real confirmed subscriber count for
+            # this page's niche, never a fabricated "viewers right now" number.
+            subs = str(ctx.get("subscriber_count") or "").strip()
+            if subs.isdigit():
+                counter_html = (f'<div class="muted" style="font-size:14px;margin-top:6px">'
+                                f'<b style="color:{style.get("accent","#ff6b2c")}">{subs}</b> '
+                                f'confirmed readers follow this niche</div>')
         spots_html = ""
         if spots:
             spots_html = (f'<div style="margin-top:8px;font-size:13px;color:{style.get("accent","#ff6b2c")}">'
@@ -533,7 +534,7 @@ def render_landing_page_page(context, keyword, site_url=None):
     css = _style_css(style)
     slug = context.get("slug", "niche")
     base = (site_url or "").rstrip("/")
-    og_image = (base + "/og/" + slug) if base else ""
+    og_image = (base + "/og/" + slug + ".png") if base else ""
     keyword_title = (keyword or slug).replace("-", " ").title()
     anim = bool(settings.get("animation", True))
     pick = context.get("pick") or {}
@@ -569,6 +570,7 @@ def render_landing_page_page(context, keyword, site_url=None):
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{e(keyword_title)} — The Data-Backed #1 Pick</title>
+<meta name="description" content="The ranked best {e(keyword)} pick from live Amazon data — see why it wins, its price, and buy it in one click.">
 <meta property="og:title" content="{e(keyword_title)} — The Data-Backed #1 Pick">
 <meta property="og:description" content="The ranked best {e(keyword)} pick from live Amazon data — see why it wins, its price, and buy it in one click.">
 <meta property="og:type" content="website">
