@@ -7137,7 +7137,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}</s
                 _set_setting("autosend.hours", ",".join(map(str, cleaned)))
             if enabled is not None:
                 _set_setting("autosend.enabled",
-                             "1" if str(enabled) in ("1", "true", "on") else "0")
+                             "1" if str(enabled).lower() in ("1", "true", "yes", "on") else "0")
             if limit is not None:
                 try:
                     _set_setting("autosend.limit", str(max(int(limit), 0)))
@@ -7344,7 +7344,7 @@ function renderNow(){const n=DATA.niches||[];$("smtp-state").textContent=DATA.sm
 function fillHourChips(hours){const hset=new Set(hours);$("hourchips").innerHTML=Array.from({length:24},(_,h)=>`<span class="hourgap ${hset.has(h)?"on":""}" data-h="${h}" onclick="togHour(${h})">${String(h).padStart(2,"0")}</span>`).join("");}
 function togHour(h){const el=document.querySelector(`[data-h='${h}']`);el.classList.toggle("on");}
 function saveCfg(){const hours=[...document.querySelectorAll(".hourgap.on")].map(e=>+e.dataset.h);fetch("/api/mail",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"config",hours,hours,enabled:$("as-on").checked,limit:$("as-limit").value})}).then(r=>r.json()).then(d=>{$("as-msg").textContent="Saved — "+(d.config.hours.length?"sends at "+d.config.hours.join(", ")+" UTC":"autosend off")+". Adjust the sender interval next tick.";setTimeout(()=>$("as-msg").textContent="",4000);});}
-async function preview(){const p=await fetch("/api/mail",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"preview",spec:spec()})});const d=await p.json();$("prevbox").textContent=d.ok?`Subject: ${esc(d.subject)}\n\n${d.body}\n\n── preview (tracked link ${d.asin?"on":""})`:"⚠ "+d.error;}
+async function preview(){const s0=spec();s0.options=opts();const p=await fetch("/api/mail",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"preview",spec:s0})});const d=await p.json();$("prevbox").textContent=d.ok?`Subject: ${esc(d.subject)}\n\n${d.body}\n\n── preview (tracked link ${d.asin?"on":""} · open pixel ${opts().open_pixel?"on":"off"})`:"⚠ "+d.error;}
 function onSpec(){preview();}
 function onCust(){const c=tmpl()==="custom";$("cust-opts").style.display=c?"":"none";if(c)onSpec();}
 function renderOutbox(){const rows=DATA.outbox||[];$("outbox-body").innerHTML=rows.length?rows.map(o=>{let res="";try{const r=JSON.parse(o.result||"null");if(r)res=`${r.recipients??""} → sent ${r.sent??0} / err ${r.errors??0}`;}catch(e){}return `<tr><td>${o.id}</td><td class="ct">${esc(o.scheduled_at||"now")}</td><td class="ct">${(o.recipients?JSON.parse(o.recipients).length:"0")}</td><td><span class="badge">${esc(o.status)}</span></td><td>${esc(res||(o.result||""))}</td><td>${o.status==="scheduled"||o.status==="sending"?`<button class="btn ghost" onclick="cancel(${o.id})">Cancel</button>`:""}</td></tr>`;}).join(""):'<tr><td colspan="6" class="hint">Nothing scheduled.</td></tr>';}

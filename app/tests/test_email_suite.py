@@ -737,6 +737,7 @@ class TestEmailSuite(unittest.TestCase):
         cfg = json.loads(data)["config"]
         self.assertEqual(cfg["hours"], [9, 17])
         self.assertEqual(cfg["limit"], 25)
+        self.assertTrue(cfg["enabled"])
 
     def test_studio_requires_admin(self):
         st, _, _, _ = self._raw("/api/mail")
