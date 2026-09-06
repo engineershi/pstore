@@ -2303,7 +2303,12 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                                 "urls": [c["url"] for c in created]})
 
     def _sitemap(self):
-        entries = [("/", "2026-08-28"), ("/blog", "2026-08-28")]
+        # Home/blog are rebuilt/newsy every day; a rolling lastmod signals GSC
+        # and Bing that the sitemap changed so the "could not fetch" state from
+        # previous failed crawls is re-attempted on the next crawl pass.
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        entries = [("/", today), ("/blog", today)]
         for page in seo.STATIC_PAGES:
             entries.append(("/" + page, "2026-08-28"))
         with _lock:
