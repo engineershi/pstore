@@ -701,9 +701,13 @@ button.mini { white-space: nowrap; }
    still fit on one line when the container is wide enough. */
 .bigbtn { width: 100%; display: flex; align-items: center; justify-content: center; text-align: center; }
 
-/* Back-to-top + sticky CTA and any fixed pill are fixed-position by nature and
-   must never be affected by flex wrapping. */
-.totop, .sticky-cta, [class*="sticky"] { flex: 0 0 auto !important; white-space: nowrap; }
+/* Back-to-top + sticky CTA are fixed-position and must not flex-wrap, but
+   their internal text lines must still wrap so long product titles never
+   burst past the viewport. */
+.totop, .sticky-cta { flex: 0 0 auto !important; }
+.totop { white-space: nowrap; }
+.sticky-cta .sticky-line { flex: 1 1 auto; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.sticky-cta .cta { flex: 0 0 auto; white-space: nowrap; }
 
 /* Tiny screens: let every button take full available width in a row so two
    side-by-side buttons never squeeze together. */
