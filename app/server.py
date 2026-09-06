@@ -4266,8 +4266,8 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
   <p class="hint">📣 {seo._clean(d.get('platform') or 'Social')} · {seo._clean(when)}</p>
   <h1>{seo._clean(title)}</h1>
   {status_note}
-  <div style="font-size:15px;color:var(--text,#333);line-height:1.6">{body}</div>
-  <p class="key" style="margin-top:16px"><a href="{seo._clean(link)}" rel="noopener" target="_blank">{seo._clean(link)}</a></p>
+  <div style="font-size:15px;color:var(--text,#333);line-height:1.6;word-break:break-word;overflow-wrap:anywhere">{body}</div>
+  <p class="key" style="margin-top:16px"><a href="{seo._clean(link)}" rel="noopener" target="_blank" style="word-break:break-word;overflow-wrap:anywhere;display:inline-block;max-width:100%">{seo._clean(link)}</a></p>
   <p class="hint">Best {seo._clean(keyword)} — researched live from Amazon.</p>
 </section>
 </main>
