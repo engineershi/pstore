@@ -159,7 +159,9 @@ def _head(title, desc, canonical, path, jsonld=None, og_image=None, noindex=Fals
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_clean(title)} | {SITE_NAME}</title>
 <meta name="description" content="{_clean(desc)}">
+<link rel="icon" type="image/png" href="{_clean(BASE_URL)}/og/favicon.png">
 {rob}<link rel="canonical" href="{_clean(BASE_URL + path)}">
+<meta property="og:locale" content="en_US">
 <meta property="og:type" content="website">
 <meta property="og:title" content="{_clean(title)}">
 <meta property="og:description" content="{_clean(desc)}">
@@ -622,8 +624,28 @@ def render_blog(saved_niches):
     Each card links to the full ranked notebook (/n/<slug>) and is SEO-shaped
     (title/desc/canonical + indexable)."""
     niches = [n for n in (saved_niches or []) if n.get("products")]
+    articles = []
+    for n in niches:
+        slug = _slugify(n["keyword"])
+        best = editorial.best_pick(n["products"])
+        title = "The best %s: a ranked, data-backed pick" % n["keyword"]
+        synopsis = (best or {}).get("title") or n["keyword"]
+        articles.append({
+            "@type": "BlogPosting",
+            "headline": title,
+            "description": synopsis[:160],
+            "image": BASE_URL + "/og/" + slug + ".png",
+            "url": BASE_URL + "/n/" + slug,
+            "datePublished": (n.get("created_at") or "")[:10],
+            "dateModified": (n.get("created_at") or "")[:10],
+            "author": {"@type": "Organization", "name": SITE_NAME},
+            "publisher": {"@type": "Organization", "name": SITE_NAME},
+        })
+    jsonld = {"@context": "https://schema.org", "@type": "Blog",
+              "name": SITE_NAME, "url": BASE_URL + "/blog",
+              "blogPost": articles}
     head = _head("The blog", "Ranked buying guides, data methodology and honest picks, niche by niche.",
-                 "/blog", "/blog", noindex=len(niches) == 0,
+                 "/blog", "/blog", noindex=len(niches) == 0, jsonld=jsonld,
                  og_image=BASE_URL + "/og/blog.png")
     cards = ""
     for n in niches:

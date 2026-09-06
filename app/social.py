@@ -466,3 +466,27 @@ def og_png(slug, keyword, title, stars, reviews):
 
     rows = (bytes(img[i:i + W * 3]) for i in range(0, len(img), W * 3))
     return _png_encode(W, H, rows)
+
+
+def favicon_png(size=64):
+    """Small brand icon (default 64x64) for /og/favicon.png — accent-to-violet
+    background with a white "P": the same story as the og cards but tiny.
+    Pure stdlib; cached by the HTTP layer."""
+    W = H = size
+    t0, t1 = _COLOR_GRAD
+    img = bytearray(W * H * 3)
+    for y in range(H):
+        t = y / max(H - 1, 1)
+        r = int(t0[0] + (t1[0] - t0[0]) * t)
+        g = int(t0[1] + (t1[1] - t0[1]) * t)
+        b = int(t0[2] + (t1[2] - t0[2]) * t)
+        img[y * W * 3:(y + 1) * W * 3] = bytes((r, g, b)) * W
+    scale = max(2, size // 16)  # 5x7 font at this scale -> centered letter
+    pts = _raster_text("P", (W - 5 * scale) // 2, (H - 7 * scale) // 2, scale)
+    white = (255, 255, 255)
+    for (px, py) in pts:
+        if 0 <= px < W and 0 <= py < H:
+            i = (py * W + px) * 3
+            img[i] = white[0]; img[i + 1] = white[1]; img[i + 2] = white[2]
+    rows = (bytes(img[i:i + W * 3]) for i in range(0, len(img), W * 3))
+    return _png_encode(W, H, rows)

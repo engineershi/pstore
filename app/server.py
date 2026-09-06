@@ -2054,9 +2054,11 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
     def _all_niches(self):
         with _lock:
             conn = _db()
-            rows = conn.execute("SELECT keyword, products FROM niches").fetchall()
+            rows = conn.execute(
+                "SELECT keyword, products, created_at FROM niches").fetchall()
             conn.close()
-        return [{"keyword": r["keyword"], "products": json.loads(r["products"] or "[]")}
+        return [{"keyword": r["keyword"], "products": json.loads(r["products"] or "[]"),
+                 "created_at": r["created_at"] or ""}
                 for r in rows]
 
     def _top_clicked_niches(self, limit=10):
@@ -4187,24 +4189,31 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
     def _og_image_png(self, slug):
         """Raster 1200x630 share card at /og/<slug>.png — the same layout as the
         SVG card but a real PNG so Pinterest/Twitter/Facebook render it. Renders
-        once per slug (in-memory cache, capped) to hold the pure-Python cost."""
+        once per slug (in-memory cache, capped) to hold the pure-Python cost.
+        /og/favicon.png renders the small brand icon instead."""
         with _lock:
             hit = _PNG_CACHE.get(slug)
         if hit is None:
             card = None
-            for n in self._all_niches():
+            if slug == "favicon":
                 try:
-                    if slug != seo._slugify(n["keyword"]):
-                        continue
-                    items = n["products"] or []
-                    pick = market_engine.pick_for_buyers(items)
-                    title = (pick or {}).get("title") or ("Best " + n["keyword"])
-                    stars = (pick or {}).get("stars")
-                    reviews = (pick or {}).get("reviews")
-                    card = social.og_png(slug, n["keyword"], title, stars, reviews)
-                    break
+                    card = social.favicon_png()
                 except Exception:
-                    continue
+                    card = None
+            else:
+                for n in self._all_niches():
+                    try:
+                        if slug != seo._slugify(n["keyword"]):
+                            continue
+                        items = n["products"] or []
+                        pick = market_engine.pick_for_buyers(items)
+                        title = (pick or {}).get("title") or ("Best " + n["keyword"])
+                        stars = (pick or {}).get("stars")
+                        reviews = (pick or {}).get("reviews")
+                        card = social.og_png(slug, n["keyword"], title, stars, reviews)
+                        break
+                    except Exception:
+                        continue
             if card is None:
                 return self._send(404, {"error": "og image not found"})
             with _lock:

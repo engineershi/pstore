@@ -388,6 +388,21 @@ class TestSocialSuite(unittest.TestCase):
         st, _, _, _ = self._raw("/og/not-a-real-niche.png")
         self.assertEqual(st, 404)
 
+    def test_og_favicon_png_served(self):
+        st, _, ctype, data = self._raw("/og/favicon.png")
+        self.assertEqual(st, 200)
+        self.assertTrue(ctype.startswith("image/png"))
+        self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
+        import struct as _st
+        w, h = _st.unpack(">II", data[16:24])
+        self.assertEqual((w, h), (64, 64))
+
+    def test_pages_reference_favicon_and_locale(self):
+        st, _, _, data = self._raw("/blog")
+        self.assertEqual(st, 200)
+        self.assertIn(b"/og/favicon.png", data)
+        self.assertIn(b'property="og:locale" content="en_US"', data)
+
     def test_pinterest_board_name(self):
         self.assertEqual(server._pinterest_board("keto snacks"), "Keto Snacks")
         self.assertEqual(server._pinterest_board(""), "Deals")
