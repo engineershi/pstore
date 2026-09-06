@@ -7235,6 +7235,29 @@ fieldset{border:1.5px solid var(--line,#eee);border-radius:16px;padding:14px 16p
 legend{font-weight:800;font-size:13px;padding:0 8px;color:var(--accent,#ff6b2c)}
 .whenrow{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:10px}
 .bump{background:#fff0e6;border:1.5px solid #ffd2b8;color:#a4421a;border-radius:12px;padding:9px 12px;font-size:12.5px;margin-bottom:12px}
+/* min-width:0 lets flex/grid rows shrink and wrap instead of blowing the
+   page out to the sum of their controls' intrinsic widths on narrow screens */
+main.studiox,.studiox section,.studiox fieldset,.studiox .row,.studiox .switch{min-width:0}
+@media (max-width: 640px){
+ main.studiox{padding:12px 12px 44px}
+ header{padding:18px 14px 6px}
+ .hero{padding:14px 2px 6px}
+ .hero h1{font-size:27px}
+ .tagline{font-size:14px}
+ section.card{padding:14px;border-radius:18px}
+ fieldset{padding:11px 12px}
+ legend{font-size:12px}
+ .subchip{align-items:flex-start;padding:9px 10px}
+ .subchip .st{flex:none;margin-left:4px}
+ .compose-box{padding:12px}
+ pre.preview{font-size:12.5px}
+ .bigbtn{padding:12px;font-size:15px}
+ .whenrow{gap:10px}
+ .switch{font-size:13px}
+ input,select,textarea{max-width:100%}
+ nav{margin-top:12px}
+ nav a{padding:7px 12px;font-size:12.5px}
+}
 </style>
 </head><body>
 <header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
