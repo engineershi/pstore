@@ -24,6 +24,28 @@ def _esc(s):
     return html.escape(str(s or ""), quote=True)
 
 
+def _rgba(hexc, alpha):
+    """'#rrggbb' + alpha -> 'rgba(r, g, b, a)' for soft overlay tints."""
+    hexc = (hexc or "").lstrip("#")
+    try:
+        r, g, b = int(hexc[0:2], 16), int(hexc[2:4], 16), int(hexc[4:6], 16)
+    except ValueError:
+        return "rgba(127,127,127,%s)" % alpha
+    return "rgba(%d, %d, %d, %s)" % (r, g, b, alpha)
+
+
+# Calming hero bands per preset: soft pastels that keep dark text readable
+# (the old saturated accent-on-accent gradient drowned the headline and wash
+# out the subheadline).
+_CALM_HERO_BANDS = {
+    "sunset": "linear-gradient(135deg, #ffe9d6 0%, #f6e2ff 52%, #dff4e8 100%)",
+    "clean": "linear-gradient(135deg, #e3efff 0%, #e2f3fe 50%, #eef2ff 100%)",
+    "forest": "linear-gradient(135deg, #dcf3e5 0%, #d5efe8 55%, #eef2ff 100%)",
+    "ocean": "linear-gradient(135deg, #d7edff 0%, #e2e8ff 52%, #eef2ff 100%)",
+}
+_FALLBACK_CALM_BAND = "linear-gradient(135deg, #e7f0ff 0%, #eae5ff 50%, #e0f5ea 100%)"
+
+
 def _style_css(style):
     """Build the <style> block for a landing page from the CMS style dict.
 
@@ -50,7 +72,7 @@ def _style_css(style):
         soft = "rgba(255,255,255,.06)"
         soft2 = "rgba(255,255,255,.03)"
         shadow = "0 18px 44px rgba(0,0,0,.45)"
-        hero_band = "linear-gradient(135deg, rgba(245,185,66,.16), rgba(124,92,255,.14))"
+        hero_band = "linear-gradient(135deg, rgba(245,185,66,.18), rgba(124,92,255,.16))"
         badge_bg = "rgba(124,92,255,.22)"
         inputs_bg = "#1d2740"
         inputs_bd = "rgba(255,255,255,.18)"
@@ -59,10 +81,13 @@ def _style_css(style):
         soft = "#ffffff"
         soft2 = "#fffdf8"
         shadow = "0 18px 44px rgba(255,120,60,.14)"
-        hero_band = "linear-gradient(135deg, %s, %s)" % (accent, accent2)
+        hero_band = _CALM_HERO_BANDS.get(s.get("preset") or "", _FALLBACK_CALM_BAND)
         badge_bg = "#eee9ff"
         inputs_bg = "#ffffff"
         inputs_bd = "rgba(20,12,40,.16)"
+
+    accent_soft = _rgba(accent, 0.16)
+    accent2_soft = _rgba(accent2, 0.14)
 
     wrap = "880px"
     if s.get("layout") == "wide":
@@ -78,6 +103,7 @@ def _style_css(style):
     --radius:{radius}; --font:{font}; --line:{line}; --soft:{soft};
     --soft2:{soft2}; --shadow:{shadow}; --hero-band:{hero_band};
     --badge-bg:{badge_bg}; --inputs-bg:{inputs_bg}; --inputs-bd:{inputs_bd};
+    --accent-soft:{accent_soft}; --accent2-soft:{accent2_soft};
   }}
   body {{ margin:0; font-family:var(--font); color:var(--text); background:var(--bg);
     line-height:1.6; -webkit-font-smoothing:antialiased; }}
@@ -130,12 +156,17 @@ def _style_css(style):
   /* hero */
   .hero {{ position:relative; overflow:hidden; }}
   .hero.gradient {{ background:var(--hero-band); border:1px solid transparent; }}
+  .hero::before {{ content:""; position:absolute; inset:0; z-index:0; pointer-events:none;
+    background:
+      radial-gradient(560px 340px at 8% -30%, var(--accent-soft) 0%, transparent 60%),
+      radial-gradient(560px 340px at 100% 130%, var(--accent2-soft) 0%, transparent 60%); }}
+  .hero > * {{ position:relative; z-index:1; }}
   .hero.bold h1 {{ font-size:clamp(34px,6vw,56px); letter-spacing:-1.4px; }}
   .hero h1 .hi {{ color:var(--accent); }}
   .hero.minimal {{ background:var(--card); }}
   .hero.minimal h1 {{ text-align:left; }}
   .hero .stars-line {{ font-size:13px; color:var(--muted); margin-top:6px; }}
-  .hero .stars-line b {{ color:#ffab00; letter-spacing:2px; }}
+  .hero .stars-line b {{ color:var(--accent); letter-spacing:2px; }}
   /* social proof */
   .proofbar {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:12px;
     background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:20px;
@@ -151,7 +182,8 @@ def _style_css(style):
     background:var(--badge-bg); display:grid; place-items:center; }}
   .benefit .b-text b {{ display:block; font-size:15.5px; }}
   /* product spotlight */
-  .spot {{ border:1.5px solid var(--line); border-radius:var(--radius); background:var(--card);
+  .spot {{ border:1.5px solid var(--line); border-radius:var(--radius);
+    background:linear-gradient(180deg, var(--badge-bg) 0%, var(--card) 150px);
     padding:clamp(22px,3.6vw,36px); margin:22px 0 0; box-shadow:var(--shadow); position:relative; overflow:hidden; }}
   .spot .ribbon {{ position:absolute; top:14px; right:-38px; transform:rotate(38deg);
     background:var(--accent); color:#fff; font-size:11px; font-weight:800; padding:5px 44px;
