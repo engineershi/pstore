@@ -9,13 +9,17 @@ but it raises the practical bar against brute force, flooding and CSRF.
 import hashlib
 import hmac
 import ipaddress
+import os
 import secrets
 import threading
 import time
 
-# Boot-time secrets — rotate on restart; never expose via API/logs.
-_OAUTH_SECRET = secrets.token_hex(32)
-HASH_SECRET = secrets.token_hex(32)
+# Signing secrets. Prefer durable values from the environment so HMAC-signed
+# links/tokens (unsubscribe, PDF gate, OAuth state) survive restarts and
+# redeploys; fall back to fresh random values only when unconfigured. Never
+# expose these via API/logs.
+_OAUTH_SECRET = os.environ.get("PSTORE_OAUTH_SECRET") or secrets.token_hex(32)
+HASH_SECRET = os.environ.get("PSTORE_HASH_SECRET") or secrets.token_hex(32)
 
 MAX_BODY = 64 * 1024        # reject bodies larger than this (413)
 MAX_URL = 4096              # reject request targets longer than this (414)
