@@ -135,10 +135,17 @@ def build_pdf():
         "pick: (1) hook and value, (2) social proof, (3) objections, (4) soft "
         "urgency, (5) follow-up and review request. Each email carries your tagged "
         "Amazon link.")
+    doc.paragraph(
+        "Email Studio (/admin/emails) is the one place to compose and send mail: "
+        "pick any niche, segment (hot/warm/cold/converted/inactive) or typed "
+        "address list, choose a sequence step, converted follow-up, re-engage or "
+        "a fully custom subject + body, then deliver now or schedule a slot (UTC). "
+        "A live preview shows exactly what lands in the inbox.")
     doc.bullets([
-        "On Emails (/admin/emails) choose the recipient selector: All ready (up to 50), First 5, First 10 or First 25.",
-        "Leave dry-run checked first to preview without sending real emails.",
-        "Add the free PDF ebook to the sequence to lift engagement.",
+        "Pick recipients with the checkboxes, or type any address(es) — one per line; the recipient count updates live.",
+        "Switches control the tracked affiliate link, open-tracking pixel, PDF attachment, dedup and sequence progress.",
+        "Dry-run first to preview the send counts without emailing anyone.",
+        "Auto-send runs the 5-step sequence to every ready subscriber on your chosen UTC hours; the Email Studio page shows the last run and lets you toggle it.",
     ])
     doc.page_break()
 
@@ -203,7 +210,7 @@ def render_admin_manual(nav_html, totop_html):
         a("/dashboard", "🧭 Dashboard", "everything"),
         a("/tool", "🛠 Workbench", "launch + funnel"),
         a("/keys", "🔑 Keys", "affiliate tag + endpoints"),
-        a("/admin/emails", "📧 Emails", "sequence + subscribers"),
+        a("/admin/emails", "📨 Email Studio", "compose + schedule"),
         a("/admin/cms", "🎨 Landing pages", "presets + toggles"),
         a("/admin/ebooks", "📕 Ebooks", "PDF lead magnet"),
         a("/admin/analytics", "📊 Analytics", "clicks + sources"),
@@ -365,10 +372,12 @@ def render_admin_manual(nav_html, totop_html):
 
 <h3 id="s4">7 · Step 4 — Send the 5-part buyer sequence</h3>
 <p>Every subscriber enters a 5-email sequence from the top pick: hook → social proof → objections → soft urgency → follow-up + review. Each carries your tagged Amazon link.</p>
+<p><a class="tooltag" href="/admin/emails">📨 Email Studio</a> is the one place to compose and send mail: pick any niche, segment (hot/warm/cold/converted/inactive) or a typed address list, choose a sequence step, converted follow-up, re-engage or a fully custom subject + body, then deliver <b>now</b> or <b>schedule a UTC slot</b>. A live preview shows exactly what lands in the inbox.</p>
 <ul class="step-list">
-<li>On <a class="tooltag" href="/admin/emails">📧 Emails</a> pick a recipient selector: All ready (up to 50), First 5, First 10 or First 25.</li>
-<li>Leave <b>dry-run</b> checked first to preview without sending.</li>
-<li>Add the free PDF ebook to the sequence to lift engagement.</li>
+<li>Pick recipients with the checkboxes, or type any address(es) — one per line; the count updates live.</li>
+<li>Switches control the <b>tracked link</b>, <b>open pixel</b>, <b>PDF attachment</b>, <b>dedup</b> and <b>sequence progress</b>.</li>
+<li><b>Dry-run</b> first to preview the counts without emailing anyone.</li>
+<li><b>Auto-send</b> runs the 5-step sequence to every ready subscriber on your chosen UTC hours; the Studio shows the last run and lets you toggle it on/off.</li>
 </ul>
 
 <h3 id="s5">8 · Step 5-6 — Ebook lead magnet + social posts + boosts</h3>
@@ -398,7 +407,7 @@ def render_admin_manual(nav_html, totop_html):
 <li><a class="tooltag" href="/tool">🛠 Workbench</a> → Launch marketing</li>
 <li><a class="tooltag" href="/admin/ebooks">📕 Ebooks</a> → generate the PDF</li>
 <li><a class="tooltag" href="/admin/social">📣 Social</a> → publish 1-2 platforms</li>
-<li><a class="tooltag" href="/admin/emails">📧 Emails</a> → dry-run → send first batch</li>
+<li><a class="tooltag" href="/admin/emails">📨 Email Studio</a> → dry-run → send first batch</li>
 <li><a class="tooltag" href="/admin/refresh">📡 Refresh</a> → confirm auto-refresh is on</li>
 <li>Paste text links / Markdown / QR anywhere relevant</li>
 </ul>

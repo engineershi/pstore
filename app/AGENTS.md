@@ -45,6 +45,21 @@ python3 -m unittest discover -s tests -v
 All tests are offline: they stub `amazon._urlopen` and keep `CACHE_TTL=0`,
 `MIN_INTERVAL=0`. After changing backend code run the full suite; keep it green.
 
+## Release checklist (every user-visible change)
+- Run the full suite from `/root/projects/mazon/app` before pushing; keep it green.
+- If URLs/pages/slugs change: regenerate and verify `sitemap.xml` covers the new
+  paths (any change to niches/lead pages re-renders it), then ping IndexNow
+  (`/api/indexnow` POST or the admin SEM page) so search engines re-crawl.
+- Update `manual.py` (admin manual + PDF) and this repo's own guide/info pages so
+  the docs match the shipped UI; rename tool labels everywhere they appear.
+- Commit + push `origin master`, deploy via the Render API, poll until `live`,
+  then live-verify the touched page/endpoint (admin login + HTTP checks).
+- Email features: verify a dry-run and a real send, plus the tracked `/e/` link,
+  open pixel and unsubscribe link, all signed with the durable
+  `PSTORE_HASH_SECRET`/`PSTORE_OAUTH_SECRET` env secrets (never per-boot randoms).
+- Save a dated note via `aimem note --project mazon` summarizing what shipped
+  and how to resume.
+
 ## Conventions
 - Stdlib only; no third-party imports.
 - `amazon.py` = keyless Amazon product data (search, autosuggest, scraper

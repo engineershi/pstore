@@ -575,11 +575,18 @@ class TestEmailSuite(unittest.TestCase):
         self.assertEqual(st, 200)
         self.assertTrue(ctype.startswith("text/html"))
         html = data.decode("utf-8", "replace")
-        self.assertIn("Send next batch", html)
-        self.assertIn("/api/sequence/send", html)
-        self.assertIn("page@example.com", html)
-        self.assertIn("Sequence preview", html)
-        self.assertIn("Email 1", html)
+        self.assertIn("Email Studio", html)
+        self.assertIn("Compose &amp; send", html)
+        self.assertIn("/api/mail", html)
+        self.assertIn("Sequence step", html)
+        self.assertIn("Custom email", html)
+        st, _, _, payload = self._raw("/api/mail", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        import json as _json
+        api = _json.loads(payload.decode("utf-8"))
+        self.assertIn("page@example.com", [s["email"] for s in api["subscribers"]])
+        self.assertIn("subscribers", api)
+        self.assertIn("outbox", api)
 
     def test_admin_ebooks_page_and_pdf(self):
         st, _, _, data = self._raw("/admin/ebooks?keyword=keto+snacks", cookie=self.cookie)
@@ -619,6 +626,121 @@ class TestEmailSuite(unittest.TestCase):
         self.assertIn("Highest-form", html)
         self.assertIn("Landing pages", html)
         self.assertIn("Style templates in one click", html)
+
+    def _studio(self, payload):
+        return self._raw("/api/mail", "POST", body=json.dumps(payload),
+                         headers={"Content-Type": "application/json"},
+                         cookie=self.cookie)
+
+    def test_studio_custom_send_to_typed_and_subscriber(self):
+        saved = (mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD)
+        mailer.SMTP_HOST = "smtp.test.local"
+        mailer.SMTP_USER = "u@example.com"
+        mailer.SMTP_PASSWORD = "pw"
+        try:
+            self._subscribe("stuser@example.com", keyword="keto snacks")
+            st, _, _, data = self._studio({
+                "action": "send",
+                "spec": {"type": "custom", "niche": "",
+                         "subject": "Studio test", "body": "Hi {{first_name}} — custom!"},
+                "options": {"tracked_links": False, "open_pixel": False,
+                            "attach_pdf": False, "dedup": False,
+                            "advance": False, "dry_run": False},
+                "recipients": {"sub_ids": [self._sub("stuser@example.com")["id"]],
+                               "emails": "typed@example.com\n"}})
+            self.assertEqual(st, 200)
+            p = json.loads(data)
+            self.assertTrue(p["ok"])
+            self.assertEqual(p["sent"], 2)
+            # typed one used default subject/body placeholders
+            typed = next(m for m in self.sent if m["to"] == "typed@example.com")
+            self.assertIn("custom!", typed["body"])
+            self.assertIn("Hi Typed", typed["body"])  # name derived from email local-part
+        finally:
+            mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD = saved
+
+    def test_studio_dry_run_counts_without_sending(self):
+        saved = (mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD)
+        mailer.SMTP_HOST = "smtp.test.local"
+        mailer.SMTP_USER = "u@example.com"
+        mailer.SMTP_PASSWORD = "pw"
+        try:
+            before = len(self.sent)
+            self._subscribe("dryrun@example.com", keyword="keto snacks")
+            st, _, _, data = self._studio({
+                "action": "send",
+                "spec": {"type": "sequence", "niche": "keto snacks", "step": 1},
+                "options": {"dry_run": True},
+                "recipients": {"sub_ids": [self._sub("dryrun@example.com")["id"]]}})
+            self.assertEqual(st, 200)
+            p = json.loads(data)
+            self.assertTrue(p["ok"])
+            self.assertTrue(p["dry_run"])
+            self.assertEqual(p["sent"], 1)
+            self.assertEqual(len(self.sent), before)
+            self.assertEqual(self._sub("dryrun@example.com")["sent_index"], 0)
+        finally:
+            mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD = saved
+
+    def test_studio_preview_builds_sequence_and_custom(self):
+        seq_st, _, _, seq_data = self._studio({
+            "action": "preview",
+            "spec": {"type": "sequence", "niche": "keto snacks", "step": 3}})
+        self.assertEqual(seq_st, 200)
+        seq = json.loads(seq_data)
+        self.assertTrue(seq["ok"])
+        self.assertEqual(seq["idx"], 3)
+        cust_st, _, _, cust_data = self._studio({
+            "action": "preview",
+            "spec": {"type": "custom", "subject": "S", "body": "B"}})
+        cust = json.loads(cust_data)
+        self.assertTrue(cust["ok"])
+        self.assertEqual(cust["subject"], "S")
+
+    def test_studio_schedule_and_cancel_outbox(self):
+        saved = (mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD)
+        mailer.SMTP_HOST = "smtp.test.local"
+        mailer.SMTP_USER = "u@example.com"
+        mailer.SMTP_PASSWORD = "pw"
+        try:
+            st, _, _, data = self._studio({
+                "action": "send",
+                "schedule_at": "2099-01-01T10:00",
+                "spec": {"type": "custom", "niche": "", "subject": "L", "body": "B"},
+                "options": {"dry_run": False},
+                "recipients": {"emails": "future@example.com"}})
+            self.assertEqual(st, 200)
+            p = json.loads(data)
+            self.assertTrue(p["scheduled"])
+            oid = p["outbox_id"]
+            st, _, _, data = self._raw("/api/mail", cookie=self.cookie)
+            self.assertEqual(st, 200)
+            rows = json.loads(data)["outbox"]
+            self.assertIn(oid, [r["id"] for r in rows])
+            cancel, _, _, cdata = self._studio({"action": "cancel", "id": oid})
+            self.assertEqual(cancel, 200)
+            self.assertTrue(json.loads(cdata)["ok"])
+            st, _, _, data = self._raw("/api/mail", cookie=self.cookie)
+            rows = json.loads(data)["outbox"]
+            self.assertEqual([r for r in rows if r["id"] == oid][0]["status"],
+                             "canceled")
+        finally:
+            mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD = saved
+
+    def test_studio_config_persists_hours(self):
+        st, _, _, data = self._studio(
+            {"action": "config", "hours": [9, 17], "enabled": True, "limit": 25})
+        self.assertEqual(st, 200)
+        self.assertTrue(json.loads(data)["ok"])
+        st, _, _, data = self._raw("/api/mail", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        cfg = json.loads(data)["config"]
+        self.assertEqual(cfg["hours"], [9, 17])
+        self.assertEqual(cfg["limit"], 25)
+
+    def test_studio_requires_admin(self):
+        st, _, _, _ = self._raw("/api/mail")
+        self.assertEqual(st, 401)
 
     def test_admin_manual_pdf_served(self):
         st, _, ctype, pdf = self._raw("/admin/manual.pdf", cookie=self.cookie)

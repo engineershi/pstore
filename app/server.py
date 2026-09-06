@@ -97,7 +97,25 @@ _AUTOSEND_HOURS = [int(h) for h in (os.environ.get("AUTOSEND_HOURS") or "").spli
 _AUTOSEND_LIMIT = int((os.environ.get("AUTOSEND_LIMIT") or "0") or 0) \
     or mailer.MAX_EMAILS_PER_RUN
 _AUTOSEND_LAST_KEY = "autosend.last"  # "YYYY-MM-DD:HH" marker so a slot runs once/day
+AUTOSEND_STATE_KEY = "autosend.state"  # json: {status,sent,last_run,last_status,next_run,errors}
 SOCIAL_PEAK_SLOTS = (8, 12, 19)  # high-engagement schedule hours (morning/lunch/evening)
+
+
+def _autosend_cfg():
+    """Effective autosend config: settings table overrides env defaults."""
+    raw_h = (_get_setting("autosend.hours") or "").strip()
+    raw_l = (_get_setting("autosend.limit") or "").strip()
+    raw_e = (_get_setting("autosend.enabled") or "").strip()
+    hours = [int(h) for h in (raw_h or ",".join(map(str, _AUTOSEND_HOURS))).split(",")
+             if h.strip().isdigit() and 0 <= int(h) <= 23]
+    limit = _AUTOSEND_LIMIT
+    try:
+        if raw_l:
+            limit = int(raw_l)
+    except Exception:
+        pass
+    enabled = (raw_e != "0") if raw_e or _AUTOSEND_HOURS else bool(hours)
+    return {"enabled": bool(enabled and hours), "hours": hours, "limit": max(limit, 0)}
 
 _TOTOP = ('<div class="totop"><a href="#top" aria-label="Back to top">&uarr;</a></div>'
           '<script src="/ui.js" defer></script>')
@@ -568,6 +586,17 @@ def _db():
                  "ON email_sends (campaign, subscriber_id, asin)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_email_sends_campaign "
                  "ON email_sends (campaign, subscriber_id)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS outbox (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        spec TEXT NOT NULL,
+        recipients TEXT NOT NULL,
+        scheduled_at TEXT,
+        status TEXT DEFAULT 'scheduled',
+        result TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        sent_at TEXT
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox (status, scheduled_at)")
     conn.execute("""CREATE TABLE IF NOT EXISTS clicks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         slug TEXT,
@@ -1272,7 +1301,7 @@ $("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
             ("Market",
              [("/admin/funnel", "⚙️ Funnel", "funnel", True),
               ("/admin/marketing", "📊 ROI", "marketing"),
-              ("/admin/emails", "📧 Emails", "emails"),
+              ("/admin/emails", "📨 Email Studio", "emails"),
               ("/admin/social", "📣 Social", "social"),
               ("/admin/variants", "⚗️ A/B", "variants"),
               ("/admin/segments", "🎚 Lead segments", "segments"),
@@ -1321,7 +1350,7 @@ $("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
         market_section = section("🚀 Market — channels & conversion", [
             btn("/admin/funnel", "⚙️ Real sales funnel", "data-backed stages"),
             btn("/admin/marketing", "📊 Marketing ROI", "email + social + traffic"),
-            btn("/admin/emails", "📧 Emails &amp; sequence", "capture → convert"),
+            btn("/admin/emails", "📨 Email Studio", "compose, switches & scheduling"),
             btn("/admin/social", "📣 Social publishing", "tracked posts"),
             btn("/admin/variants", "⚗️ A/B headline tests", "per-niche split test"),
             btn("/admin/segments", "🎚 Lead lifecycle segments", "hot / warm / cold"),
@@ -1368,8 +1397,9 @@ $("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
                            for e in ("/api/settings", "/api/niches", "/api/tools",
                                      "/api/tools/launch",
                                      "/api/mine", "/api/search", "/api/autosuggest",
-                                     "/api/indexnow", "/api/subscribers", "/api/sequence/send",
-                                     "/api/social", "/api/social/publish",
+"/api/indexnow", "/api/subscribers", "/api/sequence/send",
+                                      "/api/mail",
+                                      "/api/social", "/api/social/publish",
                                      "/api/sem", "/api/seo-audit"))
         body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1647,6 +1677,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._refresh_status()
             if path == "/api/subscribers":
                 return self._subscribers_json()
+            if path == "/api/mail":
+                return self._studio_api(q)
             if path == "/api/tools":
                 return self._tools(q)
             if path == "/api/boosts":
@@ -1708,6 +1740,9 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._indexnow_post()
             if parsed.path == "/api/sequence/send":
                 return self._sequence_send()
+            if parsed.path == "/api/mail":
+                return self._studio_api(
+                    {k: v[-1] for k, v in urllib.parse.parse_qs(parsed.query).items()})
             if parsed.path == "/api/social/publish":
                 return self._social_publish()
             if parsed.path == "/api/social/schedule":
@@ -6821,76 +6856,522 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}</s
             for m in seq)
         return cards
 
+    # ------------------------------------------------------------- email studio
+    def _studio_recipients(self, spec):
+        """Resolve a recipients spec into a deduped list of recipient dicts.
+        spec: {sub_ids:[int], emails:"a@b, c@d", selector:{niche, segment},
+               include_unconfirmed:bool} — sub_ids + selector + typed emails
+        are unioned; the same address is never included twice."""
+        sub_ids = spec.get("sub_ids") or []
+        emails = spec.get("emails") or ""
+        selector = spec.get("selector") or {}
+        include_unconfirmed = bool(spec.get("include_unconfirmed"))
+        out, seen = [], set()
+
+        def _push(email, kind, sid=0, kw="", fn=""):
+            e = (email or "").strip().lower()
+            if not e or not _EMAIL_RE.match(e) or e in seen:
+                return
+            seen.add(e)
+            out.append({"kind": kind, "id": int(sid or 0), "email": e,
+                        "keyword": (kw or "").strip(), "first_name": (fn or "").strip()})
+
+        kwf = (selector.get("niche") or "").strip().lower()
+        seg = (selector.get("segment") or "").strip()
+        ids = [int(x) for x in sub_ids if str(x or "").lstrip("-").isdigit()]
+        if ids:
+            with _lock:
+                conn = _db()
+                ph = ",".join("?" * len(ids))
+                sql = ("SELECT id,email,keyword,first_name,confirmed,unsubscribed "
+                       "FROM subscribers WHERE id IN (%s)" % ph)
+                if not include_unconfirmed:
+                    sql += " AND confirmed=1 AND unsubscribed=0"
+                for r in conn.execute(sql, ids):
+                    _push(r["email"], "sub", r["id"], r["keyword"], r["first_name"])
+                conn.close()
+        rows = []
+        if kwf or seg:
+            with _lock:
+                conn = _db()
+                sql = ("SELECT s.id, s.email, s.keyword, s.first_name, s.confirmed, s.unsubscribed, "
+                       "(SELECT COUNT(*) FROM email_events e WHERE e.subscriber_id=s.id AND e.type='open') AS opens, "
+                       "(SELECT COUNT(*) FROM clicks c WHERE c.source='email' AND c.referrer LIKE s.id || '|%') AS clicks, "
+                       "EXISTS(SELECT 1 FROM clicks c WHERE c.source='email' "
+                       " AND c.referrer LIKE s.id || '|%' AND c.asin!='') AS clicked_asin "
+                       "FROM subscribers s")
+                args = ()
+                if kwf:
+                    sql += " WHERE lower(s.keyword)=?"
+                    args = (kwf,)
+                rows = [dict(r) for r in conn.execute(sql, args)]
+                conn.close()
+            if seg:
+                rep = segments.build_report([dict(r) for r in rows])
+                members = rep["segments"].get(seg, [])
+            else:
+                members = rows
+            for m in members:
+                if (m.get("confirmed") or include_unconfirmed) and not m.get("unsubscribed"):
+                    _push(m.get("email"), "sub", m.get("id"), m.get("keyword") or "",
+                          m.get("first_name") or "")
+        for line in str(emails or "").splitlines():
+            for one in re.split(r"[;,\s]+", line):
+                if one.strip():
+                    _push(one, "custom")
+        return out
+
+    def _compose_recipient(self, spec, recip, ai_cache=None):
+        """Build the sendable {mail, asin, kw, idx, campaign, attachments,
+        converted} for ONE recipient from a compose spec, or None."""
+        t = spec.get("type") or "sequence"
+        kw = (spec.get("niche") or recip.get("keyword") or "").strip().lower()
+        items = []
+        if kw:
+            items = self._niche_items(kw)
+        idx = 99
+        if t == "sequence":
+            try:
+                idx = int(spec.get("step") or 1)
+            except (TypeError, ValueError):
+                idx = 1
+            idx = max(1, min(idx, mailer.SEQUENCE_LENGTH))
+            mail = mailer.next_email(kw, items, idx) if (kw and items) else None
+        elif t == "converted":
+            mail = market_engine.build_converted_followup(kw, items) if (kw and items) else None
+        elif t == "reengage":
+            act = segments.next_action("cold")
+            mail = {"subject": (act.get("subject_hint") or
+                                "Still thinking about the %s guide?" % kw),
+                    "body": ("Hi {{first_name}},\n\nNoticed you grabbed the %s guide but never "
+                             "opened it — maybe it landed in the wrong folder, or life got busy. "
+                             "No hard sell here; the two things people actually find useful:\n"
+                             "1. The %s cheat-sheet (free).\n2. One honest 'best pick' link when "
+                             "you're ready.\n\nStill here? Just reply and I'll resend the goodies "
+                             "— otherwise, no more email from me.\n\n— {{your_name}}") % (kw, kw)}
+        elif t == "custom":
+            subject = (spec.get("subject") or "").strip() or "From pstore"
+            body = (spec.get("body") or "").strip()
+            if not body:
+                return None
+            mail = {"subject": subject, "body": body}
+        else:
+            return None
+        if not mail or not (mail.get("body") or "").strip():
+            return None
+        if t in ("sequence", "converted") and kw and items:
+            key = (kw, idx, t == "converted")
+            ai_cache = ai_cache if ai_cache is not None else {}
+            if key not in ai_cache:
+                ai_cache[key] = market_engine._ai_copy(kw, items, "")
+            ai = ai_cache.get(key)
+            if ai and ai.get("subject") and ai.get("body"):
+                mail = {"subject": ai["subject"], "body": "Hi {{first_name}},\n\n" + ai["body"]}
+        pick = market_engine.pick_for_buyers(items) if items else None
+        asin = (pick or {}).get("asin") or ""
+        attachments = None
+        if spec.get("options", {}).get("attach_pdf") and kw:
+            try:
+                att = self._ebook_attachment(kw)
+                if att:
+                    attachments = [att]
+            except Exception:
+                attachments = None
+        return {"mail": mail, "asin": asin, "kw": kw, "idx": idx,
+                "campaign": "studio:%s:%s:%s" % (t, kw or "custom", idx),
+                "attachments": attachments, "converted": t == "converted"}
+
+    def _studio_preview(self, spec):
+        fake = {"kind": "custom", "id": 0, "email": "you@example.com",
+                "keyword": (spec.get("niche") or "").strip(), "first_name": "Jane"}
+        comp = self._compose_recipient(spec, fake, {})
+        if not comp:
+            return {"ok": False,
+                    "error": "Nothing to preview — pick a niche with products (sequence/converted) "
+                             "or fill the subject + body (custom)."}
+        opts = spec.get("options") or {}
+        link_url = mailer.tracked_url(comp["kw"], comp["asin"], 0, comp["idx"]) \
+            if (opts.get("tracked_links") and comp["asin"]) else ""
+        text = mailer.render_body(comp["mail"], to_name="Jane",
+                                  email="you@example.com", tracked_link=link_url)
+        return {"ok": True, "subject": comp["mail"]["subject"], "body": text,
+                "asin": comp["asin"], "idx": comp["idx"]}
+
+    def _dispatch_studio(self, spec, recipients, dry=False):
+        """Send a composed campaign to the given recipients (or count it when
+        dry). Returns {ok, sent, skipped, errors, recipients, dry_run}."""
+        opts = spec.get("options") or {}
+        dedup = bool(opts.get("dedup"))
+        tracked = bool(opts.get("tracked_links"))
+        pixel = bool(opts.get("open_pixel"))
+        advance = bool(opts.get("advance"))
+        ai_cache = {}
+        sent = skipped = errors = 0
+        for r in recipients:
+            comp = self._compose_recipient(spec, r, ai_cache)
+            if not comp:
+                skipped += 1
+                continue
+            cid = int(r.get("id") or 0)
+            if dedup and r.get("kind") == "sub" and cid and \
+                    self._already_sent(comp["campaign"], cid, comp["asin"]):
+                skipped += 1
+                continue
+            link_url = mailer.tracked_url(comp["kw"], comp["asin"], cid, comp["idx"]) \
+                if (tracked and comp["asin"]) else ""
+            pixel_url = mailer.open_pixel_url(comp["kw"], comp["asin"], cid, comp["idx"]) \
+                if pixel else ""
+            text = mailer.render_body(comp["mail"], to_name=r.get("first_name") or "",
+                                      email=r["email"], tracked_link=link_url)
+            ok = True
+            if not dry:
+                ok = mailer.send(comp["mail"]["subject"], text, r["email"],
+                                 attachments=comp["attachments"], pixel_url=pixel_url)
+            if ok:
+                sent += 1
+                if not dry and dedup and r.get("kind") == "sub" and cid:
+                    self._log_email_send(comp["campaign"], cid, comp["kw"], comp["asin"])
+                if not dry and advance and r.get("kind") == "sub" and cid:
+                    ni = mailer.SEQUENCE_LENGTH if comp["converted"] else comp["idx"]
+                    with _lock:
+                        conn = _db()
+                        conn.execute("UPDATE subscribers SET sent_index=? WHERE id=?", (ni, cid))
+                        conn.commit()
+                        conn.close()
+                if mailer.EMAIL_SEND_DELAY > 0:
+                    try:
+                        time.sleep(mailer.EMAIL_SEND_DELAY)
+                    except Exception:
+                        pass
+            else:
+                errors += 1
+        return {"ok": True, "sent": sent, "skipped": skipped, "errors": errors,
+                "recipients": len(recipients), "dry_run": bool(dry)}
+
+    def _studio_send(self, body):
+        spec = dict(body.get("spec") or {})
+        spec["options"] = dict(body.get("options") or {})
+        dry = bool(spec["options"].get("dry_run"))
+        if not mailer.configured():
+            return self._send(200, {"ok": False, "error": "SMTP is not configured.",
+                                    "sent": 0, "errors": 0, "recipients": 0, "dry_run": dry})
+        recipients = self._studio_recipients(body.get("recipients") or {})
+        if not recipients:
+            return self._send(200, {"ok": False, "error": "No valid recipients selected.",
+                                    "sent": 0, "errors": 0, "recipients": 0, "dry_run": dry})
+        schedule_at = (body.get("schedule_at") or "").strip()
+        if schedule_at and not dry:
+            normalized = schedule_at.replace("T", " ")
+            if len(normalized) == 16:
+                normalized += ":00"
+            with _lock:
+                conn = _db()
+                cur = conn.execute(
+                    "INSERT INTO outbox (spec, recipients, scheduled_at, status) "
+                    "VALUES (?,?,?,?)",
+                    (json.dumps(spec), json.dumps(recipients), normalized, "scheduled"))
+                conn.commit()
+                conn.close()
+            return self._send(200, {"ok": True, "scheduled": True,
+                                    "outbox_id": cur.lastrowid,
+                                    "recipients": len(recipients)})
+        res = self._dispatch_studio(spec, recipients, dry=dry)
+        return self._send(200, res)
+
+    def _studio_api(self, q):
+        if self.command == "GET":
+            with _lock:
+                conn = _db()
+                subs = [dict(r) for r in conn.execute(
+                    "SELECT id,email,keyword,first_name,confirmed,unsubscribed,"
+                    "sent_index,created_at FROM subscribers ORDER BY id DESC LIMIT 500")]
+                outbox = [dict(r) for r in conn.execute(
+                    "SELECT * FROM outbox ORDER BY id DESC LIMIT 60")]
+                sent_log = [dict(r) for r in conn.execute(
+                    "SELECT * FROM sent_emails ORDER BY id DESC LIMIT 60")]
+                oneoff_log = [dict(r) for r in conn.execute(
+                    "SELECT * FROM email_sends ORDER BY id DESC LIMIT 60")]
+                conn.close()
+            niches = [n["keyword"] for n in self._all_niches()]
+            live_kw = {n["keyword"].strip().lower() for n in self._all_niches()}
+            blocked = [dict(r) for r in subs if (r["confirmed"] and not r["unsubscribed"]
+                       and (r.get("keyword") or "").strip().lower() not in live_kw)]
+            seg_rep = self._segments_payload()
+            segmap = {str(m.get("id")): name
+                      for name, members in seg_rep["segments"].items()
+                      for m in members if m.get("id")}
+            state = None
+            raw_state = _get_setting(AUTOSEND_STATE_KEY)
+            if raw_state:
+                try:
+                    state = json.loads(raw_state)
+                except Exception:
+                    state = None
+            return self._send(200, {
+                "ok": True, "subscribers": subs, "niches": niches,
+                "segments": seg_rep["counts"], "segmap": segmap,
+                "outbox": outbox,
+                "sent_log": sent_log, "oneoff_log": oneoff_log, "blocked": blocked,
+                "config": _autosend_cfg(), "autosend_state": state,
+                "sequence_length": mailer.SEQUENCE_LENGTH,
+                "smtp_configured": mailer.configured(),
+                "smtp_host": mailer.SMTP_HOST or ""})
+        body = self._body()
+        action = (body.get("action") or "send").strip()
+        if action == "send":
+            return self._studio_send(body)
+        if action == "preview":
+            return self._send(200, self._studio_preview(body.get("spec") or {}))
+        if action == "config":
+            hours = body.get("hours")
+            enabled = body.get("enabled")
+            limit = body.get("limit")
+            if hours is not None:
+                if isinstance(hours, (list, tuple)):
+                    raw = [str(h) for h in hours]
+                else:
+                    raw = re.split(r"[,\s]+", str(hours))
+                cleaned = sorted(set(int(h) for h in raw
+                                     if str(h).strip().lstrip("-").isdigit()
+                                     and 0 <= int(h) <= 23))
+                _set_setting("autosend.hours", ",".join(map(str, cleaned)))
+            if enabled is not None:
+                _set_setting("autosend.enabled",
+                             "1" if str(enabled) in ("1", "true", "on") else "0")
+            if limit is not None:
+                try:
+                    _set_setting("autosend.limit", str(max(int(limit), 0)))
+                except (TypeError, ValueError):
+                    pass
+            return self._send(200, {"ok": True, "config": _autosend_cfg()})
+        if action == "cancel":
+            try:
+                oid = int(body.get("id") or 0)
+            except (TypeError, ValueError):
+                oid = 0
+            with _lock:
+                conn = _db()
+                conn.execute("UPDATE outbox SET status='canceled' "
+                             "WHERE id=? AND status IN ('scheduled','sending')", (oid,))
+                conn.commit()
+                conn.close()
+            return self._send(200, {"ok": True})
+        return self._send(400, {"ok": False, "error": "unknown action"})
+
     def _admin_emails(self, q):
-        with _lock:
-            conn = _db()
-            stats = self._subs_stats(conn)
-            rows = conn.execute("SELECT * FROM subscribers ORDER BY id DESC LIMIT 200").fetchall()
-            conn.close()
-        niches = [n["keyword"] for n in self._all_niches()]
-        seq_kw = (q.get("keyword") or [""])[0].strip() or (niches[0] if niches else "")
-        seq_html = self._email_sequence_preview(seq_kw) if seq_kw else \
-            '<p class="hint">No saved niches yet — mine one on the dashboard to preview the sequence.</p>'
-        opts = "".join('<option value="%s"%s>%s</option>' % (urllib.parse.quote(k),
-                        ' selected' if k == seq_kw else "", seo._clean(k)) for k in niches)
-        smtp_state = ("Configured · %s" % seo._clean(mailer.SMTP_HOST)) if mailer.configured() \
-            else ("<b>Not configured.</b> Set SMTP_HOST, SMTP_USER, SMTP_PASSWORD (and optionally "
-                  "SMTP_PORT / SMTP_FROM / SMTP_STARTTLS) in the environment to actually send.")
-        body = f"""<!DOCTYPE html>
+        nav = self._admin_nav('emails')
+        page = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Emails — pstore</title><link rel="stylesheet" href="/style.css">
+<title>Email Studio — pstore</title><link rel="stylesheet" href="/style.css">
 <meta name="robots" content="noindex,nofollow">
+<style>
+.studiox{display:grid;grid-template-columns:1fr;gap:18px}
+.pillrow{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 12px}
+.pill{border:1.5px solid var(--line,#eee);background:#fff;border-radius:999px;padding:7px 13px;font-size:13px;cursor:pointer}
+.pill b{color:var(--accent,#ff6b2c)}
+.pill.on{background:var(--accent,#ff6b2c);border-color:var(--accent,#ff6b2c);color:#fff}
+.pill.on b{color:#fff}
+.subchip{display:flex;align-items:center;gap:8px;border:1.5px solid var(--line,#eee);border-radius:12px;padding:8px 11px;font-size:13px;background:#fff;margin:4px 0}
+.subchip input{width:auto;height:auto}
+.subchip .mail{font-weight:600;font-size:13px}
+.subchip .kw{color:var(--muted,#888);font-size:11.5px}
+.subchip .st{margin-left:auto;font-size:11px;color:var(--muted,#888)}
+.chipsrow{max-height:240px;overflow:auto;border:1px solid var(--line,#eee);border-radius:14px;padding:8px 10px}
+.switch{position:relative;display:inline-flex;align-items:center;gap:9px;cursor:pointer;font-size:13.5px}
+.switch input{position:absolute;opacity:0;width:0;height:0}
+.switch .trk{display:inline-block;width:38px;height:21px;background:#ccc;border-radius:999px;transition:.18s;position:relative;flex:none}
+.switch .trk:after{content:"";position:absolute;top:2px;left:2px;width:17px;height:17px;background:#fff;border-radius:50%;transition:.18s;box-shadow:0 1px 3px rgba(0,0,0,.25)}
+.switch input:checked+.trk{background:var(--accent,#ff6b2c)}
+.switch input:checked+.trk:after{left:19px}
+.optgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px 18px;margin-top:8px}
+.hourgrid{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.hourgap{border:1.5px solid #ddd;border-radius:9px;font-size:11.5px;padding:5px 8px;cursor:pointer;background:#fff;min-width:44px;text-align:center}
+.hourgap.on{background:var(--accent2,#7c5cff);border-color:var(--accent2,#7c5cff);color:#fff}
+.sec-tag{font-size:11.5px;font-weight:800;letter-spacing:.6px;color:var(--muted,#888);text-transform:uppercase;margin:2px 0 8px}
+.compose-box{border:1.5px dashed var(--line,#eee);border-radius:16px;padding:16px;margin-top:12px}
+pre.preview{white-space:pre-wrap;word-break:break-word;background:#fbf7ef;border:1px solid var(--line,#eee);border-radius:12px;padding:12px;font-size:13px;margin-top:8px}
+.netmsg{font-weight:600}
+.tmpls{display:flex;flex-wrap:wrap;gap:8px}
+.tmpls label{border:1.5px solid var(--line,#eee);border-radius:12px;padding:8px 12px;font-size:13px;cursor:pointer;display:flex;gap:7px;align-items:center;background:#fff}
+.tmpls input{width:auto;height:auto}
+.tmpls label.on{border-color:var(--accent,#ff6b2c);background:#fff5ee}
+.bigbtn{width:100%;padding:14px;font-size:16px;font-weight:800;border-radius:14px;border:0;background:linear-gradient(135deg,#ff6b2c,#ff873c);color:#fff;cursor:pointer}
+.bigbtn:disabled{opacity:.55;cursor:wait}
+fieldset{border:1.5px solid var(--line,#eee);border-radius:16px;padding:14px 16px;margin:0}
+legend{font-weight:800;font-size:13px;padding:0 8px;color:var(--accent,#ff6b2c)}
+.whenrow{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.bump{background:#fff0e6;border:1.5px solid #ffd2b8;color:#a4421a;border-radius:12px;padding:9px 12px;font-size:12.5px;margin-bottom:12px}
+</style>
 </head><body>
 <header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
-<div class="hero"><h1>Email <span>capture &amp; auto-send.</span></h1>
-<p class="tagline">The opt-in widget on every niche page feeds this list. Send the next email in the 5-step buyer sequence to active subscribers.</p></div>
-{self._admin_nav('emails')}
+<div class="hero"><h1>Email <span>Studio.</span></h1>
+<p class="tagline">Compose once — send to one subscriber, a segment, or any address list, now or on a schedule. Every link is signed, tracked and unsubscribable.</p></div>
+__NAV__
 </header>
-<main>
- <section class="card"><h2>📨 Sender status</h2>
- <p class="hint" style="margin-top:-4px">{smtp_state}</p>
- <div class="row">
-   <label>Recipients
-     <select id="count">
-       <option value="0" selected>All ready (up to {mailer.MAX_EMAILS_PER_RUN} per run)</option>
-       <option value="5">First 5</option>
-       <option value="10">First 10</option>
-       <option value="25">First 25</option>
-     </select>
-   </label>
-   <button id="send" class="warm">Send next batch</button>
-   <label style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="dry" style="width:auto;height:auto" checked> dry run</label>
- </div>
- <p id="out" class="msg"></p></section>
- <section class="card"><h2>👥 Subscribers</h2>
- <p class="hint">{stats['total']} total · {stats['active']} active · {stats['unsubscribed']} unsubscribed · {stats['emails_sent']} emails sent</p>
- <div class="table-wrap"><table class="plain"><thead><tr><th>Email</th><th>Niche</th><th>Sequence</th><th>State</th><th>Joined</th></tr></thead>
- <tbody>{self._subs_table(rows)}</tbody></table></div></section>
-<section class="card"><h2>💌 Sequence preview</h2>
-<form class="row" method="get" action="/admin/emails">
-  <label>Niche <select name="keyword" onchange="this.form.submit()">{opts}</select></label>
-</form>
-{seq_html}</section>
+<main class="studiox">
+ <section class="card"><h2>🕹 Sender &amp; auto-schedule</h2>
+  <div class="row">
+   <div class="feature"><h3 id="smtp-state">…</h3><p class="hint">SMTP</p></div>
+   <div class="feature"><h3 id="as-hrs">—</h3><p class="hint">daily send hours (UTC)</p></div>
+   <div class="feature"><h3 id="as-last">never</h3><p class="hint">last auto-send</p></div>
+  </div>
+  <div class="row">
+   <label style="flex-direction:row;align-items:center;gap:8px" class="switch">
+     <input type="checkbox" id="as-on"><span class="trk"></span> Auto-send enabled</label>
+   <label>Per-run cap
+     <input id="as-limit" type="number" min="0" value="50" style="width:90px"></label>
+   <button id="as-save" class="warm">Save schedule config</button>
+   <span id="as-msg" class="msg"></span>
+  </div>
+  <p class="sec-tag">Pick the UTC hour chips the 5-step sequence auto-sends on</p>
+  <div class="hourgrid" id="hourchips"></div>
+ </section>
+
+ <section class="card"><h2>✍️ Compose &amp; send</h2>
+
+  <fieldset><legend>1 · Who gets it</legend>
+   <div class="row">
+     <label>Niche filter
+       <select id="f-niche"><option value="">All niches</option></select></label>
+     <label>Segment filter
+       <select id="f-seg">
+         <option value="">All active</option>
+         <option value="hot">🔥 Hot — opened + clicked</option>
+         <option value="warm">🌤 Warm — opened</option>
+         <option value="cold">🧊 Cold — no engagement</option>
+         <option value="converted">✅ Converted — clicked a product</option>
+         <option value="inactive">⛔ Inactive</option>
+       </select></label>
+     <label>Search
+       <input id="f-q" type="search" placeholder="filter by email…" style="min-width:200px"></label>
+   </div>
+   <div class="row">
+     <button id="selall" class="btn ghost">☑ Select all shown</button>
+     <button id="selnone" class="btn ghost">☐ Clear selection</button>
+     <label class="switch" style="margin-left:auto"><input type="checkbox" id="o-unconf"><span class="trk"></span> show unconfirmed</label>
+   </div>
+   <div id="subs-wrap" class="chipsrow"></div>
+   <label style="margin-top:10px;display:block">Or any address(es) — one per line
+     <textarea id="f-raw" rows="3" placeholder="anyone@gmail.com&#10;another@proton.me" style="width:100%"></textarea></label>
+   <p class="netmsg" id="rcount" style="margin-top:8px">0 recipients selected</p>
+  </fieldset>
+
+  <fieldset style="margin-top:14px"><legend>2 · What to send</legend>
+   <div class="tmpls" id="tmpls">
+     <label class="on"><input type="radio" name="tmpl" value="sequence" checked> Sequence step</label>
+     <label><input type="radio" name="tmpl" value="converted"> Converted follow-up</label>
+     <label><input type="radio" name="tmpl" value="reengage"> Re-engage cold</label>
+     <label><input type="radio" name="tmpl" value="custom"> Custom email</label>
+   </div>
+   <div class="row" id="seq-opts" style="margin-top:10px">
+     <label>Niche
+       <select id="c-niche"></select></label>
+     <label>Step
+       <select id="c-step">
+         <option value="1">1 · Hook + lead magnet</option>
+         <option value="2">2 · Proof &amp; pain points</option>
+         <option value="3">3 · Best picks</option>
+         <option value="4">4 · Urgency (price/countdown)</option>
+         <option value="5">5 · Follow-up + review ask</option>
+       </select></label>
+   </div>
+   <div id="cust-opts" style="display:none" class="compose-box">
+     <label style="display:block">Subject (uses <code>{{first_name}}</code> / <code>{{your_name}}</code>)
+       <input id="c-subj" type="text" placeholder="Your subject line…" style="width:100%"></label>
+     <label style="display:block;margin-top:8px">Body (plain text, placeholders supported)
+       <textarea id="c-body" rows="7" placeholder="Hi {{first_name}},&#10;&#10;…&#10;&#10;— {{your_name}}" style="width:100%"></textarea></label>
+   </div>
+   <p class="sec-tag" style="margin-top:12px">Live preview</p>
+   <pre class="preview" id="prevbox">Pick a template to preview.</pre>
+  </fieldset>
+
+  <fieldset style="margin-top:14px"><legend>3 · Delivery options</legend>
+   <div class="optgrid">
+     <label class="switch"><input type="checkbox" id="o-tl" checked><span class="trk"></span> Tracked affiliate link</label>
+     <label class="switch"><input type="checkbox" id="o-px" checked><span class="trk"></span> Open-tracking pixel</label>
+     <label class="switch"><input type="checkbox" id="o-pdf"><span class="trk"></span> Attach lead-magnet PDF</label>
+     <label class="switch"><input type="checkbox" id="o-dd"><span class="trk"></span> Dedup (never re-send same campaign)</label>
+     <label class="switch"><input type="checkbox" id="o-adv" checked><span class="trk"></span> Count toward sequence progress</label>
+     <label class="switch"><input type="checkbox" id="o-dry"><span class="trk"></span> Dry run — nothing actually sent</label>
+   </div>
+  </fieldset>
+
+  <div class="whenrow">
+   <label class="switch"><input type="radio" name="when" value="now" checked onchange="onWhen()"><span class="trk"></span> Send now</label>
+   <label class="switch"><input type="radio" name="when" value="sched" onchange="onWhen()"><span class="trk"></span> Schedule</label>
+   <input type="datetime-local" id="w-dt" style="display:none">
+   <span class="hint" id="dt-hint" style="display:none">times are UTC</span>
+  </div>
+  <div class="row" style="margin-top:12px">
+   <button class="bigbtn" id="bigbtn" disabled>Loading…</button>
+  </div>
+  <p id="outmsg" class="netmsg" style="margin-top:10px"></p>
+ </section>
+
+ <section class="card"><h2>🗓 Scheduled sends</h2>
+  <div class="table-wrap"><table class="plain">
+   <thead><tr><th>#</th><th class="ct">When (UTC)</th><th class="ct">To</th><th>Status</th><th>Result</th><th></th></tr></thead>
+   <tbody id="outbox-body"><tr><td colspan="6" class="hint">Loading…</td></tr></tbody></table></div>
+ </section>
+
+ <section class="card"><h2>🕘 Recent activity</h2>
+  <div id="blocked-wrap"></div>
+  <div class="table-wrap"><table class="plain">
+   <thead><tr><th>When</th><th>Kind</th><th>Subject / campaign</th><th>To</th></tr></thead>
+   <tbody id="log-body"><tr><td colspan="4" class="hint">Loading…</td></tr></tbody></table></div>
+ </section>
 </main>
-<footer><p>Emails greet each reader by name — <code>{{first_name}}</code> uses the captured name (or one derived from their email), and <code>{{your_name}}</code> signs as “{seo._clean(mailer.STORE_NAME)}” (set <code>PSTORE_NAME</code> to change it). Only real scraped data, and every email carries an unsubscribe link.</p></footer>
-<script src="/table-flow.js" defer></script>
-{_TOTOP}
+<footer><p>Times are UTC. Every email carries a signed unsubscribe link and List-Unsubscribe header; tracked links go through <code>/e/</code> and record source=email clicks.</p></footer>
+__TOTOP__
 <script>
-function $(id){{return document.getElementById(id);}}
-$("send").onclick = async () => {{
-  $("out").textContent = "Working…";
-  const r = await fetch("/api/sequence/send", {{method:"POST", headers:{{"Content-Type":"application/json"}},
-    body: JSON.stringify({{dry_run: $("dry").checked, limit: parseInt($("count").value || "0", 10)}})}});
-  const d = await r.json().catch(()=>({{ok:false, error:"bad response"}}));
-  if (d && d.ok) {{
-    if (d.dry_run) $("out").textContent = "Dry run: " + d.ready + " subscriber(s) ready for the next email (limit " + (d.limit||d.ready) + ").";
-    else $("out").textContent = "Sent " + d.sent + " · skipped " + d.skipped + " · errors " + d.errors + " · (ready " + d.ready + ").";
-  }} else $("out").textContent = (d && d.error) || "Send failed.";
-  setTimeout(()=>location.reload(), 1500);
-}};
+const $=id=>document.getElementById(id);
+let DATA=null, SEL=new Set(), EM="", FILT={niche:"",seg:"",q:""};
+let lastSeq=null; // {keyword,step} cache key for preview
+function esc(s){return (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+function tmpl(){const t=document.querySelector('input[name="tmpl"]:checked');return t?t.value:"sequence";}
+function opts(){return {tracked_links:$("o-tl").checked,open_pixel:$("o-px").checked,attach_pdf:$("o-pdf").checked,dedup:$("o-dd").checked,advance:$("o-adv").checked,dry_run:$("o-dry").checked};}
+function spec(){const t=tmpl();return {type:t,niche:(t==="custom")?"":$("c-niche").value,step:parseInt($("c-step").value||"1",10),subject:$("c-subj").value,body:$("c-body").value};}
+function recSpec(){const raw=($("f-raw").value||"").split("\\n").map(s=>s.trim()).filter(Boolean).join("\\n");return {sub_ids:[...SEL].map(Number),emails:raw||"",selector:{},include_unconfirmed:$("o-unconf").checked};}
+function visibleSubs(){const q=FILT.q.toLowerCase();return (DATA.subscribers||[]).filter(s=>{if(FILT.niche&&(s.keyword||"").toLowerCase()!==FILT.niche.toLowerCase())return false;if(FILT.seg&&(DATA.segmap||{})[String(s.id)]!==FILT.seg)return false;if(!$("o-unconf").checked&&(!s.confirmed||s.unsubscribed))return false;if(q&&!(s.email||"").toLowerCase().includes(q))return false;return true;});}
+function renderSubs(){const list=visibleSubs();$("subs-wrap").innerHTML=list.length?list.map(s=>`<label class="subchip"><input type="checkbox" data-id="${s.id}" ${SEL.has(s.id)?"checked":""} onchange="onChip(${s.id},this.checked)"><span><span class="mail">${esc(s.email)}</span><br><span class="kw">${esc(s.keyword||"—")}</span></span><span class="st">${s.unsubscribed?"unsubscribed":(!s.confirmed?"unconfirmed":"step "+(s.sent_index||0)+"/"+(DATA.sequence_length||5))}</span></label>`).join(""):`<p class="hint">No subscribers match.</p>`;count();}
+function onChip(id,on){if(on)SEL.add(id);else SEL.delete(id);count();}
+function count(){const n=SEL.size+ (($("f-raw").value||"").split("\\n").map(s=>s.trim()).filter(Boolean).length);$("rcount").textContent=`${n} recipient${n===1?"":"s"} selected (${SEL.size} subscriber${SEL.size===1?"":"s"}${($("f-raw").value||"").trim()?" + typed addresses":""})`;updBtn();}
+function updBtn(){const dry=$("o-dry").checked,when=document.querySelector('input[name="when"]:checked').value;const n=SEL.size+$("f-raw").value.trim()?1:0;$("bigbtn").textContent=dry?"👁 Preview sending (nobody is emailed)":(when==="sched"?"📅 Schedule this send":"📨 Send now");$("bigbtn").disabled=false;}
+function onWhen(){const sched=document.querySelector('input[name="when"]:checked').value==="sched";$("w-dt").style.display=sched?"":"none";$("dt-hint").style.display=sched?"":"none";updBtn();}
+function fillNiches(keep){const sel=DATA.niches||[];const cur=keep||$("c-niche").value;for(const el of [$("f-niche"),$("c-niche")]){el.innerHTML=`<option value="">${el.id==="f-niche"?"All niches":"No niche (custom only)"}</option>`+sel.map(k=>`<option value="${esc(k)}">${esc(k)}</option>`).join("");}if(cur)$("c-niche").value=cur;}
+function fillSegs(){if(!DATA)return;const c=DATA.segments||{};const map={"hot":c.hot||0,"warm":c.warm||0,"cold":c.cold||0,"converted":c.converted||0,"inactive":c.inactive||0};const sel=$("f-seg");for(const o of sel.options){if(o.value&&map[o.value]!==undefined)o.textContent=o.value==="inactive"?"⛔ Inactive ("+map[o.value]+")":o.textContent.split("(")[0].trim()+" ("+map[o.value]+")";}}
+function renderNow(){const n=DATA.niches||[];$("smtp-state").textContent=DATA.smtp_configured?"✅ "+DATA.smtp_host:"✱ SMTP not configured";const cfg=DATA.config;const hours=cfg.hours||[];$("as-hrs").textContent=hours.length?hours.join(","):"off";$("as-on").checked=cfg.enabled;fillHourChips(hours);const st=DATA.autosend_state;$("as-last").textContent=(st&&st.last_run?st.status+" @"+st.last_run+(st.sent?" ("+st.sent+" sent)":"")):"never ran";$("as-limit").value=cfg.limit;fillHourChips(hours);}
+function fillHourChips(hours){const hset=new Set(hours);$("hourchips").innerHTML=Array.from({length:24},(_,h)=>`<span class="hourgap ${hset.has(h)?"on":""}" data-h="${h}" onclick="togHour(${h})">${String(h).padStart(2,"0")}</span>`).join("");}
+function togHour(h){const el=document.querySelector(`[data-h='${h}']`);el.classList.toggle("on");}
+function saveCfg(){const hours=[...document.querySelectorAll(".hourgap.on")].map(e=>+e.dataset.h);fetch("/api/mail",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"config",hours,hours,enabled:$("as-on").checked,limit:$("as-limit").value})}).then(r=>r.json()).then(d=>{$("as-msg").textContent="Saved — "+(d.config.hours.length?"sends at "+d.config.hours.join(", ")+" UTC":"autosend off")+". Adjust the sender interval next tick.";setTimeout(()=>$("as-msg").textContent="",4000);});}
+async function preview(){const p=await fetch("/api/mail",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"preview",spec:spec()})});const d=await p.json();$("prevbox").textContent=d.ok?`Subject: ${esc(d.subject)}\n\n${d.body}\n\n── preview (tracked link ${d.asin?"on":""})`:"⚠ "+d.error;}
+function onSpec(){preview();}
+function onCust(){const c=tmpl()==="custom";$("cust-opts").style.display=c?"":"none";if(c)onSpec();}
+function renderOutbox(){const rows=DATA.outbox||[];$("outbox-body").innerHTML=rows.length?rows.map(o=>{let res="";try{const r=JSON.parse(o.result||"null");if(r)res=`${r.recipients??""} → sent ${r.sent??0} / err ${r.errors??0}`;}catch(e){}return `<tr><td>${o.id}</td><td class="ct">${esc(o.scheduled_at||"now")}</td><td class="ct">${(o.recipients?JSON.parse(o.recipients).length:"0")}</td><td><span class="badge">${esc(o.status)}</span></td><td>${esc(res||(o.result||""))}</td><td>${o.status==="scheduled"||o.status==="sending"?`<button class="btn ghost" onclick="cancel(${o.id})">Cancel</button>`:""}</td></tr>`;}).join(""):'<tr><td colspan="6" class="hint">Nothing scheduled.</td></tr>';}
+function cancel(id){fetch("/api/mail",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"cancel",id})}).then(r=>r.json()).then(()=>load());}
+function renderLog(){const rows=[];for(const s of (DATA.sent_log||[]))rows.push([s.sent_at,"seq "+s.email_index,s.subject,"sub #"+s.subscriber_id]);for(const o of (DATA.oneoff_log||[]))rows.push([o.sent_at,"one-off",o.campaign,o.keyword+" → sub #"+o.subscriber_id]);$("log-body").innerHTML=rows.slice(0,40).map(r=>`<tr><td>${esc(r[0])}</td><td>${r[1]}</td><td>${esc(r[2])}</td><td>${esc(r[3])}</td></tr>`).join("")||'<tr><td colspan="4" class="hint">No sends yet.</td></tr>';}
+function renderBlocked(){const b=DATA.blocked||[];if(!b.length){$("blocked-wrap").innerHTML="";return;}$("blocked-wrap").innerHTML=`<div class="bump">⚠ ${b.length} active subscriber(s) never receive sequence mail because their niche isn't saved with products: ${b.map(s=>esc(s.email)+" ("+esc(s.keyword)+")").join(" · ")}. Mine that keyword on the dashboard, or send them a custom email right here.</div>`;}
+function renderAll(){renderNow();renderSubs();renderOutbox();renderLog();renderBlocked();fillNiches();fillSegs();count();}
+async function sendIt(){const pay={action:"send",spec:spec(),options:opts(),recipients:recSpec()};const when=document.querySelector('input[name="when"]:checked').value;let dt="";if(when==="sched"){dt=$("w-dt").value;if(!dt){alert("Pick a schedule time first.");return;}pay.schedule_at=dt;}const btn=$("bigbtn");btn.disabled=true;$("outmsg").textContent="Working…";const r=await fetch("/api/mail",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(pay)});const d=await r.json();if(d.scheduled){$("outmsg").textContent=`📅 Scheduled #${d.outbox_id} — ${d.recipients} recipient(s) at ${dt} UTC.`;}else if(d.error){$("outmsg").textContent="✗ "+d.error;}else if(d.dry_run){$("outmsg").textContent=`👁 Dry run: ${d.sent} ready · ${d.skipped} skipped · ${d.errors} errors · of ${d.recipients} recipient(s).`;}else{$("outmsg").textContent=`📨 Sent ${d.sent} · skipped ${d.skipped} · errors ${d.errors} · of ${d.recipients}.`;}load();setTimeout(()=>{btn.disabled=false;updBtn();},700);}
+document.addEventListener("DOMContentLoaded",async()=>{const r=await fetch("/api/mail");DATA=await r.json();renderAll();
+$("f-niche").addEventListener("change",e=>{FILT.niche=e.target.value;renderSubs();});
+$("f-seg").addEventListener("change",e=>{FILT.seg=e.target.value;renderSubs();});
+$("f-q").addEventListener("input",e=>{FILT.q=e.target.value;renderSubs();});
+$("f-raw").addEventListener("input",count);
+$("o-unconf").addEventListener("change",renderSubs);
+$("selall").addEventListener("click",()=>{visibleSubs().forEach(s=>SEL.add(s.id));renderSubs();});
+$("selnone").addEventListener("click",()=>{SEL.clear();renderSubs();});
+$("c-niche").addEventListener("change",onSpec);
+$("c-step").addEventListener("change",onSpec);
+$("c-subj").addEventListener("input",onSpec);
+$("c-body").addEventListener("input",onSpec);
+for(const l of document.querySelectorAll(".tmpls label"))l.addEventListener("click",()=>{document.querySelectorAll(".tmpls label").forEach(x=>x.classList.remove("on"));l.classList.add("on");onCust();});
+$("as-save").addEventListener("click",saveCfg);
+$("bigbtn").addEventListener("click",sendIt);});
 </script>
 </body></html>"""
-        return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
+        page = page.replace("__NAV__", nav).replace("__TOTOP__", _TOTOP)
+        return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
 
     def _ebook_for(self, keyword):
         keyword = (keyword or "").strip()
@@ -7674,8 +8155,9 @@ $$(".card[data-captions]").forEach(function(card){{
 
 
 class _AutosendStub:
-    """Duck-typed stand-in for Handler so _sequence_send can run headless,
-    without an HTTP request, from the in-process scheduler thread."""
+    """Duck-typed stand-in for Handler so headless scheduler threads can call
+    instance helpers without an HTTP request."""
+    _OUTPUT = None  # suppress no-send edge
 
     def _body(self):
         return {}
@@ -7683,31 +8165,59 @@ class _AutosendStub:
     def _send(self, code, payload, _ctype=None):
         return {"status": code, "payload": payload}
 
+    def _subscriber_segment(self, sid):
+        return Handler._subscriber_segment(self, sid)
+
+    def _ebook_attachment(self, kw):
+        return Handler._ebook_attachment(self, kw)
+
+    def _subject_for(self, kw, idx, sid, default_subject):
+        return Handler._subject_for(self, kw, idx, sid, default_subject)
+
+    def _already_sent(self, campaign, sid, asin=""):
+        return Handler._already_sent(self, campaign, sid, asin)
+
+    def _log_email_send(self, campaign, sid, kw="", asin=""):
+        Handler._log_email_send(self, campaign, sid, kw, asin)
+
+    def _dispatch_studio(self, spec, recipients, dry=False):
+        return Handler._dispatch_studio(self, spec, recipients, dry)
+
 
 def _autosend_tick():
-    """Run the sequence send now IF (a) the current UTC hour is scheduled and
-    (b) this date/hour slot hasn't already run. Returns a short status string.
-
-    Env-gated (AUTOSEND_HOURS empty = disabled), so offline tests and local
-    dev are never affected. Idempotent even after a process restart: the last
-    slot is persisted in the settings table, not just in memory."""
+    """Run the sequence send now IF (a) enabled and (b) current UTC hour is
+    scheduled and (c) this date/hour slot hasn't already run. Persists state
+    into settings so the email studio page can display last-run status."""
     import datetime as _dt
-    now = _dt.datetime.utcnow()
-    if _dt.datetime.utcnow().hour not in _AUTOSEND_HOURS:
+    cfg = _autosend_cfg()
+    if not cfg["enabled"]:
+        _set_setting(AUTOSEND_STATE_KEY, json.dumps({
+            "status": "disabled", "hours": cfg["hours"], "limit": cfg["limit"]}))
         return "idle"
-    marker = "%s:%02d" % (now.strftime("%Y-%m-%d"), now.hour)
-    last = _get_setting(_AUTOSEND_LAST_KEY) or ""  # _get_setting locks internally
+    now = _dt.datetime.utcnow()
+    hour = now.hour
+    if hour not in cfg["hours"]:
+        return "idle"
+    marker = "%s:%02d" % (now.strftime("%Y-%m-%d"), hour)
+    last = _get_setting(_AUTOSEND_LAST_KEY) or ""
     if last == marker:
         return "done"
     stub = _AutosendStub()
     try:
-        limit = _AUTOSEND_LIMIT
         res = Handler._sequence_send(stub)
         ok = bool(res and isinstance(res, dict)
                   and (res.get("payload") or {}).get("ok"))
+        sent = (res or {}).get("payload", {}).get("sent") or 0
+        errors = (res or {}).get("payload", {}).get("errors") or 0
     except Exception as exc:  # never let the scheduler die on one bad run
+        _set_setting(AUTOSEND_STATE_KEY, json.dumps({
+            "status": "error", "error": str(exc)[:200], "hours": cfg["hours"],
+            "limit": cfg["limit"]}))
         return "error: %s" % exc
-    _set_setting(_AUTOSEND_LAST_KEY, marker)  # locks internally
+    _set_setting(_AUTOSEND_LAST_KEY, marker)
+    _set_setting(AUTOSEND_STATE_KEY, json.dumps({
+        "status": "sent" if ok else "fail", "sent": sent, "errors": errors,
+        "hours": cfg["hours"], "limit": cfg["limit"], "last_run": marker}))
     return "sent" if ok else "fail"
 
 
@@ -7718,6 +8228,48 @@ def _autosend_loop():
         except Exception:
             pass
         time.sleep(1800)  # check twice hourly so transient misses still catch the slot
+
+
+def _fire_outbox_rows():
+    """Send any outbox rows whose scheduled_at is in the past."""
+    import datetime as _dt
+    with _lock:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT * FROM outbox WHERE status='scheduled' "
+            "AND (scheduled_at IS NULL OR scheduled_at <= datetime('now'))").fetchall()
+        ids = [r["id"] for r in rows]
+        if ids:
+            ph = ",".join("?" * len(ids))
+            conn.execute("UPDATE outbox SET status='sending' WHERE id IN (%s)" % ph, ids)
+            conn.commit()
+        conn.close()
+    for row in rows:
+        oid = row["id"]
+        try:
+            spec = json.loads(row["spec"])
+            rec = json.loads(row["recipients"])
+            stub = _AutosendStub()
+            res = Handler._dispatch_studio(stub, spec, rec, dry=False)
+        except Exception as exc:
+            res = {"ok": False, "sent": 0, "errors": 1,
+                   "recipients": len((json.loads(row["recipients"]) if row["recipients"] else [])),
+                   "error": str(exc)[:300]}
+        with _lock:
+            conn = _db()
+            conn.execute("UPDATE outbox SET status='done', result=?, sent_at=datetime('now') WHERE id=?",
+                         (json.dumps(res), oid))
+            conn.commit()
+            conn.close()
+
+
+def _outbox_loop():
+    while True:
+        time.sleep(45)
+        try:
+            _fire_outbox_rows()
+        except Exception:
+            pass
 
 
 def main():
@@ -7743,7 +8295,9 @@ def main():
               % (_REFRESH_INTERVAL_SEC, _REFRESH_STALE_MIN, _REFRESH_MAX_PER_CYCLE))
     threading.Thread(target=_social_flush_loop, daemon=True).start()
     print("social scheduler: auto-flush every 60s (due scheduled posts)")
-    if _AUTOSEND_HOURS:
+    threading.Thread(target=_outbox_loop, daemon=True).start()
+    print("email outbox: due scheduled studio sends every 45s")
+    if _AUTOSEND_HOURS or _get_setting("autosend.hours"):
         threading.Thread(target=_autosend_loop, daemon=True).start()
         print("sequence autosend: daily at %s UTC, cap %d/run"
               % (",".join(map(str, _AUTOSEND_HOURS)), _AUTOSEND_LIMIT))
