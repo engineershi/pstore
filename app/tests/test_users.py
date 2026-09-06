@@ -13,6 +13,7 @@ import shutil
 import sqlite3
 import threading
 import unittest
+import urllib.parse
 import uuid
 from http.server import ThreadingHTTPServer
 
@@ -50,6 +51,8 @@ class TestUsersServer(unittest.TestCase):
         security.REGISTER_LIMITER.clear("reg|" + self.IPKEY)
         security.RESEND_LIMITER.clear("resend|" + self.IPKEY)
         security.LOGIN_LIMITER.clear("login|" + self.IPKEY)
+        security.FORGOT_LIMITER.clear("forgot|" + self.IPKEY)
+        security.RESET_LIMITER.clear("reset|" + self.IPKEY)
 
     @classmethod
     def setUpClass(cls):
@@ -84,8 +87,8 @@ class TestUsersServer(unittest.TestCase):
         conn.commit()
         conn.close()
         cls.sent = []
-        mailer._send = lambda subject, body, to, attachments=None, pixel_url="": (
-            cls.sent.append((subject, body, to)) or True)
+        mailer._send = lambda subject, body, to, attachments=None, pixel_url="", **k: (
+            cls.sent.append((subject, body, to, k.get("reply_to") or "")) or True)
         cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), cls.server.Handler)
         cls.PORT = cls.httpd.server_address[1]
         cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
@@ -134,6 +137,22 @@ class TestUsersServer(unittest.TestCase):
         conn.close()
         return status, loc, data
 
+    def _raw_cookie(self, method, path, body=None, cookie=None, ctype=None):
+        """Like _raw but also returns the Set-Cookie value (auto-login asserts)."""
+        conn = http.client.HTTPConnection("127.0.0.1", self.PORT, timeout=10)
+        h = {}
+        if cookie:
+            h["Cookie"] = cookie
+        if ctype:
+            h["Content-Type"] = ctype
+        conn.request(method, path, body=body, headers=h)
+        resp = conn.getresponse()
+        data = resp.read()
+        status, loc = resp.status, resp.getheader("Location")
+        new_cookie = resp.getheader("Set-Cookie")
+        conn.close()
+        return status, loc, data, (new_cookie.split(";")[0] if new_cookie else "")
+
     def _register(self, email, pw="teampass-123", name="Team Member"):
         return self._raw("POST", "/admin/register",
                          body=json.dumps({"name": name, "email": email,
@@ -141,9 +160,18 @@ class TestUsersServer(unittest.TestCase):
                          ctype="application/json")
 
     def _last_verify_link(self, email):
-        for subject, body, to in reversed(self.sent):
+        for subject, body, to, _reply_to in reversed(self.sent):
             if to == email and "Confirm your" in subject:
                 m = re.search(r"https://pstore-test\.example(/admin/verify\?t=[^\s]+)",
+                              body)
+                if m:
+                    return m.group(1)
+        return None
+
+    def _last_reset_link(self, email):
+        for subject, body, to, _reply_to in reversed(self.sent):
+            if to == email and "Reset your" in subject:
+                m = re.search(r"https://pstore-test\.example(/admin/reset-password\?t=[^\s]+)",
                               body)
                 if m:
                     return m.group(1)
@@ -171,13 +199,36 @@ class TestUsersServer(unittest.TestCase):
         email = "carol@team.example"
         self._register(email)
         link = self._last_verify_link(email)
-        st, loc, _ = self._raw("GET", link)
+        st, loc, body, sess = self._raw_cookie("GET", link)
         self.assertEqual(st, 302)
-        self.assertIn("verified=1", loc)
+        self.assertIn("/admin/pending?welcome=1", loc)
         self.assertEqual(self._user_row(email)["status"], "verified")
+        # auto-login: the fresh session cookie gets straight into the app
+        self.assertTrue(sess.startswith("pstore_admin="))
+        st2, _, pending = self._raw("GET", "/admin/pending?welcome=1", cookie=sess)
+        self.assertEqual(st2, 200)
+        self.assertIn("welcome aboard", pending.decode("utf-8"))
+        # a normal login still works afterwards
         cookie, status = self._login(email, "teampass-123")
         self.assertEqual(status, 200)
         self.assertTrue(cookie.startswith("pstore_admin="))
+
+    def test_verify_link_with_roles_lands_on_dashboard(self):
+        email = "neo@team.example"
+        self._register(email)
+        uid = self._user_row(email)["id"]
+        # owner grants full access BEFORE the activation click
+        self._raw("POST", "/api/users",
+                  body=json.dumps({"action": "set_roles", "id": uid,
+                                   "roles": ["full"]}),
+                  cookie=self.owner_cookie, ctype="application/json")
+        link = self._last_verify_link(email)
+        st, loc, body, sess = self._raw_cookie("GET", link)
+        self.assertEqual(st, 302)
+        self.assertEqual(loc, "/dashboard")
+        self.assertTrue(sess.startswith("pstore_admin="))
+        st2, _, _ = self._raw("GET", "/dashboard", cookie=sess)
+        self.assertEqual(st2, 200)
 
     def test_team_login_no_roles_lands_on_pending(self):
         email = "carol2@team.example"
@@ -280,6 +331,75 @@ class TestUsersServer(unittest.TestCase):
                   cookie=self.owner_cookie, ctype="application/json")
         st, _, _ = self._raw("GET", "/dashboard", cookie=cookie)
         self.assertEqual(st, 200)
+
+    def test_forgot_password_full_flow(self):
+        email = "grace2@team.example"
+        self._register(email)
+        self._raw("GET", self._last_verify_link(email))
+        st, _, body = self._raw("POST", "/admin/forgot-password",
+                                body=json.dumps({"email": email}),
+                                ctype="application/json")
+        self.assertEqual(st, 200)
+        j = json.loads(body)
+        self.assertTrue(j["ok"])
+        self.assertIn("If an account exists", j["alert"])
+        link = self._last_reset_link(email)
+        self.assertTrue(link and link.startswith("/admin/reset-password?t="))
+        # the reset form renders with the right email
+        st, _, body = self._raw("GET", link)
+        self.assertEqual(st, 200)
+        self.assertIn("Choose a", body.decode("utf-8"))
+        self.assertIn("grace2@team.example", body.decode("utf-8"))
+        # set the new password
+        q = dict(urllib.parse.parse_qs(urllib.parse.urlsplit(link).query))
+        st, _, body = self._raw("POST", "/admin/reset-password",
+                                body=json.dumps({"t": q["t"][0], "e": q["e"][0],
+                                                 "password": "freshpass-789"}),
+                                ctype="application/json")
+        self.assertEqual(st, 200)
+        self.assertTrue(json.loads(body)["ok"])
+        # old password dead, new one works
+        _, status = self._login(email, "teampass-123")
+        self.assertEqual(status, 401)
+        cookie, status = self._login(email, "freshpass-789")
+        self.assertEqual(status, 200)
+        # single-use: the same link can't set a password twice
+        st, _, body = self._raw("POST", "/admin/reset-password",
+                                body=json.dumps({"t": q["t"][0], "e": q["e"][0],
+                                                 "password": "againpass-111"}),
+                                ctype="application/json")
+        self.assertEqual(st, 400)
+        self.assertIn("invalid, expired or already used", json.loads(body)["error"])
+
+    def test_forgot_password_does_not_reveal_unknown_or_owner(self):
+        n_before = len(self.sent)
+        # unknown email -> generic ok, no email sent
+        st, _, body = self._raw("POST", "/admin/forgot-password",
+                                body=json.dumps({"email": "nobody@example.com"}),
+                                ctype="application/json")
+        self.assertEqual(st, 200)
+        self.assertIn("If an account exists", json.loads(body)["alert"])
+        self.assertEqual(len(self.sent), n_before)
+        # owner email is never emailed a reset link
+        st, _, body = self._raw("POST", "/admin/forgot-password",
+                                body=json.dumps({"email": "owner@test.example"}),
+                                ctype="application/json")
+        self.assertEqual(st, 200)
+        self.assertEqual(len(self.sent), n_before)
+
+    def test_forgot_password_pages_and_login_hints(self):
+        st, _, body = self._raw("GET", "/admin/forgot-password")
+        self.assertEqual(st, 200)
+        self.assertIn("Forgot", body.decode("utf-8"))
+        st, _, body = self._raw("GET", "/admin/login")
+        html = body.decode("utf-8")
+        self.assertIn("/admin/forgot-password", html)
+        st, _, body = self._raw("GET", "/admin/reset-password")
+        self.assertEqual(st, 200)
+        self.assertIn("no longer valid", body.decode("utf-8"))
+        # register page gained a confirm-password field
+        st, _, body = self._raw("GET", "/admin/register")
+        self.assertIn("id=\"pw2\"", body.decode("utf-8"))
 
     def test_resend_verification(self):
         email = "hana@team.example"

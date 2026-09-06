@@ -53,9 +53,11 @@ class TestEmailSuite(unittest.TestCase):
         cls.cookie = cls._login()
 
     @classmethod
-    def _fake_send(cls, subject, body, to, attachments=None, pixel_url=None):
+    def _fake_send(cls, subject, body, to, attachments=None, pixel_url=None,
+                   reply_to="", in_reply_to=""):
         cls.sent.append({"subject": subject, "body": body, "to": to,
-                         "attachments": attachments, "pixel_url": pixel_url})
+                         "attachments": attachments, "pixel_url": pixel_url,
+                         "reply_to": reply_to, "in_reply_to": in_reply_to})
         return True
 
     @classmethod
@@ -114,6 +116,9 @@ class TestEmailSuite(unittest.TestCase):
             conn.execute("DELETE FROM sent_emails")
             conn.execute("DELETE FROM email_events")
             conn.execute("DELETE FROM clicks")
+            conn.execute("DELETE FROM mailbox_messages")
+            conn.execute("DELETE FROM email_sends")
+            conn.execute("DELETE FROM outbox")
             conn.commit()
             conn.close()
         self.sent.clear()
@@ -742,6 +747,164 @@ class TestEmailSuite(unittest.TestCase):
     def test_studio_requires_admin(self):
         st, _, _, _ = self._raw("/api/mail")
         self.assertEqual(st, 401)
+
+    def test_threaded_reply_to_attached_to_subscriber_sends(self):
+        """Studio sends to subscribers carry a tagged Reply-To so a reply maps
+        back to the exact subscriber (threading). Typed (non-subscriber) sends
+        keep the previous behavior (no per-subscriber tag)."""
+        saved = (mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD)
+        saved_dom = mailer.REPLY_DOMAIN
+        mailer.SMTP_HOST = "smtp.test.local"
+        mailer.SMTP_USER = "u@example.com"
+        mailer.SMTP_PASSWORD = "pw"
+        mailer.REPLY_DOMAIN = "reply.example"
+        try:
+            self._subscribe("th@example.com", keyword="keto snacks", extra="first_name=Thom")
+            sid = self._sub("th@example.com")["id"]
+            self._studio({
+                "action": "send",
+                "spec": {"type": "custom", "niche": "", "subject": "S", "body": "B"},
+                "options": {"dry_run": False},
+                "recipients": {"sub_ids": [sid], "emails": "typed@example.com"}})
+            sub_send = next(m for m in self.sent if m["to"] == "th@example.com")
+            self.assertEqual(sub_send["reply_to"], "pstore+%d@reply.example" % sid)
+            typed_send = next(m for m in self.sent if m["to"] == "typed@example.com")
+            self.assertEqual(typed_send["reply_to"], "")  # no subscriber to thread
+            self.assertEqual(mailer.parse_thread_tag(sub_send["reply_to"]), sid)
+        finally:
+            mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD = saved
+            mailer.REPLY_DOMAIN = saved_dom
+
+    def test_inbox_poll_stores_links_and_lists(self):
+        """POST /api/mail inbox_poll pulls from the mailer test hook, stores
+        deduped messages, and links them to a subscriber by the tagged To."""
+        self._subscribe("ink@example.com", keyword="keto snacks", extra="first_name=Ina")
+        sid = self._sub("ink@example.com")["id"]
+        saved_fetch = mailer._imap_fetch
+        messages = [{
+            "message_id": "<abc@example>",
+            "in_reply_to": "",
+            "to_header": "To: pstore+%d@reply.example" % sid,
+            "from_addr": "ink@example.com", "from_name": "Ina",
+            "subject": "Thanks!", "date": "Sun, 06 Sep 2026 10:00:00 +0000",
+            "text": "Got the guide, thanks!", "html": ""}]
+        mailer._imap_fetch = lambda limit=25: messages
+        try:
+            st, _, _, data = self._studio({"action": "inbox_poll"})
+            self.assertEqual(st, 200)
+            p = json.loads(data)
+            self.assertTrue(p["ok"])
+            self.assertEqual(p["stored"], 1)
+            self.assertEqual(p["linked"], 1)
+            self.assertEqual(p["inbox_unread"], 1)
+            msg = p["inbox"][0]
+            self.assertEqual(msg["subscriber_id"], sid)
+            self.assertEqual(msg["subscriber_email"], "ink@example.com")
+            self.assertEqual(msg["status"], "unread")
+            # dedup: re-polling the same Message-ID doesn't duplicate
+            st, _, _, data = self._studio({"action": "inbox_poll"})
+            p = json.loads(data)
+            self.assertEqual(p["stored"], 0)
+            self.assertEqual(p["dupes"], 1)
+            self.assertEqual(p["inbox_unread"], 1)
+        finally:
+            mailer._imap_fetch = saved_fetch
+
+    def test_inbox_crud_read_archive_delete(self):
+        """Every inbox message supports mark-read/archive/delete CRUD."""
+        self._subscribe("ink2@example.com", keyword="keto snacks")
+        sid = self._sub("ink2@example.com")["id"]
+        saved_fetch = mailer._imap_fetch
+        mailer._imap_fetch = lambda limit=25: [{
+            "message_id": "<crud@example>", "in_reply_to": "",
+            "to_header": "To: pstore+%d@reply.example" % sid,
+            "from_addr": "ink2@example.com", "from_name": "",
+            "subject": "Question", "date": "", "text": "Is there a discount?", "html": ""}]
+        try:
+            self._studio({"action": "inbox_poll"})
+            st, _, _, data = self._raw("/api/mail", cookie=self.cookie)
+            self.assertEqual(st, 200)
+            rows = json.loads(data)["inbox"]
+            self.assertEqual(len(rows), 1)
+            mid = rows[0]["id"]
+            # mark read
+            self.assertTrue(json.loads(self._studio(
+                {"action": "inbox_set", "id": mid, "status": "read"})[3])["ok"])
+            st, _, _, data = self._raw("/api/mail", cookie=self.cookie)
+            got = [r for r in json.loads(data)["inbox"] if r["id"] == mid][0]
+            self.assertEqual(got["status"], "read")
+            self.assertEqual(json.loads(data)["inbox_unread"], 0)
+            # archive
+            self._studio({"action": "inbox_set", "id": mid, "status": "archived"})
+            st, _, _, data = self._raw("/api/mail", cookie=self.cookie)
+            self.assertEqual([r for r in json.loads(data)["inbox"] if r["id"] == mid][0]
+                             ["status"], "archived")
+            # delete
+            self.assertTrue(json.loads(self._studio(
+                {"action": "inbox_delete", "id": mid})[3])["ok"])
+            st, _, _, data = self._raw("/api/mail", cookie=self.cookie)
+            self.assertNotIn(mid, [r["id"] for r in json.loads(data)["inbox"]])
+        finally:
+            mailer._imap_fetch = saved_fetch
+
+    def test_inbox_reply_sends_to_sender(self):
+        """Replying from the Inbox sends to the original sender, keeps the
+        subject thread (Re:), records replied_at, and logs a reply send."""
+        saved = (mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD)
+        saved_dom = mailer.REPLY_DOMAIN
+        mailer.SMTP_HOST = "smtp.test.local"
+        mailer.SMTP_USER = "u@example.com"
+        mailer.SMTP_PASSWORD = "pw"
+        mailer.REPLY_DOMAIN = "reply.example"
+        self._subscribe("ink3@example.com", keyword="keto snacks")
+        sid = self._sub("ink3@example.com")["id"]
+        saved_fetch = mailer._imap_fetch
+        mailer._imap_fetch = lambda limit=25: [{
+            "message_id": "<reply@example>", "in_reply_to": "",
+            "to_header": "To: pstore+%d@reply.example" % sid,
+            "from_addr": "ink3@example.com", "from_name": "Ivy",
+            "subject": "More info?", "date": "", "text": "Any more?", "html": ""}]
+        try:
+            self._studio({"action": "inbox_poll"})
+            st, _, _, data = self._raw("/api/mail", cookie=self.cookie)
+            mid = json.loads(data)["inbox"][0]["id"]
+            before = len(self.sent)
+            st, _, _, data = self._studio(
+                {"action": "inbox_reply", "id": mid, "body": "Here you go!"})
+            self.assertEqual(st, 200)
+            p = json.loads(data)
+            self.assertTrue(p["ok"])
+            self.assertTrue(p["sent"])
+            self.assertEqual(len(self.sent), before + 1)
+            reply = next(m for m in self.sent if m["body"] == "Here you go!")
+            self.assertEqual(reply["to"], "ink3@example.com")
+            self.assertEqual(reply["subject"], "Re: More info?")
+            self.assertEqual(reply["reply_to"], "pstore+%d@reply.example" % sid)
+            self.assertEqual(reply["in_reply_to"], "<reply@example>")
+            # reply is recorded as a send + leaves the message read+replied
+            st, _, _, data = self._raw("/api/mail", cookie=self.cookie)
+            got = [r for r in json.loads(data)["inbox"] if r["id"] == mid][0]
+            self.assertEqual(got["status"], "read")
+            self.assertTrue(got["replied_at"])
+        finally:
+            mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD = saved
+            mailer.REPLY_DOMAIN = saved_dom
+            mailer._imap_fetch = saved_fetch
+
+    def test_inbox_unconfigured_poll_reports_clear_error(self):
+        saved_fetch = mailer._imap_fetch
+        saved_conf = (mailer.IMAP_HOST, mailer.IMAP_USER, mailer.IMAP_PASSWORD)
+        mailer._imap_fetch = None
+        mailer.IMAP_HOST = mailer.IMAP_USER = mailer.IMAP_PASSWORD = ""
+        try:
+            st, _, _, data = self._studio({"action": "inbox_poll"})
+            self.assertEqual(st, 200)
+            p = json.loads(data)
+            self.assertFalse(p["ok"])
+            self.assertIn("not configured", p["error"])
+        finally:
+            mailer._imap_fetch = saved_fetch
+            mailer.IMAP_HOST, mailer.IMAP_USER, mailer.IMAP_PASSWORD = saved_conf
 
     def test_admin_manual_pdf_served(self):
         st, _, ctype, pdf = self._raw("/admin/manual.pdf", cookie=self.cookie)

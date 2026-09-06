@@ -227,7 +227,7 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
         mailer.SMTP_PASSWORD = "pw"
         try:
             captured = []
-            mailer._send = lambda subject, body, to, attachments=None, pixel_url=None: (
+            mailer._send = lambda subject, body, to, attachments=None, pixel_url=None, **k: (
                 captured.append({"to": to}) or True)
             st, ct, body = self._raw("/api/segments/reengage", method="POST",
                                      body=b"{}", cookie=self.cookie)
@@ -267,7 +267,7 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
         mailer.SMTP_USER = "x@x"
         mailer.SMTP_PASSWORD = "pw"
         captured = []
-        mailer._send = lambda subject, body, to, attachments=None, pixel_url=None: (
+        mailer._send = lambda subject, body, to, attachments=None, pixel_url=None, **k: (
             captured.append({"to": to, "subject": subject}) or True)
         try:
             st, ct, body = self._raw("/api/sequence/send", method="POST",

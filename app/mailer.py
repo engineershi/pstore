@@ -13,14 +13,18 @@ Config via env (never commit secrets):
 When SMTP is not configured the admin page says so and sends are refused —
 everything else (opt-in capture, unsubscribe, analytics) keeps working.
 """
+import html as _html
+import imaplib
 import os
+import re
 import smtplib
 import urllib.parse
-from email.header import Header
+from email import message_from_bytes
+from email.header import Header, decode_header as _decode_header
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from email.utils import formataddr
+from email.utils import formataddr, parseaddr
 
 import market_engine
 import security
@@ -40,6 +44,59 @@ SMTP_FROM = os.environ.get("SMTP_FROM", "") or (SMTP_USER or "noreply@localhost"
 SMTP_STARTTLS = os.environ.get("SMTP_STARTTLS", "1") == "1"
 MAX_EMAILS_PER_RUN = int(os.environ.get("SMTP_MAX_PER_RUN", "50") or "50")
 SEQUENCE_LENGTH = 5
+
+# --- threaded replies ------------------------------------------------------
+# Every sequence/studio email gets a unique Reply-To like
+#   pstore+<subscriber-id>@yourdomain
+# so a customer reply maps straight back to the exact subscriber + is captured
+# by the Studio Inbox. Set PSTORE_REPLY_DOMAIN (or SMTP_REPLY_TO, whose domain
+# is reused) to enable; without it sends keep the previous reply behavior.
+REPLY_PREFIX = (os.environ.get("PSTORE_REPLY_PREFIX", "pstore").strip() or "pstore")
+REPLY_DOMAIN = os.environ.get("PSTORE_REPLY_DOMAIN", "").strip()
+
+# --- inbound (inbox) -------------------------------------------------------
+# Poll an IMAP mailbox that receives the tagged Reply-To addresses (or have
+# your forwarding service POST to /api/cron/inbox with the EMAIL_CRON_SECRET).
+IMAP_HOST = os.environ.get("IMAP_HOST", "").strip()
+try:
+    IMAP_PORT = int(os.environ.get("IMAP_PORT", "993"))
+except (TypeError, ValueError):
+    IMAP_PORT = 993
+IMAP_USER = os.environ.get("IMAP_USER", "")
+IMAP_PASSWORD = os.environ.get("IMAP_PASSWORD", "")
+IMAP_FOLDER = os.environ.get("IMAP_FOLDER", "INBOX")
+
+
+def inbound_configured():
+    return bool(IMAP_HOST and IMAP_USER and IMAP_PASSWORD)
+
+
+def _reply_domain():
+    """Replies are routed to `REPLY_PREFIX+<tag>@domain`. The domain comes from
+    PSTORE_REPLY_DOMAIN when set (a bare domain or an address), else from
+    SMTP_REPLY_TO's domain. Empty = no threading."""
+    for src in (REPLY_DOMAIN, REPLY_TO):
+        if not src:
+            continue
+        if "@" in src:
+            return src.rsplit("@", 1)[-1].lower()
+        return src.strip().lower()
+    return ""
+
+
+def thread_reply_to(tag):
+    """The per-subscriber tagged Reply-To address, or '' when threading is off."""
+    dom = _reply_domain()
+    if not dom or not tag:
+        return ""
+    return "%s+%s@%s" % (REPLY_PREFIX, str(tag), dom)
+
+
+def parse_thread_tag(addresses, prefix=None):
+    """Pull the subscriber id out of a 'To' header with our tagged address."""
+    prefix = prefix or REPLY_PREFIX
+    m = re.search(r"%s\+(\d+)@[^\s;,>\"']+" % re.escape(prefix), addresses or "")
+    return int(m.group(1)) if m else None
 
 
 def configured():
@@ -148,18 +205,25 @@ def _wrap_links(body, link_url, pid=""):
     return body
 
 
-def _build_message(subject, body, to, from_addr, attachments=None, pixel_url=""):
-    msg = MIMEMultipart()
+def _build_message(subject, body, to, from_addr, attachments=None, pixel_url="",
+                   html="", reply_to="", in_reply_to=""):
+    msg = MIMEMultipart("alternative")
     msg["Subject"] = Header(subject, "utf-8")
     msg["From"] = formataddr((STORE_NAME, from_addr))
     msg["To"] = to
-    if REPLY_TO:
-        msg["Reply-To"] = REPLY_TO
-        msg["Return-Path"] = REPLY_TO
+    rt = reply_to or REPLY_TO
+    if rt:
+        msg["Reply-To"] = rt
+        msg["Return-Path"] = rt
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+        msg["References"] = in_reply_to
     msg["List-Unsubscribe"] = "<mailto:%s?subject=unsubscribe>" % from_addr
     if pixel_url:
         body = "%s\n\n<img src=\"%s\" width=\"1\" height=\"1\" alt=\"\" border=\"0\">" % (body, pixel_url)
     msg.attach(MIMEText(body, "plain", "utf-8"))
+    if html:
+        msg.attach(MIMEText(html, "html", "utf-8"))
     for name, data in (attachments or []):
         part = MIMEApplication(data, _subtype="pdf")
         part.add_header("Content-Disposition", "attachment", filename=name)
@@ -167,9 +231,11 @@ def _build_message(subject, body, to, from_addr, attachments=None, pixel_url="")
     return msg
 
 
-def _smtp_send(subject, body, to, from_addr=None, attachments=None, pixel_url=""):
+def _smtp_send(subject, body, to, from_addr=None, attachments=None, pixel_url="",
+               html="", reply_to="", in_reply_to=""):
     from_addr = from_addr or SMTP_FROM
-    msg = _build_message(subject, body, to, from_addr, attachments, pixel_url)
+    msg = _build_message(subject, body, to, from_addr, attachments, pixel_url, html,
+                         reply_to, in_reply_to)
     try:
         if SMTP_STARTTLS:
             server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20)
@@ -189,12 +255,187 @@ def _smtp_send(subject, body, to, from_addr=None, attachments=None, pixel_url=""
         return False
 
 
-def send(subject, body, to, attachments=None, pixel_url=""):
+def send(subject, body, to, attachments=None, pixel_url="", html="",
+         reply_to="", in_reply_to=""):
     if not configured():
         return False
     if _send is not None:
-        return bool(_send(subject, body, to, attachments, pixel_url))
-    return _smtp_send(subject, body, to, attachments=attachments, pixel_url=pixel_url)
+        return bool(_send(subject, body, to, attachments, pixel_url,
+                          reply_to=reply_to, in_reply_to=in_reply_to))
+    return _smtp_send(subject, body, to, attachments=attachments, pixel_url=pixel_url,
+                      html=html, reply_to=reply_to, in_reply_to=in_reply_to)
+
+
+# ------------------------------------------------------------------ inbound (inbox)
+
+# Test hook: tests assign _imap_fetch(limit) -> list of inbound message dicts.
+_imap_fetch = None
+
+
+def _decode_mime(value):
+    if not value:
+        return ""
+    out = []
+    for txt, enc in _decode_header(str(value)):
+        if isinstance(txt, bytes):
+            try:
+                txt = txt.decode(enc or "utf-8", "replace")
+            except (LookupError, UnicodeDecodeError):
+                txt = txt.decode("utf-8", "replace")
+        out.append(str(txt))
+    return "".join(out)
+
+
+def _parse_inbound(raw):
+    """Parse one raw RFC822 message into a flat inbound dict for the Studio
+    Inbox. Never raises on malformed mail; returns best-effort fields."""
+    msg = message_from_bytes(raw)
+    try:
+        from_addr, from_name = parseaddr(msg.get("From", ""))
+    except Exception:
+        from_addr, from_name = "", ""
+    to_hdrs = [h for h in (msg.get("To", ""), msg.get("Cc", ""),
+                           msg.get("Delivered-To", ""), msg.get("X-Original-To", "")) if h]
+    text = html = ""
+    try:
+        if msg.is_multipart():
+            for part in msg.walk():
+                ctype = part.get_content_type() or ""
+                if ctype == "text/plain" and not text:
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        text = _decode_mime(payload)
+                elif ctype == "text/html" and not html:
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        html = _decode_mime(payload)
+        else:
+            ctype = msg.get_content_type() or ""
+            payload = msg.get_payload(decode=True) or b""
+            if ctype == "text/plain":
+                text = _decode_mime(payload)
+            elif ctype == "text/html":
+                html = _decode_mime(payload)
+    except Exception:
+        pass
+    return {"message_id": (_decode_mime(msg.get("Message-ID", "")) or "").strip(),
+            "in_reply_to": (_decode_mime(msg.get("In-Reply-To", "")) or "").strip(),
+            "to_header": " ".join(_decode_mime(h) for h in to_hdrs),
+            "from_addr": (str(from_addr or "").strip().lower()),
+            "from_name": _decode_mime(from_name or ""),
+            "subject": _decode_mime(msg.get("Subject", "")),
+            "date": _decode_mime(msg.get("Date", "")),
+            "text": text or "",
+            "html": html or ""}
+
+
+def fetch_inbound(limit=25):
+    """Fetch the newest messages from the configured IMAP mailbox and return
+    parsed inbound dicts (newest first? oldest-first here). Returns the raw
+    parsed list; the server dedups by Message-ID, so re-fetching is safe."""
+    if _imap_fetch is not None:
+        return _imap_fetch(limit) or []
+    if not inbound_configured():
+        return []
+    msgs = []
+    try:
+        if IMAP_PORT == 993:
+            box = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, timeout=20)
+        else:
+            box = imaplib.IMAP4(IMAP_HOST, IMAP_PORT)
+            if os.environ.get("IMAP_STARTTLS", "1") == "1":
+                box.starttls()
+        try:
+            box.login(IMAP_USER, IMAP_PASSWORD)
+            typ, _ = box.select(IMAP_FOLDER or "INBOX")
+            if typ == "OK":
+                _, ids = box.search(None, "ALL")
+                nums = (ids[0] or b"").split()
+                for num in nums[-limit:]:
+                    typ, data = box.fetch(num, "(RFC822)")
+                    if typ == "OK" and data and data[0]:
+                        msgs.append(_parse_inbound(data[0][1]))
+        finally:
+            try:
+                box.logout()
+            except Exception:
+                pass
+    except Exception:
+        return msgs
+    return msgs
+
+
+# ------------------------------------------------------------------ transactional HTML
+
+def _esc(value):
+    return _html.escape(str(value or ""), quote=True)
+
+
+def transactional_html(preheader, heading, paragraphs, cta_url, cta_label, footnote=""):
+    """Branded, light-rendered HTML mail (works in Gmail/Outlook/Apple Mail):
+    gradient header wordmark, one big rounded CTA button, a plain-text fallback
+    link, and a discreet footnote showing expiry / "didn't request this"."""
+    paras = "\n".join('<p style="margin:0 0 14px;font-size:15px;line-height:1.6;color:#3a3f4b">%s</p>' % p
+                       for p in paragraphs)
+    fallback = ('<p style="margin:20px 0 0;font-size:13px;line-height:1.5;color:#7a8191">'
+                'Button not working? Copy and paste this link into your browser:<br>'
+                '<a href="%s" style="color:#a453ff;word-break:break-all">%s</a></p>'
+                % (_esc(cta_url), _esc(cta_url)))
+    note = ('<p style="margin:18px 0 0;padding-top:16px;border-top:1px solid #ececf1;'
+            'font-size:12px;line-height:1.6;color:#9aa0ad">%s</p>' % footnote) if footnote else ""
+    return """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light only"><title>%(store)s</title></head>
+<body style="margin:0;padding:0;background:#f4f4f7;font-family:Arial,Helvetica,sans-serif">
+<span style="display:none;max-height:0;overflow:hidden">%(pre)s</span>
+<div style="max-width:560px;margin:24px auto;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 10px 34px rgba(20,20,40,.10)">
+  <div style="background:linear-gradient(120deg,#ff7a18 0%%,#ff4e9e 55%%,#a453ff 100%%);padding:26px 34px">
+    <div style="font-size:19px;font-weight:800;color:#ffffff;letter-spacing:.2px">%(store)s</div>
+    <div style="font-size:12px;color:rgba(255,255,255,.82);margin-top:2px">America-verified product picks</div>
+  </div>
+  <div style="padding:34px 34px 28px">
+    <h1 style="margin:0 0 14px;font-size:21px;letter-spacing:-.2px;color:#191b26">%(head)s</h1>
+    %(paras)s
+    <div style="text-align:center;margin:26px 0 4px">
+      <a href="%(url)s" style="display:inline-block;background:#ff7a18;color:#ffffff;text-decoration:none;
+        font-weight:700;font-size:15px;padding:13px 30px;border-radius:999px">%(label)s</a>
+    </div>
+    %(fallback)s
+    %(note)s
+  </div>
+  <div style="background:#fafafc;padding:18px 34px;border-top:1px solid #ececf1">
+    <p style="margin:0;font-size:12px;line-height:1.6;color:#9aa0ad">You're receiving this because an account was
+    created (or a password change was requested) on %(store)s with this email address.
+    If this wasn't you, you can ignore this message — nothing changes unless you use the link above.</p>
+  </div>
+</div></body></html>""" % {
+        "store": _esc(STORE_NAME), "pre": _esc(preheader), "head": _esc(heading),
+        "paras": paras, "url": _esc(cta_url), "label": _esc(cta_label),
+        "fallback": fallback, "note": note}
+
+
+def verify_email_html(confirm_url, name):
+    return transactional_html(
+        "Confirm your email address to activate your pstore account",
+        "Confirm your email address",
+        ["Hi %s,\n\nThanks for signing up for pstore. To activate your account and get "
+         "started, confirm that this email address is yours." % _esc(name),
+         "This link is private to you and expires in <b>72 hours</b>."],
+        confirm_url, "Activate my account",
+        footnote="Your confirmation link expires in 72 hours. If it expires, you can "
+                 "request a new one from the sign-in page.")
+
+
+def reset_email_html(reset_url, name):
+    return transactional_html(
+        "Reset your pstore password — link valid for 1 hour",
+        "Reset your password",
+        ["Hi there,\n\nWe received a request to reset the password for your pstore account. "
+         "If that was you, use the button below to choose a new password.",
+         "This link is private to you and expires in <b>1 hour</b>. If you didn't ask to "
+         "reset your password, you can safely ignore this email — your password stays the same."],
+        reset_url, "Choose a new password",
+        footnote="This password reset link expires in 1 hour and can only be used once.")
 
 
 # ------------------------------------------------------------------ sequence

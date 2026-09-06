@@ -95,9 +95,19 @@ The app reads everything from environment variables. Set these before you launch
 | `PSTORE_URL` | Your live site URL (canonicals, sitemap, links) | `https://pstore-gxbv.onrender.com` |
 | `PSTORE_ADMIN_EMAIL` / `PSTORE_ADMIN_PASSWORD` | Your admin login | — |
 | `SMTP_HOST`/`SMTP_USER`/`SMTP_PASSWORD` | **Required to send emails** (use Gmail app password) | `smtp.gmail.com` |
+| `SMTP_REPLY_TO` | Optional single address customers reply to (fallback) | `replies@yourdomain.com` |
+| `PSTORE_REPLY_DOMAIN` | Domain that receives replies — tags every send's `Reply-To` with its subscriber id so replies map back (`pstore+<id>@domain`) | `yourdomain.com` |
+| `PSTORE_REPLY_PREFIX` | Local part prefix for the tagged Reply-To | `pstore` |
+| `IMAP_HOST`/`IMAP_USER`/`IMAP_PASSWORD` | **Enable the Studio Inbox**: polls this mailbox (default port 993) every 60s for customer replies | `imap.gmail.com` |
+| `EMAIL_CRON_SECRET` | Secret for `POST /api/cron/send` **and** `POST /api/cron/inbox` (use a forwarder/webhook to pull replies on demand) | — |
 | `SOCIAL_WEBHOOK` | Optional: POSTs posts to Zapier/Make | — |
 
 > ⚠️ If you do not set `PSTORE_ADMIN_EMAIL` / `PSTORE_ADMIN_PASSWORD`, the server prints a warning. **Always set them.**
+
+> 👥 **Team signup flow (professional):** the login page has *Request an account* (name, email, password + confirm).
+> A branded confirmation email is sent with a big **Activate my account** button (HMAC-signed, valid 72 h).
+> Clicking it verifies the email, logs the user straight in, and lands them on the **Dashboard** (or a welcome page
+> until the owner grants roles under **Users & roles**). Login defaults are covered in **7 · Troubleshooting**.
 
 ### 3.3 Where the features live (quick map)
 
@@ -227,6 +237,10 @@ Every subscriber automatically receives a **5-email buyer sequence** built from 
 1. On `/admin/emails`, pick a **recipient selector**: *All ready* (up to 50/run), *First 5*, *First 10*, or *First 25*.
 2. Leave **dry-run** checked first (no real emails — verifies content).
 3. Click **Send next batch**. pstore only emails people who **opted in**, never resends, and auto-stops at 5 emails.
+
+**Answer replies without leaving the app:** set `PSTORE_REPLY_DOMAIN` + `IMAP_HOST/USER/PASSWORD` and the **📥 Inbox** tab
+of the Email Studio captures every customer reply (tagged `Reply-To` maps it back to the exact subscriber). Read,
+archive, mark read/unread or **Reply** right there — the answer threads back and lands in this same inbox.
 
 **✉️ A/B-test subject lines (`/admin/variants`):** for each niche you can write **up to 3 subject-line variants** per email. pstore spreads them deterministically across subscribers, then tracks open/click performance per variant (joined against real email_events) so you can see which subject actually earns opens. Same pattern for **social captions** — drop in 2–3 caption variants per platform and pstore A/B serves them (publishing each variant as its own post with its own tracking code so you can see exactly which caption earned the clicks).
 
@@ -423,7 +437,11 @@ A quick, repeatable ritual for a brand-new niche:
 | Ebook is generic tempalated | No AI key → add any provider key (free ones work) |
 | Niche shows "stale" | `updated_at` older than `PSTORE_REFRESH_MIN`, or auto-refresh disabled (interval=0) |
 | Page not in Google | Verify `/admin/seo` shows indexable + IndexNow key present at `/keys` |
-| Can't log in | `PSTORE_ADMIN_EMAIL`/`PSTORE_ADMIN_PASSWORD` not set (server warns at boot) |
+| Can't log in | `PSTORE_ADMIN_EMAIL`/`PSTORE_ADMIN_PASSWORD` not set (server warns at boot) — owner login is env-based |
+| Forgot team member password | Login page → **Forgot your password?** → single-use reset email (valid 1 hour) |
+| Inbox tab shows "not configured" | No IMAP mailbox yet; set `IMAP_HOST/USER/PASSWORD` (or forward mail to `POST /api/cron/inbox` with `EMAIL_CRON_SECRET`) |
+| Replies not linked to a subscriber | `PSTORE_REPLY_DOMAIN` unset → sends carry no per-subscriber tag; set it so replies map to the right lead |
+| Team member hasn't verified email | They re-request the confirmation from the login page (*resend my confirmation link*); links expire after 72 h |
 | Admin APIs return 401 | Session expired — log in again (12-hour sessions) |
 
 ---

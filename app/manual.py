@@ -152,6 +152,7 @@ def build_pdf():
         "Switches control the tracked affiliate link, open-tracking pixel, PDF attachment, dedup and sequence progress.",
         "Dry-run first to preview the send counts without emailing anyone.",
         "Auto-send runs the 5-step sequence to every ready subscriber on your chosen UTC hours; the Email Studio page shows the last run and lets you toggle it.",
+        "Replies are captured too: the Studio's Inbox tab polls your IMAP mailbox (IMAP_HOST/USER/PASSWORD, or a forwarder hitting /api/cron/inbox) and maps each reply back to the subscriber via a tagged Reply-To address, so you can read, archive, mark read or reply from the same page.",
     ])
     doc.page_break()
 
@@ -256,25 +257,24 @@ def render_admin_manual(nav_html, totop_html):
 .tooltag{{display:inline-block;background:#fff;border:1px solid var(--border);border-radius:999px;padding:2px 10px;font-size:12px;margin:2px 4px 2px 0;color:var(--accent);text-decoration:none;font-weight:700}}
 .tooltag:hover{{border-color:var(--accent)}}
 .dlbar{{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:4px 0 2px}}
-/* resizable-reader control (this page only) */
+/* reader toolbar (this page only): a slim, sticky, horizontal control docked
+   under the page header so the reading width is one glance away while scrolling */
 #manual-main{{max-width:100%;margin:0;padding:22px 20px 60px;transition:width .18s ease}}
-.readctl{{position:sticky;top:70px;z-index:50;display:flex;align-items:center;gap:8px;flex-wrap:wrap;
-  background:rgba(255,255,255,.92);backdrop-filter:blur(6px);border:1px solid var(--border);
-  border-radius:14px;padding:8px 12px;margin:6px 0 14px;box-shadow:var(--shadow);font-size:13px}}
-.readctl b{{margin-right:2px}}
-.readctl .sep{{width:1px;height:22px;background:var(--border);margin:0 4px}}
-.readctl button{{border:1px solid var(--border);background:#fff;border-radius:999px;padding:5px 12px;
-  font-size:12.5px;font-weight:700;cursor:pointer;color:var(--text)}}
-.readctl button:hover{{border-color:var(--accent)}}
-.readctl button.on{{background:var(--accent);color:#fff;border-color:var(--accent)}}
-.readctl input[type=range]{{width:150px;accent-color:var(--accent);cursor:pointer}}
-.readctl .size{{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--muted);min-width:46px;text-align:right}}
+.readctl{{position:sticky;top:0;z-index:60;display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  background:rgba(255,252,247,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--border);
+  padding:10px 22px;font-size:13px}}
+.readctl .ctl-label{{font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}}
+.seg{{display:inline-flex;background:#fff;border:1px solid var(--border);border-radius:999px;padding:3px;gap:2px}}
+.seg button{{border:none;background:transparent;border-radius:999px;padding:5px 13px;font-size:12.5px;font-weight:700;
+  cursor:pointer;color:var(--muted)}}
+.seg button:hover{{color:var(--text)}}
+.seg button.on{{background:var(--accent);color:#fff}}
+.readctl .sep{{width:1px;height:22px;background:var(--border)}}
+.readctl input[type=range]{{width:170px;accent-color:var(--accent);cursor:pointer}}
+.readctl .size{{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--muted);min-width:40px;text-align:right}}
+.readctl .px{{color:var(--muted);font-size:12px}}
 .readctl .hint{{color:var(--muted);font-size:12px}}
-#reader{{overflow-x:auto;scroll-margin-top:90px}}
-.readerhandle{{width:12px;align-self:stretch;cursor:ew-resize;flex:0 0 12px;display:flex;align-items:center;
-  justify-content:center;color:var(--muted);font-size:14px;user-select:none}}
-.readerhandle:hover{{color:var(--accent)}}
-.readwrap{{display:flex;align-items:stretch}}
+#reader{{overflow-x:auto;scroll-margin-top:80px}}
 </style>
 </head><body>
 <header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
@@ -282,18 +282,20 @@ def render_admin_manual(nav_html, totop_html):
 <p class="tagline">The complete, visual guide to running pstore at its highest form — chip every tool on this page is a real, clickable shortcut.</p></div>
 {nav_html}
 </header>
-<main id="manual-main">
-<div class="readctl" id="readctl" aria-label="Reading width controls">
-  <b>🔎 Read width</b>
-  <button data-w="760" title="Narrow column">Narrow</button>
-  <button data-w="1080" class="on" title="Default column">Normal</button>
-  <button data-w="1400" title="Wide column">Wide</button>
-  <button data-w="100" title="Full page width (100%)">Full</button>
+<div class="readctl" id="readctl" role="toolbar" aria-label="Reading width controls">
+  <span class="ctl-label">Reading width</span>
+  <span class="seg">
+    <button data-w="760" title="Narrow column">Narrow</button>
+    <button data-w="1080" class="on" title="Default column">Normal</button>
+    <button data-w="1400" title="Wide column">Wide</button>
+    <button data-w="100" title="Full page width (100%)">Full</button>
+  </span>
   <span class="sep"></span>
-  <input type="range" id="readr" min="640" max="2400" step="10" value="1080" title="Drag to size the reading window">
-  <span class="size" id="readsize">1080</span><span class="hint">px · drag edge or slide</span>
+  <input type="range" id="readr" min="640" max="2400" step="10" value="1080" title="Drag to set the reading window width">
+  <span class="size" id="readsize">1080</span><span class="px">px</span>
 </div>
-<div class="readwrap"><div class="reader" id="reader">
+<main id="manual-main">
+<div class="reader" id="reader">
 <section class="card"><h2>📕 The manual — download it</h2>
 <div class="dlbar">
   <a class="btn warm" href="/admin/manual.pdf" download>Download PDF manual ⬇</a>
@@ -323,6 +325,7 @@ def render_admin_manual(nav_html, totop_html):
   <a href="#playbook">10 · Highest-form playbook</a>
   <a href="#checklist">11 · 30-min checklist</a>
   <a href="#team">12 · Team access &amp; roles</a>
+  <a href="#inbox">13 · Inbox &amp; conversations</a>
 </nav>
 
 <h3 id="what">1 · What pstore is</h3>
@@ -420,16 +423,28 @@ def render_admin_manual(nav_html, totop_html):
 </ul>
 
 <h3 id="team">12 · Team access &amp; roles</h3>
-<p>pstore can run as a small team. From the <a class="tooltag" href="/admin/login">🔐 login page</a>, a colleague picks <b>Request an account</b>, signs up with their work email and gets a <b>confirmation email</b> — the account stays <i>unverified</i> until they click that link. Then the owner grants access on <a class="tooltag" href="/admin/users">👥 Users &amp; roles</a>.</p>
+<p>pstore can run as a small team. From the <a class="tooltag" href="/admin/login">🔐 login page</a>, a colleague picks <b>Request an account</b>, signs up with their work email and gets a <b>branded confirmation email</b> — the account stays <i>unverified</i> until they click that link. Clicking the confirmation link <b>activates the account and signs them straight in</b>: colleagues with tool access land on the 🧭 Dashboard, everyone else lands on a welcome/onboarding page until the owner grants roles on <a class="tooltag" href="/admin/users">👥 Users &amp; roles</a>.</p>
 <ul class="step-list">
 <li>Every tool belongs to <b>one function</b>: Idea tools, Email Studio, Social publisher, SEO &amp; consoles, Content (CMS/ebooks), Marketing &amp; ROI, Analytics &amp; backup, Keys &amp; API keys.</li>
 <li>A <b>role</b> is a custom matrix of functions — create your own (<i>Writer</i> = content only, <i>Operator</i> = daily tools) and tick whatever fits. A user can hold <b>several roles</b>; their access is the union of the functions on all of them.</li>
 <li>Pages <b>and</b> their <code>/api/…</code> endpoints are both gated by function — no role for a tool means the <b>403</b> screen and its API answers <i>forbidden</i>.</li>
 <li>The owner is always allowed everywhere; only the owner sees <b>Users &amp; roles</b> and can create/disable users, change roles and reset passwords.</li>
 <li>Signing in only works after the <b>email is verified</b>; disabling an account kills its sessions instantly.</li>
+<li><b>Forgotten password?</b> The login page has a <i>Forgot your password?</i> link → a secure, <b>single-use reset link</b> is emailed (valid 1 hour). It never leaks whether an email has an account; the owner login is environment-based and never reset this way.</li>
+<li>Confirmation links are HMAC-signed and expire after <b>72 hours</b>; anyone who loses one can re-request it from the login page (<i>resend my confirmation link</i>).</li>
+</ul>
+
+<h3 id="inbox">13 · The Inbox — read, reply to and file your mail</h3>
+<p>The <a class="tooltag" href="/admin/emails">📨 Email Studio</a> also runs your <b>conversations</b>, not just your broadcasts. Every send to a subscriber carries a <b>unique tagged Reply-To</b> (<code>pstore+&lt;subscriber-id&gt;@yourdomain</code>) — set <code>PSTORE_REPLY_DOMAIN</code> to the domain whose mailbox you watch. When a customer replies, the Studio's <b>Inbox</b> tab captures it: either it polls your <b>IMAP</b> mailbox (<code>IMAP_HOST / IMAP_USER / IMAP_PASSWORD</code>) every 60 seconds, or any forwarder can <code>POST /api/cron/inbox</code> with your <code>EMAIL_CRON_SECRET</code> to trigger a pull on demand.</p>
+<ul class="step-list">
+<li>Every reply is <b>linked to its subscriber</b>: the tag in the Reply-To wins, with a from-address match as fallback, so you always know who wrote.</li>
+<li>Unread messages carry a count on the <b>Inbox</b> tab; open a message to read it, then <b>Reply</b> right from the studio — the answer threads (<code>Re:</code>, <code>In-Reply-To</code>) in the customer's mail client and comes back to this same page.</li>
+<li>Mark read/unread, <b>archive</b> or <b>delete</b> any message — pure CRUD, nothing hidden.</li>
+<li>Replies you send appear in the studio's <b>Recent activity</b> alongside your campaigns.</li>
+<li><code>SMTP_REPLY_TO</code> (single address) still works as the fallback; the per-subscriber tag simply makes every reply attributable.</li>
 </ul>
 </section>
-</div><div class="readerhandle" id="readerhandle" title="Drag to resize reading width">⠿</div></div>
+</div>
 </main>
 <footer><p>User manual — owner section, never indexed. <a href="/admin">All pages</a> · <a href="/admin/logout">Log out</a>.</p></footer>
 <script>
@@ -439,8 +454,7 @@ def render_admin_manual(nav_html, totop_html):
       ctl=document.getElementById('readctl'),
       slider=document.getElementById('readr'),
       size=document.getElementById('readsize'),
-      buttons=ctl.querySelectorAll('button[data-w]'),
-      handle=document.getElementById('readerhandle');
+      buttons=ctl.getElementsByTagName('button');
   var maxW=Math.max(window.innerWidth-40, 640);
   var saved=null;
   try{{ saved=localStorage.getItem('pstore.manual.w'); }}catch(e){{}}
@@ -456,17 +470,6 @@ def render_admin_manual(nav_html, totop_html):
     b.addEventListener('click', function(){{ apply(b.getAttribute('data-w')==='100' ? '100%' : b.getAttribute('data-w')); }});
   }});
   slider.addEventListener('input', function(){{ apply(String(slider.value)); }});
-  handle.addEventListener('mousedown', function(ev){{
-    ev.preventDefault();
-    var startX=ev.clientX, startW=main.offsetWidth;
-    function move(e){{
-      var w=Math.min(Math.max(startW+(e.clientX-startX),640),maxW);
-      apply(String(w));
-    }}
-    function up(){{ document.removeEventListener('mousemove',move); document.removeEventListener('mouseup',up); document.body.style.cursor=''; }}
-    document.addEventListener('mousemove',move); document.addEventListener('mouseup',up);
-    document.body.style.cursor='ew-resize';
-  }});
   apply(saved || 1080);
 }})();
 </script>

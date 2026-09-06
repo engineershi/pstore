@@ -63,6 +63,8 @@ TRACK_LIMITER = RateLimiter(limit=180, window_sec=60)        # click beacons
 PAGEVIEW_LIMITER = RateLimiter(limit=120, window_sec=60)     # pageview/event beacons
 REGISTER_LIMITER = RateLimiter(limit=6, window_sec=10 * 60)   # account signups per client
 RESEND_LIMITER = RateLimiter(limit=5, window_sec=15 * 60)     # "resend verify" emails
+FORGOT_LIMITER = RateLimiter(limit=5, window_sec=15 * 60)     # "forgot password" emails
+RESET_LIMITER = RateLimiter(limit=8, window_sec=15 * 60)      # password set attempts
 
 
 def client_key(headers, peer_ip):

@@ -733,6 +733,24 @@ def _db():
         sent_at TEXT
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox (status, scheduled_at)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS mailbox_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id TEXT,
+        in_reply_to TEXT,
+        mailbox TEXT DEFAULT 'inbox',
+        from_addr TEXT,
+        from_name TEXT,
+        subject TEXT,
+        text TEXT,
+        html TEXT,
+        subscriber_id INTEGER,
+        status TEXT DEFAULT 'unread',
+        sent_at TEXT DEFAULT (datetime('now')),
+        replied_at TEXT,
+        UNIQUE(message_id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_mailbox_status ON mailbox_messages (status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_mailbox_sub ON mailbox_messages (subscriber_id)")
     conn.execute("""CREATE TABLE IF NOT EXISTS clicks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         slug TEXT,
@@ -785,6 +803,12 @@ def _db():
         created_at TEXT DEFAULT (datetime('now')),
         last_login_at TEXT
     )""")
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN reset_token TEXT")
+        conn.execute("ALTER TABLE users ADD COLUMN reset_expires TEXT")
+        conn.commit()
+    except Exception:
+        pass
     conn.execute("""CREATE TABLE IF NOT EXISTS roles (
         slug TEXT PRIMARY KEY,
         label TEXT NOT NULL,
@@ -1378,7 +1402,8 @@ class Handler(BaseHTTPRequestHandler):
         owner pass; anything else is allowed only if a granted function owns it
         (unlisted sections like /admin/users stay owner-only)."""
         if path in ("/admin", "/admin/login", "/admin/logout", "/admin/register",
-                    "/admin/verify", "/admin/resend", "/admin/pending"):
+                    "/admin/verify", "/admin/resend", "/admin/pending",
+                    "/admin/forgot-password", "/admin/reset-password"):
             return False
         if self._session_uid() is None:  # owner: everything
             return False
@@ -1464,6 +1489,10 @@ class Handler(BaseHTTPRequestHandler):
         banner = ""
         if q.get("sent"):
             banner = '<p class="msg bake" style="color:#2e7d32">Account requested — check your inbox and click the confirmation link.</p>'
+        elif q.get("forgot"):
+            banner = '<p class="msg bake" style="color:#2e7d32">If an account exists for that email, a reset link is on its way — check your inbox.</p>'
+        elif q.get("reset"):
+            banner = '<p class="msg bake" style="color:#2e7d32">Password updated — sign in with your new password.</p>'
         elif q.get("verified"):
             banner = '<p class="msg bake" style="color:#2e7d32">Email verified! Sign in below (the owner still needs to grant your access roles).</p>'
         elif q.get("already"):
@@ -1509,6 +1538,7 @@ class Handler(BaseHTTPRequestHandler):
 <input id="em" type="email" placeholder="you@example.com" autocomplete="username"></label>
 <label style="display:block;text-align:left;font-size:12.5px;color:var(--muted);font-weight:700">Password
 <input id="pw" type="password" placeholder="password" autocomplete="current-password"></label>
+<div style="text-align:right;margin:-2px 0 2px"><a href="/admin/forgot-password" style="font-size:12px;color:var(--accent)">Forgot your password?</a></div>
 <button id="go" class="warm">Unlock admin</button>
 <p id="msg" class="msg"></p>
 <p class="login-hint">Public site: <a href="/">pstore home</a> · no login needed.</p>
@@ -1608,13 +1638,49 @@ $("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
             urllib.parse.quote(email, safe=""))
 
     def _send_verify_email(self, email, name=""):
-        """Email the signed confirmation link; True when accepted by the mailer."""
+        """Email the signed confirmation link; True when accepted by the mailer.
+        Branded HTML with a plain-text fallback (professional transactional mail)."""
+        confirm = self._verify_url(email)
         body = ("Hi %s,\n\nSomeone (probably you) requested a %s team account with "
                 "this email. Confirm it to activate the account:\n\n%s\n\nIf you "
                 "didn't sign up, ignore this email — the account stays inactive."
-                % (name or "there", mailer.STORE_NAME, self._verify_url(email)))
-        return mailer.send("Confirm your %s account — %s"
-                           % (mailer.STORE_NAME, email), body, email)
+                % (name or "there", mailer.STORE_NAME, confirm))
+        html = mailer.verify_email_html(confirm, name or email)
+        return mailer.send("Confirm your email — activate your %s account"
+                           % mailer.STORE_NAME, body, email, html=html)
+
+    @staticmethod
+    def _reset_url(email):
+        """Fresh, single-use password-reset token stored on the user row (professional:
+        a reset link works once and expires after REDIS_RESET_TTL, so a leaked link can't
+        be replayed)."""
+        base = os.environ.get("PSTORE_URL", "").rstrip("/") or ""
+        tok = secrets.token_urlsafe(32)
+        return ("%s/admin/reset-password?t=%s&e=%s"
+                % (base, urllib.parse.quote(tok, safe=""),
+                   urllib.parse.quote(email.strip().lower(), safe=""))), tok
+
+    def _send_reset_email(self, email, name=""):
+        """Email a single-use password-reset link; True when accepted by the mailer."""
+        url, token = self._reset_url(email)
+        expires = int(time.time()) + 3600
+        with _lock:
+            conn = _db()
+            try:
+                conn.execute(
+                    "UPDATE users SET reset_token=?, reset_expires=? WHERE email=?",
+                    (token, str(expires), email.strip().lower()))
+                conn.commit()
+            finally:
+                conn.close()
+        body = ("Hi there,\n\nWe received a request to reset the password for your "
+                "%s account. If that was you, open the link below to choose a new "
+                "password (valid for 1 hour, single use):\n\n%s\n\nIf you didn't "
+                "request a reset, ignore this email — your password stays the same."
+                % (mailer.STORE_NAME, url))
+        html = mailer.reset_email_html(url, name or email)
+        return mailer.send("Reset your %s password" % mailer.STORE_NAME, body, email,
+                           html=html)
 
     def _register_page(self, error=None):
         err = ('<p class="msg" style="color:#d64545">%s</p>' % seo._clean(error)) if error else ""
@@ -1641,6 +1707,8 @@ $("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
 <input id="em" type="email" placeholder="you@example.com" autocomplete="username"></label>
 <label style="display:block;text-align:left;font-size:12.5px;color:var(--muted);font-weight:700">Password (8+ characters)
 <input id="pw" type="password" placeholder="password" autocomplete="new-password"></label>
+<label style="display:block;text-align:left;font-size:12.5px;color:var(--muted);font-weight:700">Confirm password
+<input id="pw2" type="password" placeholder="repeat password" autocomplete="new-password"></label>
 <button id="go" class="warm">Request access</button>
 <p id="msg" class="msg"></p>
 <p class="login-hint">Already have an account? <a href="/admin/login">Sign in</a>.</p>
@@ -1648,13 +1716,14 @@ $("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
 <script>
 function $(id){{return document.getElementById(id);}}
 $("go").onclick = async () => {{
+  if ($("pw").value !== $("pw2").value) {{ $("msg").textContent = "Passwords don't match."; return; }}
   const r = await fetch("/admin/register", {{method:"POST", headers:{{"Content-Type":"application/json"}},
     body: JSON.stringify({{name: $("nm").value.trim(), email: $("em").value.trim(), password: $("pw").value}})}});
   const d = await r.json().catch(()=>({{ok:false, error:"bad response"}}));
   if (d.ok) location.href = "/admin/login?sent=1";
   else $("msg").textContent = d.error || "Couldn't create the account.";
 }};
-$("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").onclick(); }});
+$("pw2").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").onclick(); }});
 </script>
 </body></html>"""
         return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
@@ -1694,6 +1763,9 @@ $("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
                                           "Until it's verified, you can't sign in yet.")})
 
     def _verify_login(self):
+        """Activation link handler. On success the account is verified AND the
+        visitor is signed straight in, then routed to their dashboard by role
+        (dashboard function -> /dashboard, otherwise a welcome onboarding page)."""
         q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
         tok = (q.get("t") or [""])[0]
         want = str((q.get("e") or [""])[0]).strip().lower()
@@ -1703,23 +1775,36 @@ $("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
         except Exception:
             scope = None
         ok = False
+        uid = None
         if scope and scope.startswith("verify:") and scope.split(":", 1)[1] == want and want:
             with _lock:
                 conn = _db()
                 try:
-                    row = conn.execute("SELECT status FROM users WHERE email=?",
+                    row = conn.execute("SELECT id, status FROM users WHERE email=?",
                                        (want,)).fetchone()
                     if row and row["status"] == "unverified":
                         conn.execute("UPDATE users SET status='verified' WHERE email=?",
                                      (want,))
                         conn.commit()
                         ok = True
+                        uid = row["id"]
                 finally:
                     conn.close()
         if tok and not scope:
             loc = "/admin/login?baderr=1"
         elif scope and not ok:
             loc = "/admin/login?already=1"
+        elif ok and uid:
+            # auto-login: fresh session cookie, then straight to the dashboard
+            # the user is allowed (pending/onboarding page until roles are granted).
+            sess = self._new_session(uid)
+            loc = "/dashboard" if "dashboard" in _user_functions(uid=uid) else "/admin/pending?welcome=1"
+            self.send_response(302)
+            self._set_cookie(sess)
+            self.send_header("Location", loc)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return None
         else:
             loc = "/admin/login?verified=1"
         self.send_response(302)
@@ -1748,8 +1833,208 @@ $("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
         return self._send(200, {"ok": sent, "error": None,
                                 "alert": "Confirmation link resent — check your inbox."})
 
+    # ------------------------------------------------------- forgot / reset password
+
+    def _forgot_page(self, error=None):
+        err = ('<p class="msg" style="color:#d64545">%s</p>' % seo._clean(error)) if error else ""
+        body = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow"><title>Forgot password — pstore</title><link rel="stylesheet" href="/style.css">
+<style>.login-wrap{{min-height:78vh;display:flex;align-items:center;justify-content:center;padding:24px}}
+.login-card{{width:100%;max-width:380px;text-align:center}}
+.login-card h1{{font-size:24px;letter-spacing:-.4px}}
+.login-card input{{width:100%;padding:13px 16px;border:1px solid var(--border);border-radius:14px;font-size:15px;margin:8px 0 12px;background:#fff}}
+.login-card button{{width:100%;margin-top:4px}}
+.login-hint{{font-size:12.5px;color:var(--muted);margin-top:14px}}
+.login-hint a{{color:var(--accent)}}</style>
+</head><body>
+<header><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a></header>
+<main class="login-wrap"><div class="login-card">
+<section class="card">
+<h1>🔑 Forgot <span style="color:var(--accent)">your password?</span></h1>
+<p class="tagline" style="margin:0">Enter the email on your account and we'll send you a secure, single-use reset link.</p>
+{err}
+<label style="display:block;text-align:left;font-size:12.5px;color:var(--muted);font-weight:700">Account email
+<input id="em" type="email" placeholder="you@example.com" autocomplete="username"></label>
+<button id="go" class="warm">Email me a reset link</button>
+<p id="msg" class="msg"></p>
+<p class="login-hint">Remembered it after all? <a href="/admin/login">Back to sign in</a>.</p>
+</section></div></main>
+<script>
+function $(id){{return document.getElementById(id);}}
+$("go").onclick = async () => {{
+  const r = await fetch("/admin/forgot-password", {{method:"POST", headers:{{"Content-Type":"application/json"}},
+    body: JSON.stringify({{email: $("em").value.trim()}})}});
+  const d = await r.json().catch(()=>({{ok:false, error:"bad response"}}));
+  if (d.ok) location.href = "/admin/login?forgot=1";
+  else $("msg").textContent = d.error || "Couldn't send the link.";
+}};
+$("em").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").onclick(); }});
+</script>
+</body></html>"""
+        return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
+
+    def _forgot_post(self):
+        """Request a password reset. Always answers with a non-revealing message so
+        an attacker can't enumerate which emails have accounts (professional practice)."""
+        key = "forgot|" + security.client_key(self.headers, self._client_ip())
+        if not security.FORGOT_LIMITER.hit(key):
+            return self._send(429, {"ok": False,
+                                    "error": "Too many requests — wait a few minutes and try again."})
+        body = self._body()
+        email = str(body.get("email") or "").strip().lower()
+        if not email or "@" not in email or "." not in email.split("@")[-1]:
+            return self._send(400, {"ok": False, "error": "Enter a valid email address"})
+        row = _user_row(email)
+        # Owner account is managed via environment credentials — silently skip.
+        if (row and row.get("status") != "disabled"
+                and not hmac.compare_digest(email.encode("utf-8"), _ADMIN_EMAIL.encode("utf-8"))):
+            self._send_reset_email(email, row.get("name") or "")
+        security.FORGOT_LIMITER.clear(key)
+        return self._send(200, {"ok": True, "error": None,
+                                "alert": "If an account exists for that email, a reset link is on its way."})
+
+    @staticmethod
+    def _reset_peek(tok, email):
+        """Validate a single-use reset link WITHOUT consuming it (used to render
+        the form without burning the token on a plain page view)."""
+        if not tok or not email:
+            return False
+        with _lock:
+            conn = _db()
+            try:
+                row = conn.execute(
+                    "SELECT reset_token, reset_expires FROM users WHERE email=?",
+                    (email.strip().lower(),)).fetchone()
+                if not row or not row["reset_token"]:
+                    return False
+                try:
+                    expired = int(row["reset_expires"] or "0") < time.time()
+                except (TypeError, ValueError):
+                    expired = True
+                return (not expired
+                        and hmac.compare_digest(str(row["reset_token"]), tok))
+            finally:
+                conn.close()
+
+    @staticmethod
+    def _reset_claim(tok, email):
+        """Validate + consume a single-use reset link. Returns the user id on success
+        (token cleared), else None. Expired, used or forged links all fail."""
+        if not Handler._reset_peek(tok, email):
+            return None
+        with _lock:
+            conn = _db()
+            try:
+                row = conn.execute(
+                    "SELECT id FROM users WHERE reset_token=? AND email=?",
+                    (tok, email.strip().lower())).fetchone()
+                if not row:
+                    return None
+                uid = row["id"]
+                conn.execute("UPDATE users SET reset_token=NULL, reset_expires=NULL WHERE id=?",
+                             (uid,))
+                conn.commit()
+                return uid
+            finally:
+                conn.close()
+
+    def _reset_page(self, error=None):
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        tok = (q.get("t") or [""])[0]
+        email = str((q.get("e") or [""])[0]).strip().lower()
+        if not self._reset_peek(tok, email):
+            bad = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow"><title>Link expired — pstore</title><link rel="stylesheet" href="/style.css">
+<style>.login-wrap{{min-height:78vh;display:flex;align-items:center;justify-content:center;padding:24px}}
+.login-card{{width:100%;max-width:380px;text-align:center}}</style>
+</head><body>
+<header><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a></header>
+<main class="login-wrap"><div class="login-card"><section class="card">
+<h1>🕓 This link is no longer valid</h1>
+<p class="tagline">Password reset links expire after 1 hour and can only be used once. If it expired or was already used, just ask for a new one — takes a few seconds.</p>
+<p><a class="btn warm" href="/admin/forgot-password">Request a new reset link</a></p>
+<p class="login-hint">Or <a href="/admin/login">sign in</a>.</p>
+</section></div></main></body></html>"""
+            return self._send(200, bad.encode("utf-8"), "text/html; charset=utf-8")
+        err = ('<p class="msg" style="color:#d64545">%s</p>' % seo._clean(error)) if error else ""
+        tok_json = json.dumps(tok)
+        email_json = json.dumps(email)
+        reset_js = ("const r = await fetch(\"/admin/reset-password\", "
+                    "{method:\"POST\", headers:{\"Content-Type\":\"application/json\"}, "
+                    "body: JSON.stringify({t: %s, e: %s, password: $(\"pw\").value})});"
+                    % (tok_json, email_json))
+        body = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow"><title>Choose a new password — pstore</title><link rel="stylesheet" href="/style.css">
+<style>.login-wrap{{min-height:78vh;display:flex;align-items:center;justify-content:center;padding:24px}}
+.login-card{{width:100%;max-width:380px;text-align:center}}
+.login-card h1{{font-size:24px;letter-spacing:-.4px}}
+.login-card input{{width:100%;padding:13px 16px;border:1px solid var(--border);border-radius:14px;font-size:15px;margin:8px 0 12px;background:#fff}}
+.login-card button{{width:100%;margin-top:4px}}
+.login-hint{{font-size:12.5px;color:var(--muted);margin-top:14px}}</style>
+</head><body>
+<header><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a></header>
+<main class="login-wrap"><div class="login-card">
+<section class="card">
+<h1>🛡️ Choose a <span style="color:var(--accent)">new password</span></h1>
+<p class="tagline" style="margin:0">For <b>{{email}}</b>. At least 8 characters.</p>
+{err}
+<label style="display:block;text-align:left;font-size:12.5px;color:var(--muted);font-weight:700">New password
+<input id="pw" type="password" placeholder="new password" autocomplete="new-password"></label>
+<label style="display:block;text-align:left;font-size:12.5px;color:var(--muted);font-weight:700">Confirm new password
+<input id="pw2" type="password" placeholder="repeat new password" autocomplete="new-password"></label>
+<button id="go" class="warm">Save new password</button>
+<p id="msg" class="msg"></p>
+</section></div></main>
+<script>
+function $(id){{return document.getElementById(id);}}
+$("go").onclick = async () => {{
+  if ($("pw").value !== $("pw2").value) {{ $("msg").textContent = "Passwords don't match."; return; }}
+  {reset_js}
+  const d = await r.json().catch(()=>({{ok:false, error:"bad response"}}));
+  if (d.ok) location.href = "/admin/login?reset=1";
+  else $("msg").textContent = d.error || "Couldn't update the password.";
+}};
+$("pw2").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").onclick(); }});
+</script>
+</body></html>"""
+        body = body.replace("{email}", seo._clean(email))
+        return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
+
+    def _reset_post(self):
+        key = "reset|" + security.client_key(self.headers, self._client_ip())
+        if not security.RESET_LIMITER.hit(key):
+            return self._send(429, {"ok": False,
+                                    "error": "Too many attempts — wait a few minutes and try again."})
+        body = self._body()
+        tok = str(body.get("t") or "")
+        email = str(body.get("e") or "").strip().lower()
+        pw = str(body.get("password") or "")
+        if len(pw) < 8:
+            return self._send(400, {"ok": False, "error": "Password must be at least 8 characters"})
+        uid = self._reset_claim(tok, email)
+        if uid is None:
+            return self._send(400, {"ok": False,
+                                    "error": "This reset link is invalid, expired or already used."})
+        with _lock:
+            conn = _db()
+            try:
+                conn.execute("UPDATE users SET pass_hash=? WHERE id=?",
+                             (security.hash_password(pw), uid))
+                conn.commit()
+            finally:
+                conn.close()
+        return self._send(200, {"ok": True, "error": None,
+                                "alert": "Password updated — sign in with your new password."})
+
     def _pending_page(self):
         user = self._current_user()
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        welcome = '<p class="msg bake" style="color:#2e7d32">Your email is verified — welcome aboard! ' \
+                  'The owner needs to grant your access roles before the tools unlock for you.</p>' \
+            if q.get("welcome") else ""
         funcs = sorted(self._granted_functions(), key=lambda f: ALL_FUNCTIONS.index(f)
                        if f in ALL_FUNCTIONS else 99)
         if not funcs:
@@ -1767,6 +2052,7 @@ $("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
 <header><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
 <nav class="mininav"><a href="/admin">All pages</a><a href="/admin/logout">Logout</a></nav></header>
 <main class="wrap"><section class="card">
+{welcome}
 <h1>👋 Welcome, {seo._clean(user.get('name') or user.get('email') or '')}</h1>
 <p class="tagline">Email <b>{seo._clean(user['email'])}</b> is verified{((' · ' + ' · '.join(
     '<b>%s</b>' % seo._clean(r) for r in user.get('roles') or [])) if user.get('roles') else '')}.</p>
@@ -2034,7 +2320,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         path = parsed.path
         q = urllib.parse.parse_qs(parsed.query)
         try:
-            # public auth flow — login/logout/register/verify never need a session
+            # public auth flow — login/logout/register/verify/reset never need a session
             if path == "/admin/login":
                 if self._authed():
                     return self._redirect_login("/dashboard")
@@ -2045,6 +2331,10 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._register_page()
             if path == "/admin/verify":
                 return self._verify_login()
+            if path == "/admin/forgot-password":
+                return self._forgot_page()
+            if path == "/admin/reset-password":
+                return self._reset_page()
             if path == "/admin/resend":
                 return self._send(405, {"error": "method not allowed"})
             oauth_route = re.match(r"^/admin/oauth/(google|fb)(/callback)?$", path)
@@ -2293,6 +2583,10 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._register_post()
             if parsed.path == "/admin/resend":
                 return self._resend_post()
+            if parsed.path == "/admin/forgot-password":
+                return self._forgot_post()
+            if parsed.path == "/admin/reset-password":
+                return self._reset_post()
             if parsed.path == "/subscribe":
                 return self._subscribe()
             if parsed.path == "/api/track":
@@ -2301,6 +2595,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._page_view()
             if parsed.path == "/api/cron/send" and self._cron_ok():
                 return self._sequence_send()
+            if parsed.path == "/api/cron/inbox" and self._cron_ok():
+                return self._send(200, _inbox_tick())
             if parsed.path.startswith("/api/") and not self._authed():
                 return self._send(401, {"error": "unauthorized", "auth": False})
             if parsed.path.startswith("/api/") and self._function_denied(parsed.path):
@@ -7812,6 +8108,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}</s
             # tracked affiliate link + open pixel so email actions are attributed
             link_url = mailer.tracked_url(kw, asin, sid, idx) if asin else ""
             pixel_url = mailer.open_pixel_url(kw, asin, sid, idx)
+            reply_to = mailer.thread_reply_to(str(sid))
             text = mailer.render_body(mail, to_name=to_name, email=to,
                                       tracked_link=link_url)
             attachments = None
@@ -7823,7 +8120,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}</s
                 except Exception:
                     attachments = None
             if mailer.send(mail["subject"], text, to, attachments=attachments,
-                           pixel_url=pixel_url):
+                           pixel_url=pixel_url, reply_to=reply_to):
                 sent += 1
                 with _lock:
                     conn = _db()
@@ -7893,11 +8190,12 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}</s
         sid = sub["id"]
         link_url = mailer.tracked_url(kw, asin, sid, 99) if asin else ""
         pixel_url = mailer.open_pixel_url(kw, asin, sid, 99) if pixel_on else ""
+        reply_to = mailer.thread_reply_to(str(sid))
         text = mailer.render_body({"body": body_text, "subject": subject},
                                   to_name=sub.get("first_name") or "",
                                   email=sub["email"], tracked_link=link_url)
         ok = mailer.send(subject, text, sub["email"], attachments=attachments,
-                         pixel_url=pixel_url)
+                         pixel_url=pixel_url, reply_to=reply_to)
         if ok:
             self._log_email_send(campaign, sid, kw, asin)
         return ok
@@ -8221,12 +8519,14 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}</s
                 if (tracked and comp["asin"]) else ""
             pixel_url = mailer.open_pixel_url(comp["kw"], comp["asin"], cid, comp["idx"]) \
                 if pixel else ""
+            reply_to = mailer.thread_reply_to(str(cid)) if cid else ""
             text = mailer.render_body(comp["mail"], to_name=r.get("first_name") or "",
                                       email=r["email"], tracked_link=link_url)
             ok = True
             if not dry:
                 ok = mailer.send(comp["mail"]["subject"], text, r["email"],
-                                 attachments=comp["attachments"], pixel_url=pixel_url)
+                                 attachments=comp["attachments"], pixel_url=pixel_url,
+                                 reply_to=reply_to)
             if ok:
                 sent += 1
                 if not dry and dedup and r.get("kind") == "sub" and cid:
@@ -8278,6 +8578,89 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}</s
         res = self._dispatch_studio(spec, recipients, dry=dry)
         return self._send(200, res)
 
+    def _inbox_row(self, mid):
+        try:
+            mid = int(mid or 0)
+        except (TypeError, ValueError):
+            return None
+        with _lock:
+            conn = _db()
+            row = conn.execute(
+                "SELECT m.*, s.email AS subscriber_email FROM mailbox_messages m "
+                "LEFT JOIN subscribers s ON s.id=m.subscriber_id WHERE m.id=?", (mid,)).fetchone()
+            conn.close()
+        return dict(row) if row else None
+
+    def _inbox_list(self, limit=200):
+        with _lock:
+            conn = _db()
+            rows = [dict(r) for r in conn.execute(
+                "SELECT m.*, s.email AS subscriber_email FROM mailbox_messages m "
+                "LEFT JOIN subscribers s ON s.id=m.subscriber_id "
+                "WHERE m.mailbox='inbox' ORDER BY m.id DESC LIMIT ?", (limit,))]
+            unread = conn.execute(
+                "SELECT COUNT(*) c FROM mailbox_messages WHERE mailbox='inbox' "
+                "AND status='unread'").fetchone()["c"]
+            conn.close()
+        return {"ok": True, "inbox": rows, "inbox_unread": unread}
+
+    def _inbox_set(self, mid, status):
+        try:
+            mid = int(mid or 0)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "bad message id"}
+        if status not in ("unread", "read", "archived", "trash"):
+            return {"ok": False, "error": "invalid status"}
+        with _lock:
+            conn = _db()
+            conn.execute("UPDATE mailbox_messages SET status=? WHERE id=?", (status, mid))
+            conn.commit()
+            conn.close()
+        return {"ok": True}
+
+    def _inbox_delete(self, mid):
+        try:
+            mid = int(mid or 0)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "bad message id"}
+        with _lock:
+            conn = _db()
+            conn.execute("DELETE FROM mailbox_messages WHERE id=?", (mid,))
+            conn.commit()
+            conn.close()
+        return {"ok": True}
+
+    def _inbox_reply(self, mid, body):
+        body = (body or "").strip()
+        if not body:
+            return {"ok": False, "error": "Reply body is empty."}
+        msg = self._inbox_row(mid)
+        if not msg:
+            return {"ok": False, "error": "Message not found."}
+        to = (msg.get("from_addr") or "").strip()
+        if not to:
+            return {"ok": False, "error": "No sender address to reply to."}
+        subject = msg.get("subject") or ""
+        if subject and not subject.lower().startswith("re:"):
+            subject = "Re: " + subject
+        reply_to = ""
+        if msg.get("subscriber_id"):
+            reply_to = mailer.thread_reply_to(str(msg["subscriber_id"]))
+        if mailer.send(subject, body, to, reply_to=reply_to,
+                       in_reply_to=(msg.get("message_id") or "")):
+            with _lock:
+                conn = _db()
+                conn.execute("UPDATE mailbox_messages SET status='read', "
+                             "replied_at=datetime('now') WHERE id=?", (int(mid),))
+                conn.commit()
+                conn.close()
+            sid = int(msg.get("subscriber_id") or 0)
+            if sid:
+                self._log_email_send("reply:%d" % int(mid), sid, "", "")
+            return {"ok": True, "sent": True, "subject": subject or "Re: (no subject)",
+                    "to": to}
+        return {"ok": False, "error": "SMTP send failed."}
+
     def _studio_api(self, q):
         if self.command == "GET":
             with _lock:
@@ -8291,6 +8674,13 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}</s
                     "SELECT * FROM sent_emails ORDER BY id DESC LIMIT 60")]
                 oneoff_log = [dict(r) for r in conn.execute(
                     "SELECT * FROM email_sends ORDER BY id DESC LIMIT 60")]
+                inbox = [dict(r) for r in conn.execute(
+                    "SELECT m.*, s.email AS subscriber_email FROM mailbox_messages m "
+                    "LEFT JOIN subscribers s ON s.id=m.subscriber_id "
+                    "WHERE m.mailbox='inbox' ORDER BY m.id DESC LIMIT 200")]
+                inbox_unread = conn.execute(
+                    "SELECT COUNT(*) c FROM mailbox_messages WHERE mailbox='inbox' "
+                    "AND status='unread'").fetchone()["c"]
                 conn.close()
             niches = [n["keyword"] for n in self._all_niches()]
             live_kw = {n["keyword"].strip().lower() for n in self._all_niches()}
@@ -8312,6 +8702,8 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}</s
                 "segments": seg_rep["counts"], "segmap": segmap,
                 "outbox": outbox,
                 "sent_log": sent_log, "oneoff_log": oneoff_log, "blocked": blocked,
+                "inbox": inbox, "inbox_unread": inbox_unread,
+                "inbox_configured": mailer.inbound_configured(),
                 "config": _autosend_cfg(), "autosend_state": state,
                 "sequence_length": mailer.SEQUENCE_LENGTH,
                 "smtp_configured": mailer.configured(),
@@ -8356,6 +8748,24 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}</s
                 conn.commit()
                 conn.close()
             return self._send(200, {"ok": True})
+        if action == "inbox_poll":
+            res = _inbox_tick()
+            if res.get("ok"):
+                res.update(self._inbox_list())
+            return self._send(200, res)
+        if action == "inbox_list":
+            return self._send(200, self._inbox_list())
+        if action == "inbox_get":
+            return self._send(200, {"ok": True,
+                                    "message": self._inbox_row(body.get("id") or 0)})
+        if action == "inbox_set":
+            return self._send(200, self._inbox_set(body.get("id") or 0,
+                                                   (body.get("status") or "").strip()))
+        if action == "inbox_delete":
+            return self._send(200, self._inbox_delete(body.get("id") or 0))
+        if action == "inbox_reply":
+            return self._send(200, self._inbox_reply(body.get("id") or 0,
+                                                     body.get("body") or ""))
         return self._send(400, {"ok": False, "error": "unknown action"})
 
     def _admin_emails(self, q):
@@ -8401,6 +8811,22 @@ fieldset{border:1.5px solid var(--line,#eee);border-radius:16px;padding:14px 16p
 legend{font-weight:800;font-size:13px;padding:0 8px;color:var(--accent,#ff6b2c)}
 .whenrow{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:10px}
 .bump{background:#fff0e6;border:1.5px solid #ffd2b8;color:#a4421a;border-radius:12px;padding:9px 12px;font-size:12.5px;margin-bottom:12px}
+.tabbar{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0 2px}
+.tab{border:1.5px solid var(--line,#eee);background:#fff;border-radius:999px;padding:8px 16px;font-size:13.5px;font-weight:700;cursor:pointer;color:var(--muted,#888)}
+.tab.on{background:var(--accent,#ff6b2c);border-color:var(--accent,#ff6b2c);color:#fff}
+.ibadge{display:inline-grid;place-items:center;min-width:19px;height:19px;padding:0 5px;border-radius:999px;background:#fff;color:var(--accent,#ff6b2c);font-size:11.5px;font-weight:800;margin-left:4px;vertical-align:middle}
+.tab.on .ibadge{background:#fff;color:var(--accent,#ff6b2c)}
+.mailrow{display:flex;align-items:flex-start;gap:10px;border:1.5px solid var(--line,#eee);border-radius:12px;padding:10px 12px;font-size:13px;background:#fff;margin:5px 0;cursor:pointer}
+.mailrow.unread{border-color:#ffb98f;background:#fff6ee}
+.mailrow .mfrom{font-weight:700;font-size:13px}
+.mailrow .msubj{color:var(--text,#2b2233);font-size:13px}
+.mailrow .msnip{color:var(--muted,#888);font-size:12px;margin-top:1px}
+.mailrow .mact{margin-left:auto;display:flex;gap:6px;flex:none}
+.mailrow .mact button{flex:none}
+.mailrow .mdate{color:var(--muted,#888);font-size:11.5px;flex:none}
+.mailrow .mstatus{flex:none;font-size:11px}
+.ibox-head{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+#msg-view pre{white-space:pre-wrap;word-break:break-word;background:#fbf7ef;border:1px solid var(--line,#eee);border-radius:12px;padding:12px;font-size:13px;max-height:320px;overflow:auto}
 /* min-width:0 lets flex/grid rows shrink and wrap instead of blowing the
    page out to the sum of their controls' intrinsic widths on narrow screens */
 main.studiox,.studiox section,.studiox fieldset,.studiox .row,.studiox .switch{min-width:0}
@@ -8431,7 +8857,11 @@ main.studiox,.studiox section,.studiox fieldset,.studiox .row,.studiox .switch{m
 <p class="tagline">Compose once — send to one subscriber, a segment, or any address list, now or on a schedule. Every link is signed, tracked and unsubscribable.</p></div>
 __NAV__
 </header>
-<main class="studiox">
+<div class="tabbar">
+ <button class="tab on" data-tab="send" onclick="tab('send')">✍️ Compose &amp; send</button>
+ <button class="tab" data-tab="inbox" onclick="tab('inbox')">📥 Inbox <span class="ibadge" id="ibadge" style="display:none"></span></button>
+</div>
+<main class="studiox" id="main-send">
  <section class="card"><h2>🕹 Sender &amp; auto-schedule</h2>
   <div class="row">
    <div class="feature"><h3 id="smtp-state">…</h3><p class="hint">SMTP</p></div>
@@ -8544,7 +8974,28 @@ __NAV__
    <tbody id="log-body"><tr><td colspan="4" class="hint">Loading…</td></tr></tbody></table></div>
  </section>
 </main>
-<footer><p>Times are UTC. Every email carries a signed unsubscribe link and List-Unsubscribe header; tracked links go through <code>/e/</code> and record source=email clicks.</p></footer>
+<main class="studiox" id="main-inbox" style="display:none">
+ <section class="card"><h2>📥 Inbox — replies to your mail</h2>
+  <div class="ibox-head">
+   <button class="btn warm" onclick="pollInbox()">↻ Check now</button>
+   <span class="hint" id="ib-net">…</span>
+   <span class="hint" id="ib-count" style="margin-left:auto"></span>
+  </div>
+  <div id="inbox-list" class="chipsrow"></div>
+  <div id="msg-view" class="compose-box" style="display:none">
+   <h3 id="mv-subj">—</h3>
+   <p class="hint" id="mv-meta"></p>
+   <pre id="mv-body"></pre>
+   <label style="display:block;margin-top:10px">Reply
+     <textarea id="mv-reply" rows="5" placeholder="Write your reply, then send — it lands in the customer's inbox and threads right back here." style="width:100%"></textarea></label>
+   <div class="row" style="margin-top:8px">
+     <button class="bigbtn" id="mv-send" onclick="sendReply()">↩ Send reply</button>
+   </div>
+   <p id="mv-msg" class="netmsg" style="margin-top:8px"></p>
+  </div>
+ </section>
+</main>
+<footer><p>Times are UTC. Every email carries a signed unsubscribe link and List-Unsubscribe header; tracked links go through <code>/e/</code> and record source=email clicks. Replies sent to your tagged address land on the Inbox tab and map back to the subscriber who wrote.</p></footer>
 __TOTOP__
 <script>
 const $=id=>document.getElementById(id);
@@ -8574,7 +9025,14 @@ function renderOutbox(){const rows=DATA.outbox||[];$("outbox-body").innerHTML=ro
 function cancel(id){fetch("/api/mail",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"cancel",id})}).then(r=>r.json()).then(()=>load());}
 function renderLog(){const rows=[];for(const s of (DATA.sent_log||[]))rows.push([s.sent_at,"seq "+s.email_index,s.subject,"sub #"+s.subscriber_id]);for(const o of (DATA.oneoff_log||[]))rows.push([o.sent_at,"one-off",o.campaign,o.keyword+" → sub #"+o.subscriber_id]);$("log-body").innerHTML=rows.slice(0,40).map(r=>`<tr><td>${esc(r[0])}</td><td>${r[1]}</td><td>${esc(r[2])}</td><td>${esc(r[3])}</td></tr>`).join("")||'<tr><td colspan="4" class="hint">No sends yet.</td></tr>';}
 function renderBlocked(){const b=DATA.blocked||[];if(!b.length){$("blocked-wrap").innerHTML="";return;}$("blocked-wrap").innerHTML=`<div class="bump">⚠ ${b.length} active subscriber(s) never receive sequence mail because their niche isn't saved with products: ${b.map(s=>esc(s.email)+" ("+esc(s.keyword)+")").join(" · ")}. Mine that keyword on the dashboard, or send them a custom email right here.</div>`;}
-function renderAll(){renderNow();renderSubs();renderOutbox();renderLog();renderBlocked();fillNiches();fillSegs();count();}
+function renderInbox(){const list=DATA.inbox||[];const unread=DATA.inbox_unread||0;const b=$("ibadge");b.style.display=unread?"":"none";if(unread)b.textContent=unread;if(DATA.inbox_configured){$("ib-net").textContent="IMAP bridge on"+(DATA.smtp_host&&DATA.smtp_configured?" · "+DATA.smtp_host:"");}else{$("ib-net").textContent="No IMAP mailbox configured — replies aren't captured yet (set IMAP_HOST/USER/PASSWORD or forward to /api/cron/inbox).";}$("ib-count").textContent=list.length+" message"+(list.length===1?"":"s")+" · "+unread+" unread";$("inbox-list").innerHTML=list.length?list.map(m=>{const who=(m.from_name&&m.from_name!==m.from_addr)?esc(m.from_name)+" &lt;"+esc(m.from_addr)+"&gt;":esc(m.from_addr);const sub=(m.subscriber_id?(" · linked sub #"+m.subscriber_id+(m.subscriber_email?" — "+esc(m.subscriber_email):"")):"");return `<div class="mailrow ${m.status==="unread"?"unread":""}"><span style="flex:1" onclick="openMsg(${m.id})"><span class="mfrom">${who}</span><br><span class="msubj">${esc(m.subject||"(no subject)")}</span><br><span class="msnip">${esc((m.text||"").replace(/\s+/g," ").slice(0,90))}</span></span><span class="mstatus">${esc(m.status)}${m.replied_at?" · replied":""}</span><span class="mdate">${esc((m.sent_at||"").slice(0,16))}</span><span class="mact"><button class="btn ghost" title="Archive" onclick="event.stopPropagation();msgAction(${m.id},'archived')">🗂</button><button class="btn ghost" title="Delete" onclick="event.stopPropagation();removeMsg(${m.id})">🗑</button></span></div>`;}).join(""):'<p class="hint">No messages yet — reply to one of your sends and it lands here.</p>';}
+function openMsg(id){const m=(DATA.inbox||[]).find(x=>x.id===id);if(!m)return;$("mv-subj").textContent=m.subject||"(no subject)";$("mv-meta").textContent="From: "+esc(m.from_addr)+(m.subscriber_email?(" — "+esc(m.subscriber_email)):"")+" · "+esc(m.sent_at||"")+" · linked to sub #"+(m.subscriber_id||"—");$("mv-body").textContent=m.text||"(no plain-text body)";$("msg-view").style.display="";$("msg-view").scrollIntoView({behavior:"smooth",block:"start"});window._curMsg=id;if(m.status!=="read")msgAction(id,"read",true);}
+function msgAction(id,status,silent){fetch("/api/mail",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"inbox_set",id,status})}).then(r=>r.json()).then(()=>{if(!silent)load();});}
+function removeMsg(id){fetch("/api/mail",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"inbox_delete",id})}).then(r=>r.json()).then(()=>load());}
+function pollInbox(){const btn=document.querySelector("#main-inbox .btn.warm");const old=btn.textContent;btn.textContent="Checking…";btn.disabled=true;fetch("/api/mail",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"inbox_poll"})}).then(r=>r.json()).then(d=>{if(d.error){$("ib-net").textContent="⚠ "+d.error;return;}DATA.inbox=d.inbox||DATA.inbox;if(d.inbox_unread!==undefined)DATA.inbox_unread=d.inbox_unread;renderInbox();}).finally(()=>{btn.textContent=old;btn.disabled=false;});}
+async function sendReply(){const id=window._curMsg;const body=$("mv-reply").value;if(!body.trim()){alert("Write something first.");return;}const btn=$("mv-send");btn.disabled=true;const r=await fetch("/api/mail",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"inbox_reply",id,body})});const d=await r.json();$("mv-msg").textContent=d.error?"✗ "+d.error:(d.sent?"↩ Reply sent to "+d.to+". It'll thread back here.":"");if(d.sent){$("mv-reply").value="";load();}btn.disabled=false;}
+function tab(name){$("main-send").style.display=name==="send"?"":"none";$("main-inbox").style.display=name==="inbox"?"":"none";document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on",t.dataset.tab===name));if(name==="inbox")renderInbox();}
+function renderAll(){renderNow();renderSubs();renderOutbox();renderLog();renderBlocked();renderInbox();fillNiches();fillSegs();count();}
 async function sendIt(){const pay={action:"send",spec:spec(),options:opts(),recipients:recSpec()};const when=document.querySelector('input[name="when"]:checked').value;let dt="";if(when==="sched"){dt=$("w-dt").value;if(!dt){alert("Pick a schedule time first.");return;}pay.schedule_at=dt;}const btn=$("bigbtn");btn.disabled=true;$("outmsg").textContent="Working…";const r=await fetch("/api/mail",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(pay)});const d=await r.json();if(d.scheduled){$("outmsg").textContent=`📅 Scheduled #${d.outbox_id} — ${d.recipients} recipient(s) at ${dt} UTC.`;}else if(d.error){$("outmsg").textContent="✗ "+d.error;}else if(d.dry_run){$("outmsg").textContent=`👁 Dry run: ${d.sent} ready · ${d.skipped} skipped · ${d.errors} errors · of ${d.recipients} recipient(s).`;}else{$("outmsg").textContent=`📨 Sent ${d.sent} · skipped ${d.skipped} · errors ${d.errors} · of ${d.recipients}.`;}load();setTimeout(()=>{btn.disabled=false;updBtn();},700);}
 document.addEventListener("DOMContentLoaded",async()=>{const r=await fetch("/api/mail");DATA=await r.json();renderAll();
 $("f-niche").addEventListener("change",e=>{FILT.niche=e.target.value;renderSubs();});
@@ -9407,6 +9865,78 @@ class _AutosendStub:
         return Handler._dispatch_studio(self, spec, recipients, dry)
 
 
+def _ingest_inbound(messages, mailbox="inbox"):
+    """Store fetched inbound messages into mailbox_messages, deduped by
+    Message-ID, and link each to a subscriber: the tagged Reply-To wins (the
+    address carries the subscriber id), else a from-address fallback match."""
+    import hashlib as _hashlib
+    stored = dupes = linked = 0
+    cap = min(len(messages or []), 100)
+    for m in (messages or [])[:cap]:
+        msg_id = (m.get("message_id") or "").strip()
+        if not msg_id:
+            msg_id = _hashlib.sha1(("%s|%s|%s" % (m.get("from_addr"), m.get("date"), m.get("subject"))
+                                    ).encode("utf-8", "replace")).hexdigest()[:24]
+        sid = mailer.parse_thread_tag(m.get("to_header") or "")
+        if not sid:
+            frm = (m.get("from_addr") or "").strip().lower()
+            if frm:
+                try:
+                    with _lock:
+                        conn = _db()
+                        row = conn.execute("SELECT id FROM subscribers WHERE lower(email)=?",
+                                           (frm,)).fetchone()
+                        conn.close()
+                    sid = row["id"] if row else None
+                except Exception:
+                    sid = None
+        row = None
+        with _lock:
+            conn = _db()
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO mailbox_messages "
+                "(message_id, in_reply_to, mailbox, from_addr, from_name, subject, text, "
+                "html, subscriber_id, status) VALUES (?,?,?,?,?,?,?,?,?,'unread')",
+                (msg_id, (m.get("in_reply_to") or "")[:500], mailbox,
+                 (m.get("from_addr") or "")[:500], (m.get("from_name") or "")[:500],
+                 (m.get("subject") or "")[:500], m.get("text") or "", m.get("html") or "",
+                 int(sid or 0)))
+            conn.commit()
+            conn.close()
+        if cur.rowcount and cur.rowcount > 0:
+            stored += 1
+            if sid:
+                linked += 1
+        else:
+            dupes += 1
+    return {"ok": True, "stored": stored, "dupes": dupes, "linked": linked,
+            "mailbox": mailbox}
+
+
+def _inbox_tick():
+    """Fetch the latest replies from the IMAP inbox, or no-op when unconfigured.
+    Also callable any time via POST /api/cron/inbox (webhook mode). A test hook
+    (mailer._imap_fetch) stands in for the network path."""
+    if not mailer.inbound_configured() and mailer._imap_fetch is None:
+        return {"ok": False, "error": "IMAP inbox not configured "
+                "(set IMAP_HOST/USER/PASSWORD or point a forwarder at /api/cron/inbox)",
+                "stored": 0, "dupes": 0, "linked": 0}
+    try:
+        msgs = mailer.fetch_inbound()
+    except Exception as exc:  # a flaky network must never kill the loop
+        return {"ok": False, "error": str(exc)[:200], "stored": 0, "dupes": 0, "linked": 0}
+    return _ingest_inbound(msgs)
+
+
+def _inbox_loop():
+    while True:
+        time.sleep(60)
+        try:
+            _inbox_tick()
+        except Exception:
+            pass
+
+
 def _autosend_tick():
     """Run the sequence send now IF (a) enabled and (b) current UTC hour is
     scheduled and (c) this date/hour slot hasn't already run. Persists state
@@ -9520,6 +10050,13 @@ def main():
     print("social scheduler: auto-flush every 60s (due scheduled posts)")
     threading.Thread(target=_outbox_loop, daemon=True).start()
     print("email outbox: due scheduled studio sends every 45s")
+    threading.Thread(target=_inbox_loop, daemon=True).start()
+    if mailer.configured() and not mailer.inbound_configured():
+        print("NOTE: email inbox not configured — replies go nowhere. Set IMAP_HOST/USER/"
+              "PASSWORD (or point a forwarder at POST /api/cron/inbox with EMAIL_CRON_SECRET) "
+              "to capture them in the Email Studio. Set PSTORE_REPLY_DOMAIN to tag each "
+              "send's Reply-To with its subscriber id.")
+    print("email inbox: polls IMAP replies every 60s (POST /api/cron/inbox also triggers)")
     if _AUTOSEND_HOURS or _get_setting("autosend.hours"):
         threading.Thread(target=_autosend_loop, daemon=True).start()
         print("sequence autosend: daily at %s UTC, cap %d/run"
