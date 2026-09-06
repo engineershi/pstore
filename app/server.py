@@ -51,6 +51,7 @@ import sem
 import social
 import publish
 import suggest
+import webmasters
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(ROOT, "static")
@@ -419,6 +420,11 @@ def _set_setting(key, value):
         pass
 
 
+# webmasters keeps connector tokens + synced snapshots in the settings table.
+webmasters._STORE_GET = _get_setting
+webmasters._STORE_SET = _set_setting
+
+
 def _social_flush_loop(interval=60, amplify=True):
     """Daemon: flush due scheduled posts automatically every `interval` seconds
     so owners don't have to click Flush, then re-amplify proven winners.
@@ -669,6 +675,11 @@ def _db():
         source TEXT,
         created_at TEXT DEFAULT (datetime('now'))
     )""")
+    try:
+        conn.execute("ALTER TABLE events ADD COLUMN referrer TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        conn.rollback()
     try:
         conn.execute("ALTER TABLE clicks ADD COLUMN content TEXT")
         conn.commit()
@@ -1318,6 +1329,7 @@ $("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
               ("/admin/sem", "🎯 SEM", "sem")]),
             ("Build",
              [("/admin/seo", "🔍 SEO", "seo"),
+              ("/admin/seoengines", "🔎 Engines", "seoengines"),
               ("/admin/cms", "🧩 Lead pages", "cms"),
               ("/admin/ebooks", "📕 Ebooks", "ebooks"),
               ("/admin/refresh", "📡 Refresh", "refresh")]),
@@ -1523,6 +1535,9 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             if oauth_route:
                 provider = "google" if oauth_route.group(1) == "google" else "facebook"
                 return self._oauth(provider, callback=bool(oauth_route.group(2)), q=q)
+            eng_oauth = re.match(r"^/admin/oauth/seoengines/cb/(gsc|yandex)$", path)
+            if eng_oauth:
+                return self._seoengine_oauth_cb(eng_oauth.group(1), q)
             # public opt-out + click beacons never need a session
             if path.startswith("/unsubscribe"):
                 return self._unsubscribe(q)
@@ -1621,6 +1636,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._admin_sem(q)
             if path == "/admin/seo":
                 return self._admin_seo()
+            if path == "/admin/seoengines":
+                return self._admin_seoengines(q)
             if path == "/admin/manual":
                 return self._admin_manual()
             if path == "/admin/manual.pdf":
@@ -1638,6 +1655,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._sem_api(q)
             if path == "/api/seo-audit":
                 return self._seo_audit_api()
+            if path == "/api/seoengines":
+                return self._seoengines_api(q)
             if path == "/api/seo/topics":
                 return self._seo_topics_api()
             if path == "/api/marketing":
@@ -1765,6 +1784,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._settings_test()
             if parsed.path == "/api/indexnow":
                 return self._indexnow_post()
+            if parsed.path == "/api/seoengines":
+                return self._seoengines_post()
             if parsed.path == "/api/sequence/send":
                 return self._sequence_send()
             if parsed.path == "/api/mail":
@@ -2703,6 +2724,277 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         ok, message = indexnow.submit_urls(urls)
         return self._send(200, {"ok": ok, "message": message, "submitted": len(urls)})
 
+    # ------------------------------------------------ search-engine consoles
+    @staticmethod
+    def _engine_from_referrer(referrer):
+        """Map a referrer origin to the search engine that sent it."""
+        h = (referrer or "").lower()
+        if not h:
+            return "direct"
+        if "google." in h:
+            return "google"
+        if "bing." in h:
+            return "bing"
+        if "duckduckgo." in h:
+            return "duckduckgo"
+        if "yandex." in h:
+            return "yandex"
+        if "yahoo." in h:
+            return "yahoo"
+        return "other"
+
+    def _seoengines_traffic(self, days=28):
+        """On-site traffic attributed by referrer: pageviews (events) + Amazon
+        clicks (clicks) per engine over the window. Self-collected, so it works
+        even before console tokens exist."""
+        buckets = ("direct", "google", "bing", "yandex", "duckduckgo",
+                   "yahoo", "other")
+        out = {b: {"views": 0, "clicks": 0} for b in buckets}
+        with _lock:
+            conn = _db()
+            try:
+                vw = conn.execute(
+                    "SELECT COALESCE(referrer,'') r, COUNT(*) c FROM events "
+                    "WHERE name='view' AND created_at >= datetime('now', 'localtime', ?) "
+                    "GROUP BY r", ("-%d days" % days,)).fetchall()
+                ck = conn.execute(
+                    "SELECT COALESCE(referrer,'') r, COUNT(*) c FROM clicks "
+                    "WHERE created_at >= datetime('now', 'localtime', ?) "
+                    "GROUP BY r", ("-%d days" % days,)).fetchall()
+            finally:
+                conn.close()
+        for r, c in vw:
+            e = self._engine_from_referrer(r)
+            out[e]["views"] = out.get(e, {}).get("views", 0) + int(c)
+        for r, c in ck:
+            e = self._engine_from_referrer(r)
+            out[e]["clicks"] = out.get(e, {}).get("clicks", 0) + int(c)
+        total_v = sum(v["views"] for v in out.values())
+        total_c = sum(v["clicks"] for v in out.values())
+        return {"days": days, "engines": out, "totals": {"views": total_v,
+                                                         "clicks": total_c}}
+
+    def _seoengines_api(self, q):
+        engines = webmasters.engines_status()
+        days = int((q.get("days") or ["28"])[0])
+        traffic = self._seoengines_traffic(days)
+        snaps = {}
+        for e, _n, *_ in [(x["engine"], x["name"]) for x in engines]:
+            s = webmasters.last_sync(e)
+            if s:
+                snaps[e] = s
+        return self._send(200, {"engines": engines, "traffic": traffic,
+                                "snapshots": snaps, "host": webmasters.host_of(),
+                                "sitemap": webmasters.site_url() + "/sitemap.xml"})
+
+    def _seoengines_post(self):
+        body = self._body()
+        action = (body.get("action") or "").strip()
+        engine = (body.get("engine") or "").strip().lower()
+        if action == "sync" and engine in ("gsc", "bing", "yandex"):
+            ok, data = webmasters.sync_engine(engine,
+                                              int(body.get("days") or 28))
+            return self._send(200, {"ok": ok, **data})
+        if action == "submit" and engine in ("gsc", "bing"):
+            if engine == "gsc":
+                ok, msg = webmasters.gsc_submit_sitemap()
+            else:
+                key = webmasters.BING_API_KEY or \
+                    webmasters.store_get("seoeng.bing.apikey", "")
+                if not key:
+                    return self._send(200, {"ok": False, "error": "bing key not set"})
+                s, d = webmasters.bing_submit_sitemap(key, webmasters.site_url())
+                ok, msg = s in (200, 201), (str(d)[:150])
+            return self._send(200, {"ok": ok, "error" if not ok else "message": msg} if not ok
+                              else {"ok": ok, "message": msg})
+        if action == "bingkey":
+            webmasters.store_set("seoeng.bing.apikey",
+                                 (body.get("key") or "").strip())
+            return self._send(200, {"ok": True})
+        if action == "verify" and engine in ("google", "bing", "yandex"):
+            token = (body.get("token") or "").strip()
+            setter = {"google": seo.set_google_site_verification,
+                      "bing": seo.set_bing_site_verification,
+                      "yandex": seo.set_yandex_site_verification}[engine]
+            setter(token)
+            return self._send(200, {"ok": True, "engine": engine,
+                                    "active": bool(token)})
+        if action == "connect" and engine in ("gsc", "yandex"):
+            state = security.make_token("oauth:seoengines:" + engine, 600)
+            url = webmasters.gsc_auth_url(state) if engine == "gsc" \
+                else webmasters.yandex_auth_url(state)
+            if not url:
+                return self._send(200, {"ok": False,
+                                        "error": "client id/secret not set (env)"})
+            self._set_cookie(state, max_age=600, cookie=_OAUTH_COOKIE, path="/admin")
+            return self._send(200, {"ok": True, "url": url})
+        return self._send(400, {"error": "unknown action"})
+
+    def _seoengine_oauth_cb(self, engine, q):
+        """OAuth consent-callback for a search-engine console (gsc | yandex).
+        Seasoned like the login OAuth: signed state cookie must match."""
+        code = (q.get("code") or [""])[0]
+        state = (q.get("state") or [""])[0]
+        expect = self._cookie_token(_OAUTH_COOKIE)
+        scope = security.verify_token(expect) if expect else None
+        expect_scope = "oauth:seoengines:" + engine
+        def go(msg, failed=False):
+            if msg:
+                return self._redirect("/admin/seoengines?%s=%s" % (
+                    "err" if failed else "msg", urllib.parse.quote(msg, safe="")))
+            return self._redirect("/admin/seoengines")
+        if not code or not expect or not state or scope != expect_scope \
+                or not hmac.compare_digest(expect, state):
+            self._set_cookie("x", max_age=0, cookie=_OAUTH_COOKIE, path="/admin")
+            return go("consent link was stale or tampered with — try again", True)
+        try:
+            ok, msg = (webmasters.gsc_exchange(code) if engine == "gsc"
+                       else webmasters.yandex_exchange(code))
+        except Exception as exc:
+            ok, msg = False, str(exc)[:200]
+        self._set_cookie("x", max_age=0, cookie=_OAUTH_COOKIE, path="/admin")
+        if ok:
+            return go("connected ✓")
+        return go(msg[:200] if msg else "connect failed", True)
+
+    def _redirect(self, location):
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        return None
+
+    def _admin_seoengines(self, q):
+        """Search-engine consoles hub: connect each engine's console, submit the
+        sitemap, verify ownership tokens, and read clicks/impressions either from
+        each console's API or from our own referrer-attributed on-site data."""
+        nav = self._admin_nav('seoengines')
+        setup = {
+            "gsc": "Create a Google Cloud OAuth2 web client + enable the Search Console API. Set PSTORE_GSC_CLIENT_ID / PSTORE_GSC_CLIENT_SECRET on the host and add redirect URI %s/admin/oauth/seoengines/cb/gsc. Then Connect to approve it."
+                   % seo.BASE_URL,
+            "bing": "Add this exact site in Bing Webmaster, then paste/保存 your Bing API key (also settable via PSTORE_BING_API_KEY). No OAuth needed.",
+            "yandex": "Create a Yandex OAuth app (PSTORE_YANDEX_CLIENT_ID / PSTORE_YANDEX_CLIENT_SECRET) with redirect URI %s/admin/oauth/seoengines/cb/yandex, add this host in Yandex Webmaster, then Connect."
+                   % seo.BASE_URL,
+        }
+        names = {"gsc": "Google Search Console",
+                 "bing": "Bing Webmaster",
+                 "yandex": "Yandex Webmaster"}
+        engines = [("gsc",), ("bing",), ("yandex",)]
+        cards = []
+        for (eng,) in engines:
+            if eng == "bing":
+                connect_btn = ('<button class="btn ghost" disabled title="Bing uses a key, '
+                               'not OAuth">key-based</button>')
+                extra = ("<div class='row' style='flex-wrap:wrap;gap:1px'>"
+                         "<input id='vk-bing' placeholder='Bing API key' "
+                         "style='width:260px;max-width:100%'>&nbsp;"
+                         "<button class='btn' onclick='saveKey(\"bing\")'>Save key</button></div>")
+            else:
+                connect_btn = ('<button class="warm" onclick="act(\'connect\',\'%s\')">'
+                               'Connect console</button>' % eng)
+                extra = ""
+            cards.append("""
+        <div class="card" style="margin:0">
+         <h2>%s</h2>
+         <div class="row">
+          <div class="feature"><h3 id="st-%s">…</h3><p class="hint">state</p></div>
+          <div class="feature"><h3 id="tok-%s">…</h3><p class="hint">token</p></div>
+          <div class="feature"><h3 id="last-%s">never</h3><p class="hint">last sync</p></div>
+         </div>
+         <div class="row" style="margin-top:8px;flex-wrap:wrap;gap:8px">
+          %s
+          <button class="btn" onclick="act('sync','%s')">⟳ Fetch stats</button>
+          <button class="btn ghost" onclick="act('submit','%s')">Submit sitemap</button>
+         </div>
+         <div class="row" style="margin-top:8px;flex-wrap:wrap;gap:8px;align-items:center">
+          <input id="vt-%s" placeholder="verification meta token" style="width:250px;max-width:100%%">
+          <button class="btn ghost" onclick="verifyTok('%s')">Save verification meta</button>
+         </div>
+         %s
+         <details class="bump" style="margin-top:10px"><summary>Setup guide</summary>
+           <p class="hint" style="margin-top:6px">%s</p></details>
+         <pre class="preview" id="out-%s" style="display:none"></pre>
+        </div>""" % (names[eng], eng, eng, eng, connect_btn, eng, eng, eng,
+                      eng, extra, setup[eng], eng))
+        engines_rows = "".join(cards)
+        page = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Search engines — pstore</title><link rel="stylesheet" href="/style.css">
+<meta name="robots" content="noindex,nofollow">
+<style>
+.stengx{display:grid;grid-template-columns:1fr;gap:18px}
+.eng-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+pre.preview{white-space:pre-wrap;word-break:break-word;background:#fbf7ef;border:1px solid var(--line,#eee);border-radius:12px;padding:12px;font-size:12.5px;margin-top:8px}
+#traf td{vertical-align:middle}
+.badg{display:inline-block;padding:2px 10px;border-radius:999px;font-size:11.5px;font-weight:700}
+.tblflow{overflow-x:auto}
+</style>
+</head><body>
+<header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
+<div class="hero"><h1>Search <span>engines.</span></h1>
+<p class="tagline">Verify ownership, submit your sitemap, and watch clicks/impressions per engine — fed by each console's API where a token is connected, and by your own on-site referrer data everywhere else.</p></div>
+{nav}
+</header>
+<main class="stengx">
+ <section class="card"><h2>🌍 Consoles</h2>
+  <div class="eng-grid" id="engines">{engines_rows}</div>
+ </section>
+ <section class="card"><h2>📊 Traffic by engine <span class="hint">(last {days} days, referral-attributed)</span></h2>
+  <div class="tblflow"><table class="plain" id="traf">
+   <thead><tr><th>Engine</th><th class="ct">Pageviews</th><th class="ct">Affiliate clicks</th><th class="ct">CTR→click</th><th>Console rates (last 28d)</th></tr></thead>
+   <tbody><tr><td colspan="5" class="hint">Loading…</td></tr></tbody></table></div>
+  <p id="traffic-msg" class="msg"></p>
+ </section>
+ <section class="card"><h2>🩺 On-site health</h2>
+  <div class="row"><div class="feature"><h3 id="h-host">—</h3><p class="hint">host</p></div>
+   <div class="feature"><h3 id="h-sitemap">—</h3><p class="hint">sitemap</p></div>
+   <div class="feature"><h3 id="h-robots">—</h3><p class="hint">robots</p></div></div>
+ </section>
+</main>
+<footer><p>Verification metas (google-site-verification, msvalidate.01, yandex-verification) are emitted on every public page. Console APIs add real impressions/positions; until then the Traffic panel shows referral-attributed visits and clicks collected by your own beacon.</p></footer>
+{totop}
+<script>
+const $=id=>document.getElementById(id);
+const ENG={gsc:["Google Search Console","Google","so you need a Google Cloud OAuth client (PSTORE_GSC_CLIENT_ID / PSTORE_GSC_CLIENT_SECRET). Enable the Search Console API, add redirect URI {base}/admin/oauth/seoengines/cb/gsc, then Connect."],
+   bing:["Bing Webmaster","Microsoft-Bing Webmaster, key-based","create a Bing Webmaster account, add this exact site, then grab the API key (PSTORE_BING_API_KEY or paste it here). No OAuth — the key is the token."],
+   yandex:["Yandex Webmaster","Yandex Webmaster OAuth (PSTORE_YANDEX_CLIENT_ID / _SECRET)","create a Yandex OAuth app, redirect URI {base}/admin/oauth/seoengines/cb/yandex, then Connect."]};
+function esc(s){return (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+function badge(state){return state==="ready"?'<span class="badg" style="background:#e6ffe8;color:#1e8e3e">ready</span>'
+  :state==="consent-given"?'<span class="badg" style="background:#ffeedb;color:#a05a00">consent given</span>'
+  :state==="needs-consent"?'<span class="badg" style="background:#fff3cd;color:#8a6d1a">needs consent</span>'
+  :state==="needs-key"?'<span class="badg" style="background:#fff3cd;color:#8a6d1a">needs key</span>'
+  :'<span class="badg" style="background:#ffe6e6;color:#c0392b">'+(state||"?")+'</span>';}
+function act(a,e){fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:a,engine:e,days:28})}).then(r=>r.json()).then(d=>{
+  if(a==="connect"){ if(d.ok&&d.url){window.location=d.url;} else {out(e,"Connect unavailable: "+ (d.error||""));} return;}
+  const o=$("out-"+e); if(!o)return;
+  o.style.display=o.style.display==="none"?"block":"none";
+  if(a==="submit")o.textContent=e==="gsc"?"Simple sitemap PUT → "+ (d.ok?("ok: "+d.message):"err: "+d.error):(d.ok?"submitted ✓":"err: "+d.error);
+  else if(a==="sync")o.textContent=formatStats(d);
+  load();});}
+function saveKey(e){const k=$("vk-"+e).value;fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"bingkey",key:k})}).then(()=>load());}
+function verifyTok(e){const t=$("vt-"+e).value;fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"verify",engine:e,token:t})}).then(()=>{out(e,t?"verification meta saved ✓":"verification meta cleared");load();});}
+function formatStats(d){const t=(d.totals||{});const r=(d.rows||[]).slice(0,12);let s=`${esc(d.engine||"")} · ${d.days}d · clicks ${t.clicks??0} · impressions ${t.impressions??0} · position ${t.position??"—"} · ctr ${t.ctr??0}%`;
+ if(r.length) s+="\\n\\n" + r.map(x=>`${esc(x.page)}  → ${x.clicks}c / ${x.impressions}i @pos ${x.position}`).join("\\n");
+ return s;}
+function load(){fetch("/api/seoengines").then(r=>r.json()).then(d=>{
+  for(const e of d.engines){$("st-"+e.engine).innerHTML=badge(e.state);$("tok-"+e.engine).textContent=e.state==="ready"?"connected":(e.client?"token pending":"client ids missing");$("last-"+e.engine).textContent=e.last_sync||"never";}
+  const tr=d.traffic; const tgs={"google":"Google","bing":"Bing","yandex":"Yandex","duckduckgo":"DuckDuckGo","yahoo":"Yahoo","direct":"Direct","other":"Other"};
+  const rows=[];
+  for(const k in tr.engines){const v=tr.engines[k];const ctr=v.views?((v.clicks/v.views)*100).toFixed(1):0;
+    rows.push(`<tr><td>${tgs[k]}</td><td class="ct">${v.views}</td><td class="ct">${v.clicks}</td><td class="ct">${ctr}%</td><td class="ct hint" style="font-size:12px"></td></tr>`);}
+  rows.push(`<tr style="font-weight:700"><td>All</td><td class="ct">${tr.totals.views}</td><td class="ct">${tr.totals.clicks}</td><td class="ct">${tr.totals.views?((tr.totals.clicks/tr.totals.views)*100).toFixed(1):0}%</td><td></td></tr>`);
+  $("traf").querySelector("tbody").innerHTML=rows.join("");
+  $("h-host").textContent=d.host;$("h-sitemap").textContent=d.sitemap;$("h-robots").textContent="robots.txt ↗";
+  msgs();
+}).catch(e=>{$("traffic-msg").textContent="Failed to load: "+e;});}
+function out(e,t){const o=$("out-"+e);if(o){o.style.display="block";o.textContent=t;}}
+function msgs(){const u=new URLSearchParams(location.search);const m=u.get("msg")||u.get("err");if(m){const t=$("traffic-msg");if(t){t.textContent=(u.get("err")?"✗ ":"")+m;setTimeout(()=>{t.textContent="";history.replaceState({},"","/admin/seoengines");},6000);}}}
+document.addEventListener("DOMContentLoaded",load);
+</script>
+</body></html>""".replace("{nav}", nav).replace("{engines_rows}", engines_rows).replace(
+            "{totop}", _TOTOP).replace("{days}", "28").replace("{base}", seo.BASE_URL)
+        return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
+
     def _keys_page(self):
         """One admin page with every key/endpoint a tool needs."""
         rows = [
@@ -2711,6 +3003,15 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             ("IndexNow endpoint", indexnow.ENDPOINT),
             ("Submit all URLs (POST)", seo.BASE_URL.rstrip("/") + "/api/indexnow"),
             ("Sitemap", seo.BASE_URL.rstrip("/") + "/sitemap.xml"),
+            ("Google verification meta", seo.google_site_verification() or "(none set)"),
+            ("Bing verification meta (msvalidate.01)",
+             seo.bing_site_verification() or "(none set)"),
+            ("Yandex verification meta (yandex-verification)",
+             seo.yandex_site_verification() or "(none set)"),
+            ("Search consoles hub", seo.BASE_URL.rstrip("/") + "/admin/seoengines"),
+            ("Google console OAuth client", (webmasters.GSC_CLIENT_ID or "(PSTORE_GSC_CLIENT_ID unset)")),
+            ("Bing Webmaster API key", (webmasters.BING_API_KEY or webmasters.store_get("seoeng.bing.apikey")) or "(PSTORE_BING_API_KEY unset)"),
+            ("Yandex console OAuth client", (webmasters.YANDEX_CLIENT_ID or "(PSTORE_YANDEX_CLIENT_ID unset)")),
             ("Affiliate tag", amazon.AFFILIATE_TAG or "(none set)"),
             ("Marketplace", amazon.MARKET),
             ("Scraper providers", "%d / %d keyed" % (
@@ -4868,7 +5169,9 @@ document.addEventListener("click", (e)=>{{
                      '<div class="feature"><h3>✓</h3><p class="hint">IndexNow key<br>'
                      '<a href="/keys/site/indexnow">/keys/site/indexnow ↗</a></p></div>'
                      '<div class="feature"><h3>✓</h3><p class="hint">Sitemap submit<br>'
-                     '<a href="/keys">all keys hub ↗</a></p></div></div>')
+                     '<a href="/keys">all keys hub ↗</a></p></div>'
+                     '<div class="feature"><h3>🔎</h3><p class="hint">Console dashboards<br>'
+                     '<a href="/admin/seoengines">live per-engine hub ↗</a></p></div></div>')
         engine_link = lambda name, url: (
             '<tr><td>%s</td><td class="key ct"><a href="%s" target="_blank" rel="noopener">%s ↗</a></td>'
             '<td class="key ct" onclick="navigator.clipboard&&navigator.clipboard.writeText(this.textContent)" '
@@ -6279,6 +6582,7 @@ document.addEventListener("click", async (e)=>{{
             "name": (body.get("name") or (q.get("name") or ["view"])[0]).strip()[:40] or "view",
             "keyword": (body.get("keyword") or (q.get("keyword") or [""])[0]).strip()[:120],
             "source": source or "organic",
+            "referrer": str(body.get("referrer") or (q.get("referrer") or [""])[0]).strip()[:200],
         }
         if entry["slug"] in ("page", "") and not entry["keyword"]:
             entry["slug"] = entry["page"].strip("/").split("?")[0][:120] or "page"
@@ -6289,14 +6593,14 @@ document.addEventListener("click", async (e)=>{{
         e = {k: (v or "").strip()[:k_limit] for k, (v, k_limit) in {
             "slug": (e.get("slug"), 120), "page": (e.get("page"), 160),
             "name": (e.get("name"), 40), "keyword": (e.get("keyword"), 120),
-            "source": (e.get("source"), 40)}.items()}
+            "source": (e.get("source"), 40), "referrer": (e.get("referrer"), 200)}.items()}
         with _lock:
             conn = _db()
             conn.execute(
-                "INSERT INTO events (slug, page, name, keyword, source) "
-                "VALUES (?,?,?,?,?)",
+                "INSERT INTO events (slug, page, name, keyword, source, referrer) "
+                "VALUES (?,?,?,?,?,?)",
                 (e["slug"], e["page"], e["name"] or "view",
-                 e["keyword"], e["source"]))
+                 e["keyword"], e["source"], e["referrer"] or ""))
             conn.commit()
             conn.close()
 

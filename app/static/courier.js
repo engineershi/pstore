@@ -112,7 +112,8 @@
   });
 /* ---- pageview beacon: report every public page visit once ---- */
   function beacon(name, extra) {
-    var payload = { name: name || "view", slug: slug, page: location.pathname };
+    var payload = { name: name || "view", slug: slug, page: location.pathname,
+                    referrer: (document.referrer || "").slice(0, 200) };
     if (utmSource) payload.source = utmSource;
     if (main && main.dataset.keyword) payload.keyword = main.dataset.keyword;
     if (extra) { for (var k in extra) payload[k] = extra[k]; }
@@ -125,6 +126,7 @@
                 "&slug=" + encodeURIComponent(payload.slug) +
                 "&page=" + encodeURIComponent(payload.page) +
                 "&source=" + encodeURIComponent(payload.source || "") +
+                "&referrer=" + encodeURIComponent(payload.referrer || "") +
                 "&keyword=" + encodeURIComponent(payload.keyword || "");
     }
   }

@@ -21,9 +21,13 @@ BASE_URL = os.environ.get("PSTORE_URL", "https://pstore-gxbv.onrender.com").rstr
 
 # Optional Google Search Console ownership token — emits <meta name="google-site-verification">.
 GOOGLE_SITE_VERIFICATION = os.environ.get("PSTORE_GOOGLE_SITE_VERIFICATION", "")
+BING_SITE_VERIFICATION = os.environ.get("PSTORE_BING_SITE_VERIFICATION", "")
+YANDEX_SITE_VERIFICATION = os.environ.get("PSTORE_YANDEX_VERIFICATION", "")
 # Runtime override set via the /keys hub (never written to disk) so a saved
 # token takes effect immediately without a restart.
 _GOOGLE_SITE_VERIFICATION_RUNTIME = None
+_BING_SITE_VERIFICATION_RUNTIME = None
+_YANDEX_SITE_VERIFICATION_RUNTIME = None
 
 
 _META_RE = re.compile(r"content\s*=\s*[\"']?([^\"' >]+)[\"']?", re.I)
@@ -61,11 +65,51 @@ def set_google_site_verification(token):
     _GOOGLE_SITE_VERIFICATION_RUNTIME = _gsc_token(token)
 
 
+def set_bing_site_verification(token):
+    """Set (or clear with "") the Bing msvalidate.01 token for this process."""
+    global _BING_SITE_VERIFICATION_RUNTIME
+    _BING_SITE_VERIFICATION_RUNTIME = _gsc_token(token)
+
+
+def set_yandex_site_verification(token):
+    """Set (or clear with "") the Yandex yandex-verification token."""
+    global _YANDEX_SITE_VERIFICATION_RUNTIME
+    _YANDEX_SITE_VERIFICATION_RUNTIME = _gsc_token(token)
+
+
 def google_site_verification():
     """Effective token: runtime override first, else env (module-load) value."""
     if _GOOGLE_SITE_VERIFICATION_RUNTIME is not None:
         return _GOOGLE_SITE_VERIFICATION_RUNTIME
     return _gsc_token(GOOGLE_SITE_VERIFICATION)
+
+
+def bing_site_verification():
+    if _BING_SITE_VERIFICATION_RUNTIME is not None:
+        return _BING_SITE_VERIFICATION_RUNTIME
+    return _gsc_token(BING_SITE_VERIFICATION)
+
+
+def yandex_site_verification():
+    if _YANDEX_SITE_VERIFICATION_RUNTIME is not None:
+        return _YANDEX_SITE_VERIFICATION_RUNTIME
+    return _gsc_token(YANDEX_SITE_VERIFICATION)
+
+
+def verification_metas():
+    """All ownership meta tags (Google + Bing + Yandex) as one string, "" when
+    none configured. Emitted in <head> on every public page."""
+    out = []
+    g = google_site_verification()
+    if g:
+        out.append('<meta name="google-site-verification" content="%s">\n' % _clean(g))
+    b = bing_site_verification()
+    if b:
+        out.append('<meta name="msvalidate.01" content="%s">\n' % _clean(b))
+    y = yandex_site_verification()
+    if y:
+        out.append('<meta name="yandex-verification" content="%s">\n' % _clean(y))
+    return "".join(out)
 
 
 def serve_verification_file(path):
@@ -149,8 +193,7 @@ def _head(title, desc, canonical, path, jsonld=None, og_image=None, noindex=Fals
         abs_img = og_image if str(og_image).startswith("http") else BASE_URL + og_image
         img_html = (f'<meta property="og:image" content="{_clean(abs_img)}">\n'
                     f'<meta name="twitter:image" content="{_clean(abs_img)}">\n')
-    gsc = (f'<meta name="google-site-verification" content="{_clean(google_site_verification())}">\n'
-           if google_site_verification() else "")
+    gsc = verification_metas()
     rob = ('<meta name="robots" content="noindex,nofollow">\n' if noindex else "")
     head = f"""<!DOCTYPE html>
 <html lang="en">

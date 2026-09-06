@@ -93,6 +93,12 @@ def build_pdf():
         "Indexing is automatic: the moment a niche is saved, pstore submits the "
         "page to IndexNow for near-instant Bing and Google discovery. Confirm the "
         "key is live on the Keys page (/keys).")
+    doc.paragraph(
+        "To also reach Google, Bing and Yandex at full speed, open the Search "
+        "Engines hub (/admin/seoengines). Paste each engine's verification token "
+        "on the Keys page (or set them via env), then click 'Submit sitemap'. "
+        "The hub also shows per-engine referral traffic collected by your own "
+        "beacon — no external token needed for that view.")
     doc.page_break()
 
     doc.heading("Step 3 — Capture the email")
