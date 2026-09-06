@@ -61,6 +61,8 @@ HTTP_LIMITER = RateLimiter(limit=720, window_sec=60)         # global per-client
 SUBSCRIBE_LIMITER = RateLimiter(limit=6, window_sec=10 * 60)  # opt-in abuse guard
 TRACK_LIMITER = RateLimiter(limit=180, window_sec=60)        # click beacons
 PAGEVIEW_LIMITER = RateLimiter(limit=120, window_sec=60)     # pageview/event beacons
+REGISTER_LIMITER = RateLimiter(limit=6, window_sec=10 * 60)   # account signups per client
+RESEND_LIMITER = RateLimiter(limit=5, window_sec=15 * 60)     # "resend verify" emails
 
 
 def client_key(headers, peer_ip):
@@ -112,3 +114,33 @@ def ip_token(ip):
     if not ip:
         return ""
     return hashlib.sha256((ip + "|" + HASH_SECRET).encode("utf-8")).hexdigest()[:16]
+
+
+# ------------------------------------------------------------------ passwords
+_PBKDF2_ITER = 210_000
+
+
+def hash_password(password):
+    """PBKDF2-HMAC-SHA256 with a random 16-byte salt. Format:
+    pbkdf2_sha256$<iters>$<salt_hex>$<hash_hex> (self-describing, so the
+    iteration count can be raised later without breaking old hashes)."""
+    salt = secrets.token_bytes(16).hex()
+    h = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),
+                            bytes.fromhex(salt), _PBKDF2_ITER).hex()
+    return "pbkdf2_sha256$%d$%s$%s" % (_PBKDF2_ITER, salt, h)
+
+
+def verify_password(password, stored):
+    """Constant-time check of a stored hash string; False on junk/None."""
+    if not stored or "$" not in stored:
+        return False
+    try:
+        _alg, iters, salt, expect = stored.split("$")
+        iters = int(iters)
+        if iters < 100_000:  # never accept weakened hashes
+            return False
+    except ValueError:
+        return False
+    h = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),
+                            bytes.fromhex(salt), iters).hex()
+    return hmac.compare_digest(h, expect)

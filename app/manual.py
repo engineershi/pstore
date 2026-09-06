@@ -322,6 +322,7 @@ def render_admin_manual(nav_html, totop_html):
   <a href="#s6">9 · Step 7-8 · Launch + Refresh</a>
   <a href="#playbook">10 · Highest-form playbook</a>
   <a href="#checklist">11 · 30-min checklist</a>
+  <a href="#team">12 · Team access &amp; roles</a>
 </nav>
 
 <h3 id="what">1 · What pstore is</h3>
@@ -354,7 +355,7 @@ def render_admin_manual(nav_html, totop_html):
 
 <h3 id="s2">4 · Step 2 — Rank on Google (SEO)</h3>
 <p>Open the <a class="tooltag" href="/admin/seo">🔍 SEO audit</a> and check the <b>site health strip</b> — every niche should be <i>indexable</i>. Fix red badges (title too long, missing description, no products). Then open <a class="tooltag" href="/admin/sem">🎯 SEM</a> for each niche: intent brief, long-tail keywords and people-also-ask prompts tell you exactly what to add to rank.</p>
-<p>Indexing is <b>automatic</b> — saving a niche pings IndexNow. Verify the key on <a class="tooltag" href="/keys">🔑 Keys</a>.</p>
+<p>Indexing is <b>automatic</b> — saving a niche pings IndexNow. Verify the key on <a class="tooltag" href="/keys">🔑 Keys</a>. For the three big consoles, open <a class="tooltag" href="/admin/seoengines">🔎 Engines</a>: connect Google Search Console or Yandex via OAuth, paste your Bing API key, then <b>Fetch stats</b> pulls real clicks/impressions per engine and <b>Submit sitemap</b> re-pings it. Until a console is connected, the Traffic panel shows referral-attributed page views + clicks from your own on-site beacon.</p>
 
 <h3 id="s3">5 · Step 3 — Capture the email</h3>
 <p>Every niche page and the homepage already render an <b>opt-in form</b> that collects first name + email. The first name personalises every email (<i>"Hi Jane,"</i>) to lift open rates.</p>
@@ -416,6 +417,16 @@ def render_admin_manual(nav_html, totop_html):
 <li><a class="tooltag" href="/admin/emails">📨 Email Studio</a> → dry-run → send first batch</li>
 <li><a class="tooltag" href="/admin/refresh">📡 Refresh</a> → confirm auto-refresh is on</li>
 <li>Paste text links / Markdown / QR anywhere relevant</li>
+</ul>
+
+<h3 id="team">12 · Team access &amp; roles</h3>
+<p>pstore can run as a small team. From the <a class="tooltag" href="/admin/login">🔐 login page</a>, a colleague picks <b>Request an account</b>, signs up with their work email and gets a <b>confirmation email</b> — the account stays <i>unverified</i> until they click that link. Then the owner grants access on <a class="tooltag" href="/admin/users">👥 Users &amp; roles</a>.</p>
+<ul class="step-list">
+<li>Every tool belongs to <b>one function</b>: Idea tools, Email Studio, Social publisher, SEO &amp; consoles, Content (CMS/ebooks), Marketing &amp; ROI, Analytics &amp; backup, Keys &amp; API keys.</li>
+<li>A <b>role</b> is a custom matrix of functions — create your own (<i>Writer</i> = content only, <i>Operator</i> = daily tools) and tick whatever fits. A user can hold <b>several roles</b>; their access is the union of the functions on all of them.</li>
+<li>Pages <b>and</b> their <code>/api/…</code> endpoints are both gated by function — no role for a tool means the <b>403</b> screen and its API answers <i>forbidden</i>.</li>
+<li>The owner is always allowed everywhere; only the owner sees <b>Users &amp; roles</b> and can create/disable users, change roles and reset passwords.</li>
+<li>Signing in only works after the <b>email is verified</b>; disabling an account kills its sessions instantly.</li>
 </ul>
 </section>
 </div><div class="readerhandle" id="readerhandle" title="Drag to resize reading width">⠿</div></div>

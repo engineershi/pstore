@@ -87,6 +87,72 @@ _ADMIN_PW_FROM_ENV = bool(os.environ.get("PSTORE_ADMIN_PASSWORD"))
 _COOKIE = "pstore_admin"
 _OAUTH_COOKIE = "pstore_oauth"
 _SESSION_TTL = 12 * 60 * 60  # seconds
+
+# --------------------------------------------------------------- RBAC model
+# Every admin tool/API belongs to exactly one *function*. Roles are lists of
+# functions (a custom permission matrix); a user's allowed set is the union of
+# their roles' functions. The env owner can always do everything and is the
+# only one who can manage users/roles.
+FUNCTIONS = [
+    ("dashboard", "Idea tools"),
+    ("email", "Email Studio"),
+    ("social", "Social publisher"),
+    ("seo", "SEO & consoles"),
+    ("content", "Content (CMS/ebooks)"),
+    ("marketing", "Marketing & ROI"),
+    ("analytics", "Analytics & backup"),
+    ("keys", "Keys & API keys"),
+]
+
+# Slugs maintained so tests have a stable, documented reference.
+FN = {slug: label for slug, label in FUNCTIONS}
+ALL_FUNCTIONS = [slug for slug, _label in FUNCTIONS]
+
+# path -> function assignment (prefix; a trailing "/" requires the prefix start).
+FUNCTION_PATHS = {
+    "dashboard": ("/dashboard", "/index.html", "/tool", "/admin/opportunities",
+                  "/admin/priority", "/app.js", "/api/mine", "/api/search",
+                  "/api/autosuggest", "/api/niches", "/api/opportunities"),
+    "email": ("/admin/emails", "/api/mail", "/api/sequence/", "/api/subscribers"),
+    "social": ("/admin/social", "/api/social"),
+    "seo": ("/admin/seo", "/admin/seoengines", "/admin/sem", "/seo/snippet/",
+            "/api/sem", "/api/seo-audit", "/api/seo/topics", "/api/seoengines",
+            "/api/indexnow", "/api/topics/generate"),
+    "content": ("/admin/cms", "/admin/ebooks", "/admin/refresh",
+                "/api/cms", "/api/suggest", "/api/refresh", "/api/settings",
+                "/api/ai/"),
+    "marketing": ("/admin/funnel", "/admin/marketing", "/admin/variants",
+                  "/admin/segments", "/admin/pricedrop", "/api/funnel",
+                  "/api/marketing", "/api/boosts", "/api/variants",
+                  "/api/segments", "/api/pricedrop", "/api/tools",
+                  "/api/earnings", "/api/subjects"),
+    "analytics": ("/admin/analytics", "/admin/backup", "/admin/manual",
+                  "/api/analytics"),
+    "keys": ("/keys", "/keys/", "/admin/apikeys", "/api/keys"),
+}
+
+# Hub/nav chip key -> owning function (for filtering what a user sees).
+NAV_FN = {
+    "dashboard": "dashboard", "tool": "dashboard", "opportunities": "dashboard",
+    "priority": "dashboard", "sem": "seo", "seo": "seo", "seoengines": "seo",
+    "cms": "content", "ebooks": "content", "refresh": "content",
+    "funnel": "marketing", "marketing": "marketing", "emails": "email",
+    "social": "social", "variants": "marketing", "segments": "marketing",
+    "pricedrop": "marketing", "keys": "keys", "apikeys": "keys",
+    "analytics": "analytics", "backup": "analytics", "manual": "analytics",
+}
+
+BUILTIN_ROLES = [
+    ("emailer", "Email Studio", ["email"]),
+    ("social", "Social publisher", ["social"]),
+    ("seo", "SEO & consoles", ["seo"]),
+    ("content", "Content builder", ["content"]),
+    ("marketing", "Marketing & ROI", ["marketing"]),
+    ("analyst", "Analytics", ["analytics"]),
+    ("keys", "Keys & API keys", ["keys"]),
+    ("operator", "Operator", ["dashboard", "email", "social"]),
+    ("full", "Full access", ALL_FUNCTIONS),
+]
 _SESSIONS = {}  # token -> monotonic expiry
 
 _EBOOKS = {}  # keyword -> build_ebook() dict, LRU-ish (capped below)
@@ -425,6 +491,70 @@ webmasters._STORE_GET = _get_setting
 webmasters._STORE_SET = _set_setting
 
 
+# ------------------------------------------------------------ RBAC data access
+def _user_row(email):
+    """Full users row for `email` (normalized), or None."""
+    with _lock:
+        conn = _db()
+        try:
+            row = conn.execute(
+                "SELECT * FROM users WHERE email=?", (email.strip().lower(),)
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+
+def _role_functions(slug):
+    """Function slugs granted by one role slug (JSON column -> list)."""
+    with _lock:
+        conn = _db()
+        try:
+            row = conn.execute("SELECT functions FROM roles WHERE slug=?",
+                               (slug,)).fetchone()
+            if not row:
+                return []
+            try:
+                return [f for f in json.loads(row["functions"]) if f in FN]
+            except ValueError:
+                return []
+        finally:
+            conn.close()
+
+
+def _user_functions(email=None, uid=None):
+    """Union of function slugs across an owner's (None/empty email => all) or
+    a user's roles. Never returns functions from a disabled owner email."""
+    if email is None and uid is None:
+        return ALL_FUNCTIONS
+    row = _user_row(email) if email is not None else (
+        None if uid is None else _user_row_by_id(uid))
+    if not row:
+        return []
+    try:
+        roles = json.loads(row.get("roles") or "[]")
+    except ValueError:
+        roles = []
+    out, seen = [], set()
+    for slug in roles:
+        for f in _role_functions(slug):
+            if f not in seen:
+                seen.add(f)
+                out.append(f)
+    return out
+
+
+def _user_row_by_id(uid):
+    with _lock:
+        conn = _db()
+        try:
+            row = conn.execute("SELECT * FROM users WHERE id=?",
+                               (uid,)).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+
 def _social_flush_loop(interval=60, amplify=True):
     """Daemon: flush due scheduled posts automatically every `interval` seconds
     so owners don't have to click Flush, then re-amplify proven winners.
@@ -645,6 +775,33 @@ def _db():
         key TEXT PRIMARY KEY,
         value TEXT
     )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT UNIQUE NOT NULL,
+        name TEXT NOT NULL DEFAULT '',
+        pass_hash TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'unverified',
+        roles TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT DEFAULT (datetime('now')),
+        last_login_at TEXT
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS roles (
+        slug TEXT PRIMARY KEY,
+        label TEXT NOT NULL,
+        functions TEXT NOT NULL DEFAULT '[]',
+        builtin INTEGER DEFAULT 0
+    )""")
+    try:
+        have = conn.execute("SELECT COUNT(*) c FROM roles").fetchone()["c"]
+        if have == 0:
+            for slug, label, funcs in BUILTIN_ROLES:
+                conn.execute(
+                    "INSERT OR IGNORE INTO roles (slug, label, functions, builtin) "
+                    "VALUES (?,?,?,1)",
+                    (slug, label, json.dumps(list(funcs))))
+            conn.commit()
+    except Exception:
+        pass
     conn.execute("""CREATE TABLE IF NOT EXISTS topics (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         parent_slug TEXT NOT NULL,
@@ -1154,13 +1311,95 @@ class Handler(BaseHTTPRequestHandler):
         if not tok:
             return False
         with _lock:
-            exp = _SESSIONS.get(tok)
-            if exp is None:
+            entry = _SESSIONS.get(tok)
+            if entry is None:
                 return False
+            exp, uid = entry
             if exp < time.monotonic():
                 _SESSIONS.pop(tok, None)
                 return False
+            if uid is None:  # the env owner
+                return True
+        return _user_row_by_id(uid) is not None
+
+    def _session_uid(self):
+        """Session's user id, or None (owner) when this session is the owner's."""
+        entry = _SESSIONS.get(self._cookie_token())
+        return None if not entry else entry[1]
+
+    def _current_user(self):
+        """{owner:bool, email, name, roles, status} for the session, or None."""
+        uid = self._session_uid()
+        if uid is None:
+            if not self._authed():
+                return None
+            return {"owner": True, "email": _ADMIN_EMAIL, "name": "Owner",
+                    "roles": ["owner"], "status": "active"}
+        row = _user_row_by_id(uid)
+        if not row:
+            return None
+        try:
+            roles = json.loads(row.get("roles") or "[]")
+        except ValueError:
+            roles = []
+        return {"owner": False, "email": row["email"], "name": row["name"] or "",
+                "roles": roles, "status": row.get("status") or "unverified"}
+
+    def _granted_functions(self):
+        """Set of function slugs this session may use; owner gets everything."""
+        if not self._authed():
+            return set()
+        if self._session_uid() is None:
+            return set(ALL_FUNCTIONS)
+        row = _user_row_by_id(self._session_uid())
+        if not row or row.get("status") != "verified":
+            return set()
+        try:
+            roles = json.loads(row.get("roles") or "[]")
+        except ValueError:
+            roles = []
+        out = set()
+        for slug in roles:
+            for f in _role_functions(slug):
+                out.add(f)
+        return out
+
+    @staticmethod
+    def _function_for_path(path):
+        """Function slug covering `path`, or None when no function owns it."""
+        for fn, prefixes in FUNCTION_PATHS.items():
+            for p in prefixes:
+                if path == p or (p.endswith("/") and path.startswith(p)):
+                    return fn
+        return None
+
+    def _function_denied(self, path):
+        """True when this session must not reach `path`. Public paths and the
+        owner pass; anything else is allowed only if a granted function owns it
+        (unlisted sections like /admin/users stay owner-only)."""
+        if path in ("/admin", "/admin/login", "/admin/logout", "/admin/register",
+                    "/admin/verify", "/admin/resend", "/admin/pending"):
+            return False
+        if self._session_uid() is None:  # owner: everything
+            return False
+        fn = self._function_for_path(path)
+        if fn is None:
             return True
+        return fn not in self._granted_functions()
+
+    def _function_error(self, path):
+        if path.startswith("/api/"):
+            return self._send(403, {"error": "forbidden", "auth": True})
+        msg = ("This account doesn't have access to that tool (no role with the "
+               "<b>%s</b> function assigned). Ask the owner to enable it under "
+               '<a href="/admin/users">Users &amp; roles</a>.' % seo._clean(
+                   FN.get(self._function_for_path(path), "required")))
+        return self._send(403, ("<html><body><main class='wrap'><section class='card'>"
+                                "<h1>403 · not allowed</h1><p>%s</p>"
+                                '<p><a href="/admin/pending">My access</a> · '
+                                '<a href="/admin/logout">Log out</a></p>'
+                                "</section></main></body></html>" % msg).encode("utf-8"),
+                          "text/html; charset=utf-8")
 
     def _cron_ok(self):
         secret = (self.headers.get("X-Cron-Secret") or "").strip()
@@ -1171,13 +1410,13 @@ class Handler(BaseHTTPRequestHandler):
                 for v in urllib.parse.parse_qs(parsed.query).get("cron_secret", []))
         return bool(_CRON_SECRET) and hmac.compare_digest(secret, _CRON_SECRET)
 
-    def _new_session(self):
+    def _new_session(self, uid=None):
         tok = secrets.token_hex(32)
         with _lock:
-            for old, exp in list(_SESSIONS.items()):
-                if exp < time.monotonic():
+            for old, entry in list(_SESSIONS.items()):
+                if entry[0] < time.monotonic():
                     _SESSIONS.pop(old, None)
-            _SESSIONS[tok] = time.monotonic() + _SESSION_TTL
+            _SESSIONS[tok] = (time.monotonic() + _SESSION_TTL, uid)
         return tok
 
     def _drop_session(self, tok):
@@ -1221,6 +1460,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def _login_page(self, error=None, oauth_error=None):
         err = ('<p class="msg" style="color:#d64545">%s</p>' % seo._clean(error or oauth_error)) if (error or oauth_error) else ""
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        banner = ""
+        if q.get("sent"):
+            banner = '<p class="msg bake" style="color:#2e7d32">Account requested — check your inbox and click the confirmation link.</p>'
+        elif q.get("verified"):
+            banner = '<p class="msg bake" style="color:#2e7d32">Email verified! Sign in below (the owner still needs to grant your access roles).</p>'
+        elif q.get("already"):
+            banner = "<p class=\"msg bake\" style=\"color:#d64545\">That link isn't for a pending account — it may already be verified or was deleted.</p>"
+        elif q.get("baderr"):
+            banner = "<p class=\"msg bake\" style=\"color:#d64545\">That confirmation link is invalid or expired — use “resend” below.</p>"
         route = {"google": "google", "facebook": "fb"}
         prov = oauth.providers_configured()
         if prov:
@@ -1243,22 +1492,28 @@ class Handler(BaseHTTPRequestHandler):
 .oauth{{display:flex;flex-direction:column;gap:8px;margin:14px 0 4px}}
 .oauth-btn{{background:#fff;color:var(--text);border:1px solid var(--border);box-shadow:none}}
 .oauth-btn:hover{{transform:translateY(-2px);box-shadow:var(--shadow)}}
-.divider{{color:var(--muted);font-size:12px;font-weight:600;letter-spacing:.3px}}</style>
+.divider{{color:var(--muted);font-size:12px;font-weight:600;letter-spacing:.3px}}
+.resend{{margin-top:10px;font-size:12.5px;color:var(--muted)}}
+.resend button{{background:none;border:none;color:var(--accent);cursor:pointer;font-size:12.5px;padding:0}}
+.bake{{font-size:13px}}</style>
 </head><body>
 <header><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a></header>
 <main class="login-wrap"><div class="login-card">
 <section class="card">
 <h1>🔐 Admin <span style="color:var(--accent)">login</span></h1>
-<p class="tagline" style="margin:0">Owner section — pages, tools and keys are locked behind the admin email &amp; password.</p>
+<p class="tagline" style="margin:0">Owner or team access to the tools, pages and keys.</p>
+{banner}
 {err}
 {oauth_html}
-<label style="display:block;text-align:left;font-size:12.5px;color:var(--muted);font-weight:700">Admin email
+<label style="display:block;text-align:left;font-size:12.5px;color:var(--muted);font-weight:700">Email
 <input id="em" type="email" placeholder="you@example.com" autocomplete="username"></label>
 <label style="display:block;text-align:left;font-size:12.5px;color:var(--muted);font-weight:700">Password
 <input id="pw" type="password" placeholder="password" autocomplete="current-password"></label>
 <button id="go" class="warm">Unlock admin</button>
 <p id="msg" class="msg"></p>
 <p class="login-hint">Public site: <a href="/">pstore home</a> · no login needed.</p>
+<p class="resend">Team member? <a href="/admin/register">Request an account</a> ·
+<button id="resend">resend my confirmation link</button></p>
 </section></div></main>
 <script>
 function $(id){{return document.getElementById(id);}}
@@ -1269,6 +1524,12 @@ $("go").onclick = async () => {{
   const d = await r.json().catch(()=>({{ok:false, error:"bad response"}}));
   if (d.ok) location.href = d.next;
   else $("msg").textContent = d.error || "Login failed.";
+}};
+$("resend").onclick = async () => {{
+  const r = await fetch("/admin/resend", {{method:"POST", headers:{{"Content-Type":"application/json"}},
+    body: JSON.stringify({{email: $("em").value.trim()}})}});
+  const d = await r.json().catch(()=>({{ok:false, error:"bad response"}}));
+  $("msg").textContent = d.alert || d.error || "Resent.";
 }};
 $("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").onclick(); }});
 </script>
@@ -1285,15 +1546,43 @@ $("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
         next_path = str(body.get("next") or "/dashboard")
         if not next_path.startswith("/") or next_path.startswith("//"):
             next_path = "/dashboard"
-        if (not hmac.compare_digest(email.encode("utf-8"), _ADMIN_EMAIL.encode("utf-8"))
-                or not hmac.compare_digest(pw.encode("utf-8"), _ADMIN_PW.encode("utf-8"))):
+        uid = None
+        # owner login (env credentials)
+        if (hmac.compare_digest(email.encode("utf-8"), _ADMIN_EMAIL.encode("utf-8"))
+                and hmac.compare_digest(pw.encode("utf-8"), _ADMIN_PW.encode("utf-8"))):
+            security.LOGIN_LIMITER.clear(key)
+            tok = self._new_session()  # uid None = owner
+            return self._fail_or_ok(None, tok, next_path)
+        # team login (users table)
+        row = _user_row(email)
+        if not row or not security.verify_password(pw, row.get("pass_hash")):
             return self._send(401, {"ok": False, "error": "Wrong email or password"})
+        if row.get("status") == "disabled":
+            return self._send(401, {"ok": False,
+                                    "error": "This account has been disabled — contact the owner."})
+        if row.get("status") != "verified":
+            return self._send(401, {"ok": False,
+                                    "error": "Your email isn't verified yet — check your inbox for the confirmation link."})
         security.LOGIN_LIMITER.clear(key)
-        tok = self._new_session()
-        data = json.dumps({"ok": True, "next": next_path}).encode("utf-8")
-        self.send_response(200)
+        tok = self._new_session(row["id"])
+        if not _user_functions(uid=row["id"]):
+            next_path = "/admin/pending"
+        with _lock:
+            conn = _db()
+            try:
+                conn.execute("UPDATE users SET last_login_at=datetime('now') WHERE id=?",
+                             (row["id"],))
+                conn.commit()
+            finally:
+                conn.close()
+        return self._fail_or_ok(None, tok, next_path)
+
+    def _fail_or_ok(self, err, tok, next_path):
+        data = json.dumps({"ok": err is None, "error": err, "next": next_path}).encode("utf-8")
+        self.send_response(200 if err is None else 401)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self._set_cookie(tok)
+        if tok is not None:
+            self._set_cookie(tok)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -1309,7 +1598,189 @@ $("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
         self.end_headers()
         return None
 
+    # --------------------------------------------------- accounts & verification
+    @staticmethod
+    def _verify_url(email):
+        base = os.environ.get("PSTORE_URL", "").rstrip("/") or ""
+        tok = security.make_token("verify:" + email, 72 * 3600)
+        return "%s/admin/verify?t=%s&e=%s" % (
+            base, urllib.parse.quote(tok, safe=""),
+            urllib.parse.quote(email, safe=""))
+
+    def _send_verify_email(self, email, name=""):
+        """Email the signed confirmation link; True when accepted by the mailer."""
+        body = ("Hi %s,\n\nSomeone (probably you) requested a %s team account with "
+                "this email. Confirm it to activate the account:\n\n%s\n\nIf you "
+                "didn't sign up, ignore this email — the account stays inactive."
+                % (name or "there", mailer.STORE_NAME, self._verify_url(email)))
+        return mailer.send("Confirm your %s account — %s"
+                           % (mailer.STORE_NAME, email), body, email)
+
+    def _register_page(self, error=None):
+        err = ('<p class="msg" style="color:#d64545">%s</p>' % seo._clean(error)) if error else ""
+        body = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow"><title>Request a team account — pstore</title><link rel="stylesheet" href="/style.css">
+<style>.login-wrap{{min-height:78vh;display:flex;align-items:center;justify-content:center;padding:24px}}
+.login-card{{width:100%;max-width:380px;text-align:center}}
+.login-card h1{{font-size:26px;letter-spacing:-.4px}}
+.login-card input{{width:100%;padding:13px 16px;border:1px solid var(--border);border-radius:14px;font-size:15px;margin:8px 0 12px;background:#fff}}
+.login-card button{{width:100%;margin-top:4px}}
+.login-hint{{font-size:12.5px;color:var(--muted);margin-top:14px}}
+.login-hint a{{color:var(--accent)}}</style>
+</head><body>
+<header><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a></header>
+<main class="login-wrap"><div class="login-card">
+<section class="card">
+<h1>📮 Request a <span style="color:var(--accent)">team account</span></h1>
+<p class="tagline" style="margin:0">Sign up with your work email. We'll email you a confirmation link, then the owner grants your access.</p>
+{err}
+<label style="display:block;text-align:left;font-size:12.5px;color:var(--muted);font-weight:700">Your name
+<input id="nm" type="text" placeholder="Jane Doe" autocomplete="name"></label>
+<label style="display:block;text-align:left;font-size:12.5px;color:var(--muted);font-weight:700">Work email
+<input id="em" type="email" placeholder="you@example.com" autocomplete="username"></label>
+<label style="display:block;text-align:left;font-size:12.5px;color:var(--muted);font-weight:700">Password (8+ characters)
+<input id="pw" type="password" placeholder="password" autocomplete="new-password"></label>
+<button id="go" class="warm">Request access</button>
+<p id="msg" class="msg"></p>
+<p class="login-hint">Already have an account? <a href="/admin/login">Sign in</a>.</p>
+</section></div></main>
+<script>
+function $(id){{return document.getElementById(id);}}
+$("go").onclick = async () => {{
+  const r = await fetch("/admin/register", {{method:"POST", headers:{{"Content-Type":"application/json"}},
+    body: JSON.stringify({{name: $("nm").value.trim(), email: $("em").value.trim(), password: $("pw").value}})}});
+  const d = await r.json().catch(()=>({{ok:false, error:"bad response"}}));
+  if (d.ok) location.href = "/admin/login?sent=1";
+  else $("msg").textContent = d.error || "Couldn't create the account.";
+}};
+$("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").onclick(); }});
+</script>
+</body></html>"""
+        return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
+
+    def _register_post(self):
+        key = "reg|" + security.client_key(self.headers, self._client_ip())
+        if not security.REGISTER_LIMITER.hit(key):
+            return self._send(429, {"error": "too many signups from this address, try later"})
+        body = self._body()
+        name = str(body.get("name") or "").strip()[:120]
+        email = str(body.get("email") or "").strip().lower()
+        pw = str(body.get("password") or "")
+        if not email or "@" not in email or "." not in email.split("@")[-1]:
+            return self._send(400, {"ok": False, "error": "Enter a valid email address"})
+        if len(pw) < 8:
+            return self._send(400, {"ok": False, "error": "Password must be at least 8 characters"})
+        if _user_row(email):
+            return self._send(409, {"ok": False,
+                                    "error": "An account with that email already exists."})
+        if (hmac.compare_digest(email.encode("utf-8"), _ADMIN_EMAIL.encode("utf-8"))):
+            return self._send(400, {"ok": False, "error": "That email belongs to the owner account."})
+        with _lock:
+            conn = _db()
+            try:
+                conn.execute(
+                    "INSERT INTO users (email, name, pass_hash, status, roles) "
+                    "VALUES (?,?,?,'unverified','[]')",
+                    (email, name, security.hash_password(pw)))
+                conn.commit()
+            finally:
+                conn.close()
+        sent = self._send_verify_email(email, name)
+        security.REGISTER_LIMITER.clear(key)
+        return self._send(200, {"ok": True, "mail": sent,
+                                "error": None,
+                                "alert": ("Check your inbox and confirm your email. "
+                                          "Until it's verified, you can't sign in yet.")})
+
+    def _verify_login(self):
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        tok = (q.get("t") or [""])[0]
+        want = str((q.get("e") or [""])[0]).strip().lower()
+        scope = None
+        try:
+            scope = security.verify_token(urllib.parse.unquote(tok))
+        except Exception:
+            scope = None
+        ok = False
+        if scope and scope.startswith("verify:") and scope.split(":", 1)[1] == want and want:
+            with _lock:
+                conn = _db()
+                try:
+                    row = conn.execute("SELECT status FROM users WHERE email=?",
+                                       (want,)).fetchone()
+                    if row and row["status"] == "unverified":
+                        conn.execute("UPDATE users SET status='verified' WHERE email=?",
+                                     (want,))
+                        conn.commit()
+                        ok = True
+                finally:
+                    conn.close()
+        if tok and not scope:
+            loc = "/admin/login?baderr=1"
+        elif scope and not ok:
+            loc = "/admin/login?already=1"
+        else:
+            loc = "/admin/login?verified=1"
+        self.send_response(302)
+        self.send_header("Location", loc)
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        return None
+
+    def _resend_post(self):
+        key = "resend|" + security.client_key(self.headers, self._client_ip())
+        if not security.RESEND_LIMITER.hit(key):
+            return self._send(429, {"error": "too many resend requests, try later"})
+        body = self._body()
+        email = str(body.get("email") or "").strip().lower()
+        if not email:
+            return self._send(400, {"ok": False, "error": "Enter your email first"})
+        row = _user_row(email)
+        if not row:
+            return self._send(200, {"ok": True,
+                                    "alert": "If that account exists, a confirmation link is on its way."})
+        if row.get("status") != "unverified":
+            return self._send(400, {"ok": False,
+                                    "error": ("This account is already verified" if row["status"] == "verified"
+                                              else "This account has been disabled.")})
+        sent = self._send_verify_email(email, row.get("name") or email)
+        return self._send(200, {"ok": sent, "error": None,
+                                "alert": "Confirmation link resent — check your inbox."})
+
+    def _pending_page(self):
+        user = self._current_user()
+        funcs = sorted(self._granted_functions(), key=lambda f: ALL_FUNCTIONS.index(f)
+                       if f in ALL_FUNCTIONS else 99)
+        if not funcs:
+            chips = ('<p class="tagline">No tool access yet. The owner assigns a '
+                     'role (e.g. <b>Operator</b> or <b>Full access</b>) under '
+                     '<b>Users &amp; roles</b>.</p>')
+        else:
+            chips = '<div class="page-grid">%s</div>' % "".join(
+                ('<span class="btn ghost" style="width:100%%;text-align:left">'
+                 '✅ %s</span>' % seo._clean(FN[f])) for f in funcs)
+        body = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow"><title>My access — pstore</title><link rel="stylesheet" href="/style.css">
+</head><body>
+<header><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
+<nav class="mininav"><a href="/admin">All pages</a><a href="/admin/logout">Logout</a></nav></header>
+<main class="wrap"><section class="card">
+<h1>👋 Welcome, {seo._clean(user.get('name') or user.get('email') or '')}</h1>
+<p class="tagline">Email <b>{seo._clean(user['email'])}</b> is verified{((' · ' + ' · '.join(
+    '<b>%s</b>' % seo._clean(r) for r in user.get('roles') or [])) if user.get('roles') else '')}.</p>
+<h2 style="margin-top:22px">Function access</h2>
+{chips}
+<p class="login-hint">Missing something? The owner enables functions by assigning you roles at
+<a href="/admin/users">Users &amp; roles</a> — reach out to them.</p>
+</section></main></body></html>"""
+        return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
+
     def _admin_nav(self, active=None):
+        granted = self._granted_functions()
+        is_owner = self._session_uid() is None
+
         def chip(href, label, key, accent=False):
             cls = ' class="primary"' if accent else (" class=\"%s\"" % key if key == active else "")
             return '<a href="%s"%s>%s</a>' % (href, cls, label)
@@ -1318,7 +1789,15 @@ $("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
             for it in items:
                 href, label, key = it[0], it[1], it[2]
                 accent = it[3] if len(it) > 3 else False
+                if not is_owner:
+                    if key == "users":
+                        continue
+                    fn = NAV_FN.get(key)
+                    if fn is not None and fn not in granted:
+                        continue
                 parts.append(chip(href, label, key, accent))
+            if not parts:
+                return ""
             return '<div class="navgroup titles">%s</div>%s' % (title, "".join(parts))
         groups = [
             ("Find",
@@ -1348,6 +1827,7 @@ $("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
               ("/admin/backup", "💾 Backup", "backup")]),
             ("Operate",
              [("/admin/manual", "📖 Manual", "manual"),
+              ("/admin/users", "👥 Users & roles", "users"),
               ("/admin", "🗺 All pages", "admin", True),
               ("/admin/logout", "⎋ Logout", "logout")]),
         ]
@@ -1370,41 +1850,69 @@ $("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
             return ('<section class="card"><h2>%s</h2><div class="page-grid">%s</div></section>'
                     % (seo._clean(title), "".join(items)))
 
+        granted = self._granted_functions()
+        is_owner = self._session_uid() is None
+
+        def ok(href):
+            """Hub visibility: owner sees all admin tooling; team users see the
+            tools matching their granted functions plus the public site."""
+            if is_owner:
+                return True
+            fn = self._function_for_path(href)
+            if fn is None:
+                return (href.startswith("/") and not href.startswith("/admin/")
+                        and not href.startswith("/api/") and not href.startswith("/keys"))
+            return fn in granted
+
+        def section(title, items):
+            rows = []
+            for href, label, note in items:
+                if ok(href):
+                    rows.append(btn(href, label, note))
+            if not rows:
+                return ""
+            return ('<section class="card"><h2>%s</h2><div class="page-grid">%s</div></section>'
+                    % (seo._clean(title), "".join(rows)))
+
         find_section = section("🧭 Find — idea to niche", [
-            btn("/dashboard", "🧭 Niche finder dashboard", "admin"),
-            btn("/admin/opportunities", "📈 Grow — opportunities", "long-tail tree"),
-            btn("/admin/priority", "💰 Prioritize — earnings", "commission + clicks"),
-            btn("/admin/sem", "🎯 Search-intent (SEM)", "keyword briefs")])
+            ("/dashboard", "🧭 Niche finder dashboard", "admin"),
+            ("/admin/opportunities", "📈 Grow — opportunities", "long-tail tree"),
+            ("/admin/priority", "💰 Prioritize — earnings", "commission + clicks"),
+            ("/admin/sem", "🎯 Search-intent (SEM)", "keyword briefs")])
 
         build_section = section("🛠 Build — content & pages", [
-            btn("/admin/seo", "🔍 SEO audit", "indexability + schema"),
-            btn("/admin/cms", "🧩 Lead page CMS", "edit sections &amp; style"),
-            btn("/admin/ebooks", "📕 AI ebook generator", "PDF lead magnet"),
-            btn("/admin/refresh", "📡 Data refresh", "manual + auto re-mine")])
+            ("/admin/seo", "🔍 SEO audit", "indexability + schema"),
+            ("/admin/seoengines", "🔎 Search-engine consoles", "GSC · Bing · Yandex"),
+            ("/admin/cms", "🧩 Lead page CMS", "edit sections &amp; style"),
+            ("/admin/ebooks", "📕 AI ebook generator", "PDF lead magnet"),
+            ("/admin/refresh", "📡 Data refresh", "manual + auto re-mine")])
 
         market_section = section("🚀 Market — channels & conversion", [
-            btn("/admin/funnel", "⚙️ Real sales funnel", "data-backed stages"),
-            btn("/admin/marketing", "📊 Marketing ROI", "email + social + traffic"),
-            btn("/admin/emails", "📨 Email Studio", "compose, switches & scheduling"),
-            btn("/admin/social", "📣 Social publishing", "tracked posts"),
-            btn("/admin/variants", "⚗️ A/B headline tests", "per-niche split test"),
-            btn("/admin/segments", "🎚 Lead lifecycle segments", "hot / warm / cold"),
-            btn("/admin/pricedrop", "🏷 Price-drop deal engine", "scarcity pushes"),
-            btn("/tool", "🛠 One-click marketing suite", "launch everything"),
-            btn("/keys", "🔑 Keys &amp; endpoints", "admin"),
-            btn("/admin/apikeys", "🔌 API keys page", "PA-API + social")])
+            ("/admin/funnel", "⚙️ Real sales funnel", "data-backed stages"),
+            ("/admin/marketing", "📊 Marketing ROI", "email + social + traffic"),
+            ("/admin/emails", "📨 Email Studio", "compose, switches & scheduling"),
+            ("/admin/social", "📣 Social publishing", "tracked posts"),
+            ("/admin/variants", "⚗️ A/B headline tests", "per-niche split test"),
+            ("/admin/segments", "🎚 Lead lifecycle segments", "hot / warm / cold"),
+            ("/admin/pricedrop", "🏷 Price-drop deal engine", "scarcity pushes"),
+            ("/tool", "🛠 One-click marketing suite", "launch everything"),
+            ("/keys", "🔑 Keys &amp; endpoints", "admin"),
+            ("/admin/apikeys", "🔌 API keys page", "PA-API + social")])
 
         analyze_section = section("📈 Analyze — results & growth", [
-            btn("/admin/analytics", "📊 Click tracking &amp; analytics", "beacons")])
+            ("/admin/analytics", "📊 Click tracking &amp; analytics", "beacons")])
 
         operate_section = section("🧰 Operate — run the site", [
-            btn("/admin/manual", "📖 User manual", "visual + PDF guide"),
-            btn("/admin/logout", "⎋ Log out", "session")])
+            ("/admin/manual", "📖 User manual", "visual + PDF guide"),
+            ("/admin/users", "👥 Users &amp; roles", "team + permissions"),
+            ("/admin/pending", "🔎 My access", "functions &amp; roles"),
+            ("/admin/logout", "⎋ Log out", "session")])
 
         for pid, meta in amazon._SCRAPER_PROVIDERS.items():
-            operate_section += '<section class="card"><h2>🔌 %s</h2><div class="page-grid">%s</div></section>' % (
-                seo._clean(meta["name"]) + " key",
-                btn("/keys/" + seo._clean(pid), meta["name"] + " key", pid))
+            if ok("/keys/" + pid):
+                operate_section += '<section class="card"><h2>🔌 %s</h2><div class="page-grid">%s</div></section>' % (
+                    seo._clean(meta["name"]) + " key",
+                    btn("/keys/" + seo._clean(pid), meta["name"] + " key", pid))
         tools_html = find_section + build_section + market_section + analyze_section + operate_section
 
         site = [btn("/", "🏠 Home / landing", "public"),
@@ -1432,10 +1940,12 @@ $("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
                            for e in ("/api/settings", "/api/niches", "/api/tools",
                                      "/api/tools/launch",
                                      "/api/mine", "/api/search", "/api/autosuggest",
-"/api/indexnow", "/api/subscribers", "/api/sequence/send",
-                                      "/api/mail",
-                                      "/api/social", "/api/social/publish",
-                                     "/api/sem", "/api/seo-audit"))
+                                     "/api/indexnow", "/api/subscribers", "/api/sequence/send",
+                                     "/api/mail",
+                                     "/api/social", "/api/social/publish",
+                                     "/api/sem", "/api/seo-audit")
+                           if ok(e))
+        api_html = api_html or '<p class="hint">No API endpoints for your functions.</p>'
         body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex,nofollow"><title>Admin — all pages · pstore</title>
@@ -1524,13 +2034,19 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         path = parsed.path
         q = urllib.parse.parse_qs(parsed.query)
         try:
-            # public auth flow — login/logout/oauth never need a session
+            # public auth flow — login/logout/register/verify never need a session
             if path == "/admin/login":
                 if self._authed():
                     return self._redirect_login("/dashboard")
                 return self._login_page()
             if path == "/admin/logout":
                 return self._logout()
+            if path == "/admin/register":
+                return self._register_page()
+            if path == "/admin/verify":
+                return self._verify_login()
+            if path == "/admin/resend":
+                return self._send(405, {"error": "method not allowed"})
             oauth_route = re.match(r"^/admin/oauth/(google|fb)(/callback)?$", path)
             if oauth_route:
                 provider = "google" if oauth_route.group(1) == "google" else "facebook"
@@ -1550,7 +2066,14 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             if self._needs_admin(path) and not self._authed():
                 if path.startswith("/api/"):
                     return self._send(401, {"error": "unauthorized", "auth": False})
+                if path == "/admin/pending":
+                    return self._login_page(error="Sign in to see your access.")
                 return self._redirect_login(path or "/dashboard")
+            if self._needs_admin(path):
+                if path == "/admin/pending":
+                    return self._pending_page()
+                if self._function_denied(path):
+                    return self._function_error(path)
             # SEO + marketing routes first (crawlable + short links)
             if path.rstrip("/").lower() == "/robots.txt":
                 return self._send_cached(seo.render_robots(), "text/plain; charset=utf-8",
@@ -1642,6 +2165,10 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._admin_manual()
             if path == "/admin/manual.pdf":
                 return self._admin_manual_pdf()
+            if path == "/admin/users":
+                return self._admin_users()
+            if path == "/api/users":
+                return self._users_api()
             if path == "/admin/cms":
                 return self._admin_cms(q)
             if path == "/api/cms/pages":
@@ -1762,6 +2289,10 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         try:
             if parsed.path == "/admin/login":
                 return self._login_post()
+            if parsed.path == "/admin/register":
+                return self._register_post()
+            if parsed.path == "/admin/resend":
+                return self._resend_post()
             if parsed.path == "/subscribe":
                 return self._subscribe()
             if parsed.path == "/api/track":
@@ -1772,6 +2303,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._sequence_send()
             if parsed.path.startswith("/api/") and not self._authed():
                 return self._send(401, {"error": "unauthorized", "auth": False})
+            if parsed.path.startswith("/api/") and self._function_denied(parsed.path):
+                return self._send(403, {"error": "forbidden", "auth": True})
             if parsed.path == "/api/niches":
                 return self._save_niche()
             if parsed.path == "/api/refresh":
@@ -1786,6 +2319,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._indexnow_post()
             if parsed.path == "/api/seoengines":
                 return self._seoengines_post()
+            if parsed.path == "/api/users":
+                return self._users_api_post()
             if parsed.path == "/api/sequence/send":
                 return self._sequence_send()
             if parsed.path == "/api/mail":
@@ -2928,6 +3463,17 @@ pre.preview{white-space:pre-wrap;word-break:break-word;background:#fbf7ef;border
 #traf td{vertical-align:middle}
 .badg{display:inline-block;padding:2px 10px;border-radius:999px;font-size:11.5px;font-weight:700}
 .tblflow{overflow-x:auto}
+#traf{min-width:620px}
+.stengx .eng-grid h2{font-size:17px}
+.stengx .hero h1{font-size:clamp(24px,6vw,40px)}
+@media (max-width: 620px){
+ .stengx .row{gap:8px}
+ .eng-grid{grid-template-columns:1fr}
+ main{padding:12px 12px 48px}
+ .eng-grid input{min-width:0}
+ .stengx .card{padding:16px 14px}
+ .stengx .feature{flex:1 1 46%}
+}
 </style>
 </head><body>
 <header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
@@ -5201,6 +5747,7 @@ document.addEventListener("click", (e)=>{{
 <div class="row" style="align-items:stretch">{strip}</div>
 <p class="hint" style="margin-top:10px">Search Console owner token: {gsc_state}</p>
 <p class="hint" style="margin-top:6px">Sitemap <a href="{seo._clean(audit['sitemap'])}">{seo._clean(audit['sitemap'])}</a> · Robots <a href="{seo._clean(audit['robots'])}">{seo._clean(audit['robots'])}</a> · Canonical base <code>{seo._clean(audit['site_url'])}</code></p>
+<p class="hint" style="margin-top:4px">Locked to team members granted the <b>SEO &amp; consoles</b> function — the owner hands it out under <a href="/admin/users">Users &amp; roles</a>.</p>
 {site_keys}
 <div class="sub"><h3>🚀 Push to the engines now</h3>
 <p class="hint">Ping IndexNow with every live URL ({audit['count']} niches → {len(self._all_urls())} URLs). Bing, Yandex, Naver & Seznam crawl in minutes. To also reach Google, verify ownership via <a href="/keys/site/gsc">/keys/site/gsc</a> and submit the sitemap in Search Console.</p>
@@ -5260,6 +5807,316 @@ document.addEventListener("click", (e) => {{
         self.end_headers()
         self.wfile.write(data)
         return None
+
+    # ------------------------------------------------------- users & roles admin
+    def _admin_users(self):
+        """Owner-only team manager: create users, assign roles (a user can hold
+        several), toggle status, reset passwords, and edit the role matrix."""
+        nav = self._admin_nav("users")
+        if not self._authed() or self._session_uid() is not None:
+            return self._function_error("/admin/users")
+        fn_rows = "".join(
+            '{"%s":"%s"}' % (slug, seo._clean(label))
+            for slug, label in FUNCTIONS)
+        body = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow"><title>Users &amp; roles — pstore</title><link rel="stylesheet" href="/style.css">
+<style>
+.ur-grid{{display:grid;grid-template-columns:1fr;gap:16px;margin-top:6px}}
+.role-check{{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px;margin:10px 0}}
+.role-check label{{font-size:13px;display:flex;gap:7px;align-items:center;background:#fff;border:1px solid var(--border);
+border-radius:10px;padding:7px 10px;cursor:pointer}}
+.user-row{{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:14px;align-items:start;border-bottom:1px solid var(--border);
+padding:14px 0}}
+.user-row:last-child{{border-bottom:none}}
+.status-pill{{font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;background:#f1f3f6;color:var(--muted)}}
+.status-pill.verified{{background:#e6f4ea;color:#1e7e34}}
+.status-pill.disabled{{background:#fdecea;color:#c62828}}
+.actions{{display:flex;gap:8px;flex-wrap:wrap}}
+button.mini{{font-size:12.5px;padding:7px 12px;border-radius:10px;border:1px solid var(--border);background:#fff;cursor:pointer;color:var(--text)}}
+button.mini.danger{{color:#c62828}}
+input[type=text],input[type=email],input[type=password]{{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:10px;font-size:14px;margin:4px 0 10px;background:#fff}}
+.addform{{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px;align-items:end}}
+.addform label{{font-size:12px;color:var(--muted);font-weight:700}}
+@media(max-width:760px){{.addform{{grid-template-columns:1fr}}}}
+.role-title{{display:flex;justify-content:space-between;align-items:center;gap:8px}}
+</style></head><body>
+<header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
+<div class="hero"><h1>Users &amp; <span>roles</span></h1>
+<p class="tagline">Self-registered colleagues confirm their email, then you grant tools by ticking roles. A user can hold several roles; each role is a custom matrix of functions.</p></div>
+{nav}
+</header>
+<main>
+<section class="card"><h2>➕ Invite a user</h2>
+<div class="addform">
+<label>Name<input id="n_name" type="text" placeholder="Jane Doe" autocomplete="off"></label>
+<label>Email<input id="n_email" type="email" placeholder="jane@example.com" autocomplete="off"></label>
+<label>Temp password <input id="n_pw" type="text" placeholder="8+ chars" autocomplete="off"></label>
+<button id="n_go" class="btn" style="width:100%">Create user</button>
+</div>
+<p id="n_msg" class="msg"></p></section>
+<section class="card"><h2>👥 Team</h2><div id="users"></div></section>
+<section class="card"><h2>🎛 Role matrix <span class="status-pill">functions per role</span></h2>
+<div id="roles"></div></section>
+</main>
+<footer><p>{_TOTOP}</p></footer>
+<script>
+var FUNCTIONS = {{{fn_rows}}};
+function $(id){{return document.getElementById(id);}}
+function el(tag, cls, html){{var e=document.createElement(tag); if(cls)e.className=cls; if(html!=null)e.innerHTML=html; return e;}}
+function api(method, body, cb){{fetch("/api/users", {{method:method, headers:{{"Content-Type":"application/json"}},
+  body: JSON.stringify(body||{{}})}}).then(r=>r.json()).then(d=>{{ if(d.error && !cb) alert(d.error); cb&&cb(d); }});}}
+function bake(roleSlugs){{return roleSlugs.filter(s=>s).join(", ") || "— none —";}}
+function render(data){{
+  var u=$("users"); u.innerHTML="";
+  data.users.forEach(usr=>{{
+    var div=el("div","user-row");
+    var left=el("div","", "<b>"+(usr.name||"—")+"</b><div style='font-size:13px;color:var(--muted)'>"+usr.email+"</div>"+
+      "<div style='margin-top:6px'><span class='status-pill "+usr.status+"'>"+usr.status+"</span>"+
+      " <span style='font-size:12px;color:var(--muted)'>signups "+usr.created+"</span></div>");
+    var roleChips = data.roles.map(r=>{{
+      var c=document.createElement("label");
+      var cb=document.createElement("input"); cb.type="checkbox"; cb.checked=usr.roles.indexOf(r.slug)>=0;
+      cb.onchange=function(){{
+        var cur=usr.roles.indexOf(r.slug)>=0 ? usr.roles.filter(s=>s!==r.slug) : usr.roles.concat([r.slug]);
+        api("POST", {{action:"set_roles", id:usr.id, roles:cur}}, d=>render(d.data));
+      }};
+      c.appendChild(cb); c.appendChild(document.createTextNode(r.label)); return c;
+    }});
+    var mid=el("div","role-check"); roleChips.forEach(c=>mid.appendChild(c));
+    var acts=el("div","actions",
+      "<button class='mini' data-a='status'>"+(usr.status==="disabled"?"Enable":"Disable")+"</button>"+
+      "<button class='mini' data-a='reset'>Reset password</button>"+
+      "<button class='mini' data-a='delete'>Delete</button>");
+    acts.onclick=function(e){{
+      var b=e.target; if(!b.dataset.a)return;
+      if(b.dataset.a==="status") api("POST", {{action:"set_status", id:usr.id,
+        status: usr.status==="disabled" ? "verified" : "disabled"}}, d=>render(d.data));
+      if(b.dataset.a==="reset"){{ var pw=prompt("New password (8+ chars) for "+usr.email); if(pw&&pw.length>=8) api("POST", {{action:"reset_password", id:usr.id, password:pw}}, d=>render(d.data)); }}
+      if(b.dataset.a==="delete"){{ if(confirm("Delete "+usr.email+"? Their sessions end immediately.")) api("POST", {{action:"delete_user", id:usr.id}}, d=>render(d.data)); }}
+    }};
+    div.appendChild(left); div.appendChild(mid);
+    var right=el("div","", "");
+    right.appendChild(acts); div.appendChild(right);
+    u.appendChild(div);
+  }});
+  if(!data.users.length) u.appendChild(el("p","login-hint","No team members yet — ask them to request access from the login page, or invite one above."));
+  var r=$("roles"); r.innerHTML="";
+  data.roles.forEach(role=>{{
+    var card=el("div","card", undefined); card.style.marginBottom="12px";
+    var title=el("div","role-title","<b>"+role.label+"</b>"+
+      (role.builtin?"<span class='status-pill'>built-in</span>":"<button class='mini danger' data-del='"+role.slug+"'>Delete role</button>"));
+    var checks=el("div","role-check");
+    Object.keys(FUNCTIONS).forEach(slug=>{{
+      var l=document.createElement("label"); var cb=document.createElement("input");
+      cb.type="checkbox"; cb.checked=role.functions.indexOf(slug)>=0;
+      cb.onchange=function(){{
+        var cur=cb.checked ? role.functions.concat([slug]) : role.functions.filter(s=>s!==slug);
+        api("POST", {{action:"save_role", slug:role.slug, label:role.label, functions:cur}}, d=>render(d.data));
+      }};
+      l.appendChild(cb); l.appendChild(document.createTextNode(FUNCTIONS[slug])); checks.appendChild(l);
+    }});
+    title.querySelector("[data-del]").onclick=function(){{
+      if(confirm("Delete role "+role.label+"? Users lose its functions.")) api("POST", {{action:"delete_role", slug:role.slug}}, d=>render(d.data));
+    }};
+    card.appendChild(title); card.appendChild(checks); r.appendChild(card);
+  }});
+  var add=el("div","card", undefined);
+  var lab=el("label"); lab.innerHTML="New role name <input id='nr_label' type='text' placeholder='e.g. Writer' autocomplete='off'>";
+  var addBtn=el("button","mini","Add role"); addBtn.style.marginTop="8px";
+  addBtn.onclick=function(){{
+    var label=$("nr_label").value.trim(); if(!label)return;
+    var slug=label.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"")||("role-"+Date.now());
+    api("POST", {{action:"save_role", slug:slug, label:label, functions:[]}}, d=>{{
+      $("nr_label").value=""; render(d.data);
+    }});
+  }};
+  lab.appendChild(addBtn); add.appendChild(lab); r.appendChild(add);
+}}
+$("n_go").onclick=function(){{
+  var name=$("n_name").value.trim(), email=$("n_email").value.trim(), pw=$("n_pw").value;
+  if(email.indexOf("@")<0){{ $("n_msg").textContent="Enter a valid email."; return; }}
+  if(pw.length<8){{ $("n_msg").textContent="Password must be 8+ characters."; return; }}
+  api("POST", {{action:"create_user", name:name, email:email, password:pw}}, d=>{{
+    $("n_msg").textContent=d.error||"Created "+email+" — assign a role to grant access.";
+    if(!d.error){{ $("n_name").value=""; $("n_email").value=""; $("n_pw").value=""; render(d.data); }}
+  }});
+}};
+fetch("/api/users").then(r=>r.json()).then(render);
+</script>
+</body></html>"""
+        return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
+
+    def _users_json(self):
+        """{users, roles, functions} — never leaks stored password hashes."""
+        with _lock:
+            conn = _db()
+            try:
+                rows = conn.execute(
+                    "SELECT id, email, name, status, roles, created_at, last_login_at "
+                    "FROM users ORDER BY id").fetchall()
+                roles = conn.execute(
+                    "SELECT slug, label, functions, builtin FROM roles "
+                    "ORDER BY builtin DESC, slug").fetchall()
+            finally:
+                conn.close()
+        users = []
+        for r in rows:
+            try:
+                rl = json.loads(r["roles"] or "[]")
+            except ValueError:
+                rl = []
+            users.append({
+                "id": r["id"], "email": r["email"], "name": r["name"],
+                "status": r["status"], "roles": [x for x in rl if x],
+                "created": (r["created_at"] or "")[:10],
+                "last": (r["last_login_at"] or "")[:16] or ""})
+        return {"users": users,
+                "roles": [{"slug": r["slug"], "label": r["label"],
+                           "functions": [f for f in json.loads(r["functions"] or "[]") if f in FN],
+                           "builtin": bool(r["builtin"])} for r in roles],
+                "functions": [{"slug": s, "label": l} for s, l in FUNCTIONS]}
+
+    def _data_out(self, action, err=None, status=200):
+        data = json.dumps({"error": err, "data": self._users_json()}).encode("utf-8")
+        return self._send(status, data, "application/json; charset=utf-8")
+
+    def _owners_only(self):
+        return bool(self._authed() and self._session_uid() is None)
+
+    def _users_api(self):
+        """Owner-only CRUD for users + roles (JSON)."""
+        if not self._owners_only():
+            return self._send(403, {"error": "owner only"})
+        if self.command == "POST":
+            return self._users_api_post()
+        return self._send(200, json.dumps(self._users_json()).encode("utf-8"),
+                          "application/json; charset=utf-8")
+
+    def _users_api_post(self):
+        body = self._body()
+        action = str(body.get("action") or "")
+        err = None
+        status = 200
+        with _lock:
+            conn = _db()
+            try:
+                if action == "create_user":
+                    name = str(body.get("name") or "").strip()[:120]
+                    email = str(body.get("email") or "").strip().lower()
+                    pw = str(body.get("password") or "")
+                    if not email or "@" not in email or "." not in email.split("@")[-1]:
+                        err, status = "Enter a valid email address", 400
+                    elif len(pw) < 8:
+                        err, status = "Password must be at least 8 characters", 400
+                    elif conn.execute("SELECT id FROM users WHERE email=?",
+                                      (email,)).fetchone():
+                        err, status = "That email already exists", 409
+                    else:
+                        conn.execute(
+                            "INSERT INTO users (email, name, pass_hash, status, roles) "
+                            "VALUES (?,?,?,'verified','[]')",
+                            (email, name, security.hash_password(pw)))
+                        conn.commit()
+                elif action == "set_roles":
+                    try:
+                        uid = int(body.get("id") or 0)
+                    except (TypeError, ValueError):
+                        uid = 0
+                    slugs = [str(s) for s in (body.get("roles") or [])]
+                    known = {r["slug"] for r in conn.execute(
+                        "SELECT slug FROM roles").fetchall()}
+                    if not uid or any(s not in known for s in slugs):
+                        err, status = "unknown role slug", 400
+                    else:
+                        conn.execute("UPDATE users SET roles=? WHERE id=?",
+                                     (json.dumps(slugs), uid))
+                        conn.commit()
+                elif action == "set_status":
+                    try:
+                        uid = int(body.get("id") or 0)
+                    except (TypeError, ValueError):
+                        uid = 0
+                    stval = str(body.get("status") or "")
+                    if stval not in ("unverified", "verified", "disabled"):
+                        err, status = "bad status", 400
+                    else:
+                        conn.execute("UPDATE users SET status=? WHERE id=?",
+                                     (stval, uid))
+                        conn.commit()
+                        self._drop_sessions_locked(uid)
+                elif action == "reset_password":
+                    try:
+                        uid = int(body.get("id") or 0)
+                    except (TypeError, ValueError):
+                        uid = 0
+                    pw = str(body.get("password") or "")
+                    if len(pw) < 8:
+                        err, status = "Password must be at least 8 characters", 400
+                    else:
+                        conn.execute("UPDATE users SET pass_hash=? WHERE id=?",
+                                     (security.hash_password(pw), uid))
+                        conn.commit()
+                        self._drop_sessions_locked(uid)
+                elif action == "delete_user":
+                    try:
+                        uid = int(body.get("id") or 0)
+                    except (TypeError, ValueError):
+                        uid = 0
+                    conn.execute("DELETE FROM users WHERE id=?", (uid,))
+                    conn.commit()
+                    self._drop_sessions_locked(uid)
+                elif action == "save_role":
+                    slug = str(body.get("slug") or "").strip()[:64]
+                    label = str(body.get("label") or "").strip()[:80]
+                    funcs = [str(f) for f in (body.get("functions") or [])
+                             if str(f) in FN]
+                    if not slug or not label:
+                        err, status = "role slug and label required", 400
+                    elif conn.execute("SELECT slug FROM roles WHERE slug=?",
+                                      (slug,)).fetchone():
+                        conn.execute("UPDATE roles SET label=?, functions=? WHERE slug=?",
+                                     (label, json.dumps(funcs), slug))
+                        conn.commit()
+                    else:
+                        conn.execute(
+                            "INSERT INTO roles (slug, label, functions, builtin) "
+                            "VALUES (?,?,?,0)", (slug, label, json.dumps(funcs)))
+                        conn.commit()
+                elif action == "delete_role":
+                    slug = str(body.get("slug") or "").strip()
+                    role = conn.execute("SELECT builtin FROM roles WHERE slug=?",
+                                        (slug,)).fetchone()
+                    if not role:
+                        err, status = "no such role", 404
+                    elif role["builtin"]:
+                        err, status = "built-in roles can't be deleted", 400
+                    else:
+                        conn.execute("DELETE FROM roles WHERE slug=?", (slug,))
+                        for row in conn.execute("SELECT id, roles FROM users").fetchall():
+                            try:
+                                rl = [x for x in json.loads(row["roles"] or "[]")
+                                      if x != slug]
+                            except ValueError:
+                                rl = []
+                            conn.execute("UPDATE users SET roles=? WHERE id=?",
+                                         (json.dumps(rl), row["id"]))
+                        conn.commit()
+                else:
+                    err, status = "unknown action", 400
+            finally:
+                conn.close()
+        return self._data_out(action, err, status)
+
+    def _drop_sessions_locked(self, uid):
+        """Drop every session bound to a user; assumes `_lock` is HELD."""
+        for tok, (exp, sid) in list(_SESSIONS.items()):
+            if sid == uid:
+                _SESSIONS.pop(tok, None)
+
+    def _drop_sessions(self, uid):
+        with _lock:
+            self._drop_sessions_locked(uid)
 
     def _admin_refresh(self, q):
         """Manual niche data refresh: re-mine one or all saved niches now, and

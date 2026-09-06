@@ -25,6 +25,13 @@ operate normally from `/root/projects/mazon` (git auto-reads the gitfile).
   set to the live origin). Redirect URIs are `<PSTORE_URL>/admin/oauth/google/callback`
   and `<PSTORE_URL>/admin/oauth/fb/callback`; only the admin email is granted.
   Unset providers get no button on the login page.
+- Multi-user RBAC: self-registration (`/admin/register`) requires an emailed,
+  HMAC-signed confirmation link before login; the env owner alone manages users
+  and the role matrix (`/admin/users` + `/api/users`). Every admin page/API is
+  owned by exactly one function (`FUNCTION_PATHS`); a user's access is the union
+  of their roles' functions, enforced server-side (403) on pages AND their APIs.
+  Owner handles are session-uid `None`; team sessions carry a user id. Passwords
+  are PBKDF2-HMAC-SHA256 (`security.hash_password`/`verify_password`).
 
 ## Security model
 - `security.py` = per-client rate limiters (login 5/15min, /api 240/min, global
