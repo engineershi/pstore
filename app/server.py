@@ -854,25 +854,48 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return False
 
+    def do_HEAD(self):
+        """Serve GET-equivalent headers with no body. Many crawlers and sitemap
+        checkers probe with HEAD first; an unimplemented method just looks broken."""
+        self._head_only = True
+        try:
+            self.do_GET()
+        finally:
+            self._head_only = False
+
     def _send(self, code, body, ctype="application/json; charset=utf-8"):
         data = body if isinstance(body, bytes) else json.dumps(body).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        if not getattr(self, "_head_only", False):
+            self.wfile.write(data)
 
-    def _send_cached(self, body, ctype, max_age=RENDER_CACHE_DEFAULT_TTL):
-        """Send a public HTML response tagged with a Cache-Control lifetime so
-        crawlers and CDNs reuse it (the /n/ render cache is keyed by content and
-        expires itself, so this stale window is bounded and safe)."""
+    def _send_cached(self, body, ctype, max_age=RENDER_CACHE_DEFAULT_TTL, edge=True):
+        """Send a public HTML/xml response tagged with a Cache-Control lifetime so
+        browsers, crawlers and CDN edges reuse it. The /n/ render cache is keyed by
+        content and expires itself, so the stale window is bounded and safe.
+
+        edge=True also emits s-maxage: Cloudflare (already in front of Render)
+        then serves the page from the edge, so Google/Bing never wait on the
+        free-tier cold start. Pages with A/B variants pass edge=False to keep the
+        per-visitor headline intact."""
         data = body if isinstance(body, bytes) else body.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "public, max-age=%d" % int(max_age))
+        age = max(int(float(max_age)), 0)
+        if edge:
+            edge_age = max(int(min(float(max_age), 900.0)), 60)
+            self.send_header("Cache-Control",
+                             "public, max-age=%d, s-maxage=%d, stale-while-revalidate=60"
+                             % (age, edge_age))
+        else:
+            self.send_header("Cache-Control", "public, max-age=%d" % age)
         self.end_headers()
-        self.wfile.write(data)
+        if not getattr(self, "_head_only", False):
+            self.wfile.write(data)
 
     def _settings(self):
         return {
@@ -1514,12 +1537,15 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                     return self._send(401, {"error": "unauthorized", "auth": False})
                 return self._redirect_login(path or "/dashboard")
             # SEO + marketing routes first (crawlable + short links)
-            if path == "/robots.txt":
-                return self._send(200, seo.render_robots(), "text/plain; charset=utf-8")
-            if path == "/sitemap.xml":
-                return self._send(200, self._sitemap(), "application/xml; charset=utf-8")
+            if path.rstrip("/").lower() == "/robots.txt":
+                return self._send_cached(seo.render_robots(), "text/plain; charset=utf-8",
+                                         max_age=60, edge=False)
+            if path.rstrip("/").lower() == "/sitemap.xml":
+                return self._send_cached(self._sitemap(), "application/xml; charset=utf-8",
+                                         max_age=3600)
             if path == "/blog":
-                return self._send(200, seo.render_blog(self._all_niches()), "text/html; charset=utf-8")
+                return self._send_cached(seo.render_blog(self._all_niches()),
+                                         "text/html; charset=utf-8", edge=False)
             key_body = indexnow.serve_key(path)
             if key_body is not None:
                 return self._send(200, key_body.encode("utf-8"), "text/plain; charset=utf-8")
@@ -1530,7 +1556,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             if path == "/api/indexnow":
                 return self._indexnow(q)
             if path == "/":
-                return self._send(200, self._landing(), "text/html; charset=utf-8")
+                return self._send_cached(self._landing(), "text/html; charset=utf-8",
+                                         max_age=300, edge=False)
             if path.startswith("/n/"):
                 return self._niche_page(path, q)
             if path.startswith("/lp/"):
@@ -2516,16 +2543,22 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             try:
                 if slug == seo._slugify(n["keyword"]):
                     headline, vno = self._variant_for(slug)
+                    # A/B headline is chosen per-visitor by IP hash, so edge
+                    # caching would pin everyone to one variant. Cache at the CDN
+                    # only when no variants are enabled for this page.
+                    cacheable = (headline is None and vno == 0)
                     cache_key = ("/n/", slug, amazon.MARKET, vno, headline,
                                  seo._variant_key(n))
                     cached = _render_cache_get(cache_key) if aware else None
                     if cached is not None:
-                        return self._send_cached(cached, "text/html; charset=utf-8", ttl)
+                        return self._send_cached(cached, "text/html; charset=utf-8", ttl,
+                                                 edge=cacheable)
                     res = seo.render_niche(n["keyword"], n, saved_niches=all_niches,
                                            ab_headline=headline, ab_variant=vno)
                     if aware:
                         _render_cache_put(cache_key, res, ttl)
-                        return self._send_cached(res, "text/html; charset=utf-8", ttl)
+                        return self._send_cached(res, "text/html; charset=utf-8", ttl,
+                                                 edge=cacheable)
                     return self._send(200, res, "text/html; charset=utf-8")
             except Exception:
                 continue
@@ -2609,7 +2642,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                     if html is None:
                         html = market_engine.build_landing_page(
                             n["keyword"], n["products"], site_url=seo.BASE_URL)
-                    return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+                    return self._send_cached(html.encode("utf-8"), "text/html; charset=utf-8",
+                                             max_age=180, edge=True)
             except Exception:
                 continue
         return self._send(404, b"<html><body><p>Landing page not found.</p></body></html>",
