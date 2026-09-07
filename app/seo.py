@@ -724,8 +724,39 @@ def render_sitemap(entries):
     urls = "".join(
         f"<url><loc>{BASE_URL}{_clean(p)}</loc><lastmod>{lm}</lastmod></url>\n"
         for p, lm in entries)
-    body = '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' + urls + "</urlset>\n"
+    body = '<?xml version="1.0" encoding="UTF-8"?>\n' + SITEMAP_XSL_PI + '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' + urls + "</urlset>\n"
     return body.encode("utf-8")
+
+
+SITEMAP_XSL_PI = '<?xml-stylesheet type="text/xsl" href="/sitemap.xsl"?>\n'
+
+
+def sitemap_xsl():
+    """Brower-only stylesheet so a raw sitemap view wraps and scrolls on small
+    screens. Crawlers ignore the XSL processing instruction entirely."""
+    return ("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<xsl:stylesheet version=\"1.0\" xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\">\n"
+            "<xsl:output method=\"html\" encoding=\"UTF-8\" indent=\"yes\"/>\n"
+            "<xsl:template match=\"/\">\n"
+            "<html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><style>\n"
+            "body{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;background:#fafafa;margin:0;padding:14px}\n"
+            ".sitemap-wrap{overflow-x:auto;max-width:100%}\n"
+            "table{border-collapse:collapse;width:100%}\n"
+            "td,th{padding:6px 8px;text-align:left;vertical-align:top;word-break:break-all;border-bottom:1px solid #e3e3e3}\n"
+            "th{background:#eee}\n"
+            "a{color:#1a0dab;text-decoration:none}\n"
+            "p.hint{color:#888}\n"
+            "</style></head><body>\n"
+            "<div class=\"sitemap-wrap\">\n"
+            "<p class=\"hint\">Sitemap · <xsl:value-of select=\"count(//*[local-name()='url'])\"/> URLs</p>\n"
+            "<table><tr><th>URL</th><th>Lastmod</th></tr>\n"
+            "<xsl:for-each select=\"//*[local-name()='url']\">\n"
+            "<tr><td><a href=\"{*[local-name()='loc']}\"><xsl:value-of select=\"*[local-name()='loc']\"/></a></td>"
+            "<td><xsl:value-of select=\"*[local-name()='lastmod']\"/></td></tr>\n"
+            "</xsl:for-each>\n"
+            "</table></div></body></html>\n"
+            "</xsl:template>\n"
+            "</xsl:stylesheet>\n").encode("utf-8")
 
 
 def render_robots():

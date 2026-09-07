@@ -32,9 +32,14 @@
 
   function setup(table) {
     // reuse an existing .table-wrap / .tbl-flow, else wrap the table
-    var host = table;
-    while (host && host.parentElement && !isScrollHost(host)) host = host.parentElement;
-    if (host === table) {
+    var host = null;
+    var p = table.parentElement;
+    while (p) {
+      if (isScrollHost(p)) { host = p; break; }
+      if (p === document.body || p === document.documentElement) break;
+      p = p.parentElement;
+    }
+    if (!host) {
       var own = document.createElement("div");
       own.className = "tbl-flow";
       table.parentNode.insertBefore(own, table);

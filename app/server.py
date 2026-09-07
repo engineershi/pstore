@@ -209,6 +209,31 @@ _render_cache = {}
 _render_cache_lock = threading.Lock()
 RENDER_CACHE_DEFAULT_TTL = 300.0
 
+# Short-TTL caches for the admin "Grow" payloads, so the page render never
+# blocks on per-winner live Amazon autosuggest or a full suggest-engine run.
+_ADMIN_DATA_TTL = 15 * 60.0
+_ADMIN_SUGG_TTL = 60 * 60.0
+_ADMIN_WARMING = set()  # single-flight guard for the background warm thread
+_OPP_WARMING_NOTE = ("Opportunities are warming up — this computes live Amazon "
+                     "autosuggestions and takes ~30s. Refresh in about a minute.")
+_SUGG_WARMING_NOTE = ("Suggestions are warming up — the suggest engine runs "
+                      "live searches and takes ~30s. Refresh in about a minute.")
+
+
+def _bust_admin_data_cache():
+    with _render_cache_lock:
+        _render_cache.pop("opp:data", None)
+        _render_cache.pop("sugg:data", None)
+
+
+def _warm_startup_admin():
+    """Background pre-warm of the admin Grow payloads right after boot so the
+    first page visit never blocks on live autosuggest / suggest-engine runs."""
+    try:
+        Handler.__new__(Handler)._warm_admin_payloads()
+    except Exception:
+        pass
+
 
 def _render_cache_get(key):
     with _render_cache_lock:
@@ -1476,9 +1501,19 @@ class Handler(BaseHTTPRequestHandler):
                 path in ("/admin", "/dashboard", "/index.html", "/tool", "/keys"))
 
     def _redirect_login(self, next_path):
-        loc = "/admin/login?next=" + urllib.parse.quote(next_path or "/dashboard")
+        loc = "/admin/login?next=" + urllib.parse.quote(next_path or "/dashboard", safe="")
         self.send_response(302)
         self.send_header("Location", loc)
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        return None
+
+    def _redirect_path(self, url):
+        url = (url or "/dashboard")
+        if not (url.startswith("/") and not url.startswith("//")):
+            url = "/dashboard"
+        self.send_response(302)
+        self.send_header("Location", url)
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         return None
@@ -2323,7 +2358,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             # public auth flow — login/logout/register/verify/reset never need a session
             if path == "/admin/login":
                 if self._authed():
-                    return self._redirect_login("/dashboard")
+                    return self._redirect_path(q.get("next", ["/dashboard"])[0])
                 return self._login_page()
             if path == "/admin/logout":
                 return self._logout()
@@ -2371,6 +2406,10 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             if path.rstrip("/").lower() == "/sitemap.xml":
                 return self._send_cached(self._sitemap(), "application/xml; charset=utf-8",
                                          max_age=3600)
+            if path.rstrip("/").lower() == "/sitemap.xsl":
+                return self._send_cached(seo.sitemap_xsl(),
+                                         "application/xslt+xml; charset=utf-8",
+                                         max_age=86400)
             if path == "/blog":
                 return self._send_cached(seo.render_blog(self._all_niches()),
                                          "text/html; charset=utf-8", edge=False)
@@ -2540,6 +2579,10 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._refresh_status()
             if path == "/api/subscribers":
                 return self._subscribers_json()
+            if path == "/api/analytics":
+                return self._analytics_api()
+            if path == "/api/subjects":
+                return self._subjects_api(q)
             if path == "/api/mail":
                 return self._studio_api(q)
             if path == "/api/tools":
@@ -2877,6 +2920,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 topics_created = self._generate_topics(slug, 6)
             except Exception:
                 topics_created = []
+        _bust_admin_data_cache()
         return self._send(200, {"id": nid, "topics_created": len(topics_created)})
 
     def _fire_indexnow(self, paths):
@@ -3060,11 +3104,26 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         return created
 
     def _opportunities_data(self):
-        """Compute the revenue-loop payload (winners + note) without emitting an
-        HTTP response, so the page and the API share one source of truth."""
+        """Revenue-loop payload (winners + note), shared by page + API. Serves
+        the render cache; on a miss it kicks off a background warm instead of
+        blocking the request on live per-winner Amazon autosuggest."""
+        if amazon.CACHE_TTL > 0:
+            cached = _render_cache_get("opp:data")
+            if cached is not None:
+                return cached
+            self._kick_admin_warm()
+            return {"winners": [], "note": _OPP_WARMING_NOTE}
+        return self._compute_opportunities()
+
+    def _compute_opportunities(self):
+        """Blocking compute for the opportunities payload (live autosuggest per
+        winner). Warms ``opp:data`` when caching is enabled."""
         winners = self._top_clicked_niches(limit=12)
         if not winners:
-            return {"winners": [], "note": "No click data yet — publish social posts and IndexNow your pages to seed the loop."}
+            payload = {"winners": [], "note": "No click data yet — publish social posts and IndexNow your pages to seed the loop."}
+            if amazon.CACHE_TTL > 0:
+                _render_cache_put("opp:data", payload, _ADMIN_DATA_TTL)
+            return payload
         existing_kw = {n["keyword"].lower() for n in self._all_niches()}
         out = []
         for w in winners:
@@ -3084,8 +3143,11 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 "topic_urls": ["/n/%s/%s" % (w["slug"], t["slug"])
                                for t in self._topics_for(w["slug"])[:10]],
             })
-        return {"winners": out,
-                "note": "Unbuilt terms are real Amazon autosuggestions around a proven winner — expand to auto-create those pages."}
+        payload = {"winners": out,
+                   "note": "Unbuilt terms are real Amazon autosuggestions around a proven winner — expand to auto-create those pages."}
+        if amazon.CACHE_TTL > 0:
+            _render_cache_put("opp:data", payload, _ADMIN_DATA_TTL)
+        return payload
 
     def _opportunities(self, q):
         """Revenue loop, read side: the niches already pulling real Amazon clicks
@@ -3134,6 +3196,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             created.append({"keyword": n["keyword"], "products": len(n["products"]),
                             "slug": seo._slugify(n["keyword"]),
                             "score": n.get("score"), "saturation": n.get("saturation")})
+        _bust_admin_data_cache()
         return self._send(200, {"ok": True, "seed": kw, "created": created,
                                 "count": len(created)})
 
@@ -3753,8 +3816,9 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
 <title>Search engines — pstore</title><link rel="stylesheet" href="/style.css">
 <meta name="robots" content="noindex,nofollow">
 <style>
-.stengx{display:grid;grid-template-columns:1fr;gap:18px}
-.eng-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+.stengx{display:grid;grid-template-columns:minmax(0,1fr);gap:18px}
+.stengx>.card,.eng-grid,.eng-grid>.card,.stengx .feature{min-width:0}
+.eng-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;min-width:0}
 pre.preview{white-space:pre-wrap;word-break:break-word;background:#fbf7ef;border:1px solid var(--line,#eee);border-radius:12px;padding:12px;font-size:12.5px;margin-top:8px}
 #traf td{vertical-align:middle}
 .badg{display:inline-block;padding:2px 10px;border-radius:999px;font-size:11.5px;font-weight:700}
@@ -6654,11 +6718,48 @@ fresh();
         return self._send(200, self._marketing_payload())
 
     def _suggest_payload(self):
-        """Demography-driven auto niche suggestions: run the suggest engine
-        against the configured market profile and return build-ready rows."""
+        """Demography-driven auto niche suggestions. Serves the render cache;
+        on a miss it triggers a background warm instead of blocking on the
+        suggest engine's live searches."""
+        if amazon.CACHE_TTL > 0:
+            cached = _render_cache_get("sugg:data")
+            if cached is not None:
+                return cached
+            self._kick_admin_warm()
+            return {"suggestions": [], "profile": {}, "note": _SUGG_WARMING_NOTE}
         demo = self._demo() or {}
-        return suggest.suggest_niches(demo, top=int(
+        return self._compute_suggest(demo)
+
+    def _compute_suggest(self, demo):
+        """Blocking suggest-engine run, cached as ``sugg:data`` when enabled."""
+        payload = suggest.suggest_niches(demo, top=int(
             _get_setting("suggest.top") or 4))
+        if amazon.CACHE_TTL > 0:
+            _render_cache_put("sugg:data", payload, _ADMIN_SUGG_TTL)
+        return payload
+
+    def _kick_admin_warm(self):
+        """Ensure at most one background warm of the admin Grow payloads runs at
+        a time. Never blocks; used by the read-through cache misses."""
+        if amazon.CACHE_TTL <= 0:
+            return
+        with _refresh_lock:
+            if _ADMIN_WARMING:
+                return
+            _ADMIN_WARMING.add("grow")
+        t = threading.Thread(target=self._warm_admin_payloads,
+                             name="warm-admin", daemon=True)
+        t.start()
+
+    def _warm_admin_payloads(self):
+        try:
+            self._compute_opportunities()
+            self._compute_suggest(self._demo() or {})
+        except Exception:
+            pass
+        finally:
+            with _refresh_lock:
+                _ADMIN_WARMING.discard("grow")
 
     def _suggest_api(self):
         return self._send(200, self._suggest_payload())
@@ -7056,8 +7157,8 @@ fresh();
                      "<p class='hint'>est. commission · %.1f orders</p></div>"
                      "<div class='feature'><h3>$%.2f</h3><p class='hint'>real earnings logged</p></div></div>"
                      "<h3>Channel returns (est.)</h3>"
-                     "<table><thead><tr><th>Source</th><th class='ct'>Clicks</th>"
-                     "<th class='ct'>Est. commission</th></tr></thead><tbody>%s</tbody></table>"
+                     "<div class='table-wrap'><table><thead><tr><th>Source</th><th class='ct'>Clicks</th>"
+                     "<th class='ct'>Est. commission</th></tr></thead><tbody>%s</tbody></table></div>"
                      % (st["commission_est"], st["orders_est"], st["real_earnings"], chan_rows_html))
         rows_html = ("<h3>Earn — clicks your channels actually bill</h3>"
                      + "<div class='row'>"
@@ -7074,10 +7175,10 @@ fresh();
                x["commission_est"], x["n_products"])
             for x in p["by_niche"]) or "<tr><td colspan='6' class='hint'>No saved niches yet.</td></tr>"
         niche_html = ("<h3>By niche — who converts &amp; who leaks</h3>"
-                      "<table><thead><tr><th>Niche</th><th class='ct'>Views</th>"
+                      "<div class='table-wrap'><table><thead><tr><th>Niche</th><th class='ct'>Views</th>"
                       "<th class='ct'>Leads</th><th class='ct'>Clicks</th>"
                       "<th class='ct'>Est. commission</th><th class='ct'>Products</th></tr></thead>"
-                      "<tbody>%s</tbody></table>" % nrows)
+                      "<tbody>%s</tbody></table></div>" % nrows)
         body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sales funnel — pstore</title><link rel="stylesheet" href="/style.css">
@@ -8551,15 +8652,18 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}</s
     def _studio_send(self, body):
         spec = dict(body.get("spec") or {})
         spec["options"] = dict(body.get("options") or {})
-        dry = bool(spec["options"].get("dry_run"))
-        if not mailer.configured():
+        dry = bool(spec["options"].get("dry_run") or body.get("dry_run"))
+        schedule_at = (body.get("schedule_at") or "").strip()
+        # Only an actual immediate send needs a live SMTP path. Dry runs and
+        # future-scheduled campaigns are legitimate without it (the outbox loop
+        # reports the send error per row when it finally fires).
+        if not mailer.configured() and not dry and not schedule_at:
             return self._send(200, {"ok": False, "error": "SMTP is not configured.",
                                     "sent": 0, "errors": 0, "recipients": 0, "dry_run": dry})
         recipients = self._studio_recipients(body.get("recipients") or {})
         if not recipients:
             return self._send(200, {"ok": False, "error": "No valid recipients selected.",
                                     "sent": 0, "errors": 0, "recipients": 0, "dry_run": dry})
-        schedule_at = (body.get("schedule_at") or "").strip()
         if schedule_at and not dry:
             normalized = schedule_at.replace("T", " ")
             if len(normalized) == 16:
@@ -9245,6 +9349,46 @@ AI status: {"<b>configured</b> (%s · %s)" % (seo._clean(_active), seo._clean(ai
         self.end_headers()
         self.wfile.write(data)
         return None
+
+    def _analytics_api(self):
+        """JSON twin of /admin/analytics so a non-owner analyst role gets the
+        same numbers programmatically."""
+        with _lock:
+            conn = _db()
+            subs = self._subs_stats(conn)
+            total = conn.execute("SELECT COUNT(*) c FROM clicks").fetchone()["c"]
+            top_slugs = [dict(r) for r in conn.execute(
+                "SELECT slug, COUNT(*) c FROM clicks GROUP BY slug ORDER BY c DESC LIMIT 12").fetchall()]
+            top_sources = [dict(r) for r in conn.execute(
+                "SELECT source, COUNT(*) c FROM clicks GROUP BY source ORDER BY c DESC LIMIT 8").fetchall()]
+            top_products = [dict(r) for r in conn.execute(
+                "SELECT asin, slug, COUNT(*) c FROM clicks WHERE asin != '' "
+                "GROUP BY asin, slug ORDER BY c DESC LIMIT 10").fetchall()]
+            recent = [dict(r) for r in conn.execute(
+                "SELECT slug, source, referrer, created_at FROM clicks "
+                "ORDER BY id DESC LIMIT 15").fetchall()]
+            views = conn.execute(
+                "SELECT COUNT(*) c FROM events WHERE name='view'").fetchone()["c"]
+            event_breakdown = [dict(r) for r in conn.execute(
+                "SELECT name, COUNT(*) c FROM events GROUP BY name ORDER BY c DESC LIMIT 12").fetchall()]
+            event_pages = [dict(r) for r in conn.execute(
+                "SELECT page, COUNT(*) c FROM events WHERE name='view' "
+                "GROUP BY page ORDER BY c DESC LIMIT 10").fetchall()]
+            month_rows = conn.execute(
+                "SELECT month, orders, earnings FROM earnings_records "
+                "ORDER BY month DESC LIMIT 24").fetchall()
+            conn.close()
+        est = earnings.estimate(total, "")
+        return self._send(200, {
+            "subs": subs, "totals": {"clicks": total, "niches_clicked": len(top_slugs),
+                                     "views": views},
+            "top_slugs": top_slugs, "top_sources": top_sources,
+            "top_products": top_products, "recent": recent,
+            "events": {"breakdown": event_breakdown, "pages": event_pages},
+            "earnings": {"estimate": est,
+                         "records": [{"month": r["month"], "orders": r["orders"],
+                                      "earnings": r["earnings"]} for r in month_rows]},
+        })
 
     def _admin_analytics(self):
         with _lock:
@@ -10042,6 +10186,10 @@ def main():
               "key in /admin/ebooks) to enable generation.")
     amazon.set_market(os.environ.get("PSTORE_MARKET", amazon.DEFAULT_MARKET))
     amazon.set_tag(os.environ.get("PSTORE_TAG", ""))
+    warm = threading.Thread(target=_warm_startup_admin, name="warm-admin-start",
+                            daemon=True)
+    warm.start()
+    print("admin Grow payloads: pre-warming in background (autosuggest + suggest engine)")
     if _REFRESH_INTERVAL_SEC > 0:
         threading.Thread(target=_auto_refresh_loop, daemon=True).start()
         print("niche auto-refresh: every %ds, stale after %dm, %d/cycle"

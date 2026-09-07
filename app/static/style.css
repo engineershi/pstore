@@ -12,6 +12,13 @@
   --shadow-lg: 0 18px 44px rgba(255, 110, 60, 0.14);
 }
 * { box-sizing: border-box; }
+img, svg, video, canvas, iframe { max-width: 100%; height: auto; }
+pre, code, pre code {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
 html { scroll-behavior: smooth; }
 body {
   margin: 0;
