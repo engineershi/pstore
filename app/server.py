@@ -945,8 +945,24 @@ def _init():
     amazon.MIN_INTERVAL = 0.5
     amazon.MAX_ATTEMPTS = 3
     with _lock:
-        conn = _db()
-        conn.close()
+        try:
+            conn = _db()
+            conn.close()
+        except sqlite3.DatabaseError:
+            # A corrupt data file (e.g. a write interrupted when the disk
+            # filled up) makes every boot crash, so any deploy fails. Preserve
+            # the bad file for a later salvage, then recreate a fresh schema so
+            # the service can come back up.
+            import time as _timemod
+            bak = "%s.corrupt-%d.bak" % (DB, int(_timemod.time()))
+            try:
+                os.replace(DB, bak)
+                print("WARN: data file was corrupt (%s); moved to %s and "
+                      "recreating a fresh database." % (DB, bak), flush=True)
+            except OSError:
+                pass
+            conn = _db()
+            conn.close()
     # Restore API keys/settings persisted via the UI (env still wins at
     # read time): PA-API creds and the social webhook survive restarts.
     try:
