@@ -431,6 +431,7 @@ def render_admin_manual(nav_html, totop_html):
 <li>The owner is always allowed everywhere; only the owner sees <b>Users &amp; roles</b> and can create/disable users, change roles and reset passwords.</li>
 <li>Signing in only works after the <b>email is verified</b>; disabling an account kills its sessions instantly.</li>
 <li><b>Forgotten password?</b> The login page has a <i>Forgot your password?</i> link → a secure, <b>single-use reset link</b> is emailed (valid 1 hour). It never leaks whether an email has an account; the owner login is environment-based and never reset this way.</li>
+<li><b>No SMTP configured?</b> Registration and <i>resend</i> will then say so honestly on the page instead of promising an inbox message that can't arrive (the confirmation link needs real e-mail out). The owner either sets up <code>SMTP_HOST/USER/PASSWORD</code>, or skips e-mail entirely by creating the account as <b>verified</b> directly on the Users page.</li>
 <li>Confirmation links are HMAC-signed and expire after <b>72 hours</b>; anyone who loses one can re-request it from the login page (<i>resend my confirmation link</i>).</li>
 </ul>
 

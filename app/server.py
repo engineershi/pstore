@@ -1755,7 +1755,8 @@ $("go").onclick = async () => {{
   const r = await fetch("/admin/register", {{method:"POST", headers:{{"Content-Type":"application/json"}},
     body: JSON.stringify({{name: $("nm").value.trim(), email: $("em").value.trim(), password: $("pw").value}})}});
   const d = await r.json().catch(()=>({{ok:false, error:"bad response"}}));
-  if (d.ok) location.href = "/admin/login?sent=1";
+  if (d.ok) {{ if (d.mail) location.href = "/admin/login?sent=1";
+    else $("msg").textContent = d.alert || "Account created, but the confirmation email couldn't be sent (no SMTP). Ask the owner to enable it."; }}
   else $("msg").textContent = d.error || "Couldn't create the account.";
 }};
 $("pw2").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").onclick(); }});
@@ -1795,7 +1796,11 @@ $("pw2").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncl
         return self._send(200, {"ok": True, "mail": sent,
                                 "error": None,
                                 "alert": ("Check your inbox and confirm your email. "
-                                          "Until it's verified, you can't sign in yet.")})
+                                          "Until it's verified, you can't sign in yet."
+                                          if sent else
+                                          "Account created, but the confirmation email could not be sent — "
+                                          "this server has no SMTP configured. Ask the owner to enable it "
+                                          "or create the account directly from the Users page.")})
 
     def _verify_login(self):
         """Activation link handler. On success the account is verified AND the
@@ -1866,7 +1871,10 @@ $("pw2").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncl
                                               else "This account has been disabled.")})
         sent = self._send_verify_email(email, row.get("name") or email)
         return self._send(200, {"ok": sent, "error": None,
-                                "alert": "Confirmation link resent — check your inbox."})
+                                "alert": ("Confirmation link resent — check your inbox." if sent else
+                                          "Couldn't send the confirmation link — this server has no SMTP "
+                                          "configured. Ask the owner to enable it or create the account "
+                                          "from the Users page.")})
 
     # ------------------------------------------------------- forgot / reset password
 
