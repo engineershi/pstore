@@ -2863,6 +2863,10 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._admin_manual_pdf()
             if path == "/admin/users":
                 return self._admin_users()
+            if path == "/admin/recover-export":
+                return self._recover_export(q)
+            if path == "/admin/recover-upload":
+                return self._recover_upload_page(q)
             if path == "/api/users":
                 return self._users_api()
             if path == "/admin/cms":
@@ -2976,7 +2980,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             cl = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
             cl = 0
-        if cl > security.MAX_BODY:
+        if cl > security.MAX_BODY and not self.path.split("?")[0].endswith("/recover-upload"):
             return self._send(413, {"error": "payload too large"})
         acquired = security.CONCURRENCY.acquire(timeout=0.05)
         try:
@@ -3112,6 +3116,10 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._suggest_api()
             if parsed.path == "/api/suggest/build":
                 return self._suggest_build_api()
+            if parsed.path == "/admin/recover-upload":
+                return self._recover_upload()
+            if parsed.path == "/admin/recover-commit":
+                return self._recover_commit()
             self._send(404, {"error": "not found"})
         except Exception as e:
             self._send(500, {"error": str(e)})
@@ -8318,6 +8326,108 @@ document.addEventListener("click", async (e)=>{{
             rows = conn.execute("SELECT * FROM subscribers ORDER BY id DESC LIMIT 200").fetchall()
             conn.close()
         return self._send(200, {"stats": stats, "subscribers": [dict(r) for r in rows]})
+
+    # -------- TEMP incident-recovery endpoints (owner-only, removed after use)
+    def _recover_upload_page(self, q):
+        if self._session_uid() is not None:
+            return self._send(403, {"error": "forbidden"})
+        html = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Recover upload</title><style>body{font-family:system-ui;max-width:640px;margin:40px auto;padding:0 16px;line-height:1.5}
+button,.btn{border:0;border-radius:6px;padding:12px 18px;font-size:16px;color:#fff;background:#0a6d5f;cursor:pointer}
+button:disabled{opacity:.5}.box{border:1px solid #ddd;border-radius:8px;padding:16px;margin:12px 0}
+input[type=file]{font-size:16px}.ok{color:#0a6d5f;font-weight:700}.err{color:#c0392b;font-weight:700}</style></head>
+<body><h2>Upload backup for restore</h2>
+<div class="box"><p>Pick the backup file (<code>pstore-20260907-171954</code> or a <code>.sql</code> dump from
+<code>/admin/backup</code> — or a raw <code>pstore.db</code> binary). It replaces the current empty database.</p>
+<input type="file" id="p"><br><br><button id="b" onclick="go()">Upload &amp; restore</button>
+<p id="m"></p></div>
+<script>
+var HEADERS = {'Content-Type':'application/octet-stream'};
+async function go(){
+  var el=document.getElementById('p'),m=document.getElementById('m');
+  if(!el.files||!el.files[0]){m.className='err';m.textContent='Choose a file first.';return;}
+  var f=el.files[0];
+  if(f.size>100*1024*1024){m.className='err';m.textContent='File too large.';return;}
+  var b=document.getElementById('b');b.disabled=true;m.className='';m.textContent='Uploading '+f.size+' bytes...';
+  try{
+    var buf=await f.arrayBuffer();
+    var r=await fetch('/admin/recover-upload',{method:'POST',headers:HEADERS,body:buf});
+    var j=await r.json();
+    if(!j.ok){m.className='err';m.textContent='Upload failed: '+(j.error||JSON.stringify(j));return;}
+    m.textContent='Uploaded ('+j.kind+', '+j.size+' bytes), committing...';
+    var r2=await fetch('/admin/recover-commit',{method:'POST',headers:HEADERS,body:'{}'});
+    var j2=await r2.json();
+    if(!j2.ok){m.className='err';m.textContent='Commit failed: '+(j2.error||JSON.stringify(j2));return;}
+    m.className='ok';m.textContent='Restored. The service is restarting — refresh in ~30s.';
+    window.setTimeout(function(){location.href='/admin';},2000);
+  }catch(e){m.className='err';m.textContent='Error: '+e;}
+  finally{b.disabled=false;}
+}
+</script></body></html>"""
+        return self._send(200, html, "text/html")
+
+    def _recover_export(self, q):
+        if self._session_uid() is not None:
+            return self._send(403, {"error": "forbidden"})
+        base = os.path.basename((q.get("f") or [""])[0] or "")
+        if not re.match(r"^pstore\.db\.corrupt-.*\.bak$", base):
+            return self._send(400, {"error": "bad name"})
+        p = os.path.join("/data", base)
+        try:
+            with open(p, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            return self._send(404, {"error": "backup not found"})
+        return self._send(200, data, "application/octet-stream")
+
+    def _recover_upload(self):
+        if self._session_uid() is not None:
+            return self._send(403, {"error": "forbidden"})
+        try:
+            cl = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            cl = 0
+        if cl < 1 or cl > 256 * 1024 * 1024:
+            return self._send(400, {"error": "bad size"})
+        data = self.rfile.read(cl)
+        if len(data) != cl:
+            return self._send(400, {"error": "short body"})
+        if data[:16] == b"SQLite format 3\x00":
+            out = data
+            kind = "binary"
+        else:
+            tb = "/data/pstore.db.recover-build"
+            if os.path.exists(tb):
+                os.remove(tb)
+            con = sqlite3.connect(tb)
+            try:
+                con.executescript(data.decode("utf-8", "replace"))
+                con.commit()
+            finally:
+                con.close()
+            with open(tb, "rb") as fh:
+                out = fh.read()
+            kind = "sql"
+        tmp = "/data/pstore.db.recover-upload"
+        with open(tmp, "wb") as fh:
+            fh.write(out)
+        return self._send(200, {"ok": True, "kind": kind, "size": len(out)})
+
+    def _recover_commit(self):
+        if self._session_uid() is not None:
+            return self._send(403, {"error": "forbidden"})
+        src = "/data/pstore.db.recover-upload"
+        if not os.path.isfile(src) or os.path.getsize(src) < 1:
+            return self._send(404, {"error": "no upload"})
+        bak = DB + ".pre-restore.bak"
+        try:
+            if os.path.exists(DB):
+                os.replace(DB, bak)
+            os.replace(src, DB)
+        except OSError as e:
+            return self._send(500, {"error": str(e)})
+        return self._send(200, {"ok": True, "swapped": True, "old": os.path.basename(bak)})
 
     # ------------------------------------------------------------------ lead segments
     def _segments_payload(self, keyword=None, limit=500):
