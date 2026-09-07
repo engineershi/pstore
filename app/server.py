@@ -8340,7 +8340,9 @@ input[type=file]{font-size:16px}.ok{color:#0a6d5f;font-weight:700}.err{color:#c0
 <body><h2>Upload backup for restore</h2>
 <div class="box"><p>Pick the backup file (<code>pstore-20260907-171954</code> or a <code>.sql</code> dump from
 <code>/admin/backup</code> — or a raw <code>pstore.db</code> binary). It replaces the current empty database.</p>
-<input type="file" id="p"><br><br><button id="b" onclick="go()">Upload &amp; restore</button>
+<p>Tip: if your file picker looks empty, tap the ☰ (hamburger) menu and choose <b>Downloads</b> or <b>Files</b>.
+If it still fails, open this page in <b>Chrome</b> (not a chat/webview browser).</p>
+<input type="file" id="p" accept=".sql,.db,.bak,.sqlite,.sqlite3,*/*"><br><br><button id="b" onclick="go()">Upload &amp; restore</button>
 <p id="m"></p></div>
 <script>
 var HEADERS = {'Content-Type':'application/octet-stream'};
