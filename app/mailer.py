@@ -18,6 +18,7 @@ import imaplib
 import os
 import re
 import smtplib
+import threading
 import urllib.parse
 from email import message_from_bytes
 from email.header import Header, decode_header as _decode_header
@@ -103,10 +104,27 @@ def configured():
     return bool(SMTP_HOST and SMTP_USER and SMTP_PASSWORD)
 
 
+# Per-request site origin (set by the server from the Host header) so email
+# links stay absolute on deployments that never set PSTORE_URL. Pure env-based
+# (PSTORE_URL always wins) and thread-local, so tests and non-HTTP callers keep
+# today's relative-link behaviour.
+_site_base = threading.local()
+
+
+def set_site_base(base):
+    _site_base.value = (base or "").rstrip("/")
+
+
+def site_base():
+    env = os.environ.get("PSTORE_URL", "").rstrip("/")
+    if env:
+        return env
+    return getattr(_site_base, "value", "") or ""
+
+
 def unsubscribe_url(email):
     token = security.make_token("unsub:" + email.lower(), 30 * 24 * 3600)
-    base = os.environ.get("PSTORE_URL", "").rstrip("/")
-    return "%s/unsubscribe?e=%s&t=%s" % (base, urllib.parse.quote(email),
+    return "%s/unsubscribe?e=%s&t=%s" % (site_base(), urllib.parse.quote(email),
                                          urllib.parse.quote(token))
 
 
@@ -180,15 +198,13 @@ def tracked_url(keyword, asin, sid=None, idx=0):
     """Click-tracked affiliate link for an email. Wraps the niche + ASIN + who +
     which email index so the redirect records a click attributed to the email."""
     token = track_token("%s|%s|%s|%s" % (keyword, asin, sid or "", idx or 0))
-    base = os.environ.get("PSTORE_URL", "").rstrip("/")
-    return "%s/e/%s" % (base, urllib.parse.quote(token, safe=""))
+    return "%s/e/%s" % (site_base(), urllib.parse.quote(token, safe=""))
 
 
 def open_pixel_url(keyword, asin, sid=None, idx=0):
     """1x1 open-tracking pixel URL for an email."""
     token = track_token("%s|%s|%s|%s" % (keyword, asin, sid or "", idx or 0), scope="o")
-    base = os.environ.get("PSTORE_URL", "").rstrip("/")
-    return "%s/e/o/%s" % (base, urllib.parse.quote(token, safe=""))
+    return "%s/e/o/%s" % (site_base(), urllib.parse.quote(token, safe=""))
 
 
 def _wrap_links(body, link_url, pid=""):

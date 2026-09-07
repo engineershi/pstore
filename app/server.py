@@ -1666,7 +1666,7 @@ $("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
     # --------------------------------------------------- accounts & verification
     @staticmethod
     def _verify_url(email):
-        base = os.environ.get("PSTORE_URL", "").rstrip("/") or ""
+        base = mailer.site_base() + ""
         tok = security.make_token("verify:" + email, 72 * 3600)
         return "%s/admin/verify?t=%s&e=%s" % (
             base, urllib.parse.quote(tok, safe=""),
@@ -1689,7 +1689,7 @@ $("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
         """Fresh, single-use password-reset token stored on the user row (professional:
         a reset link works once and expires after REDIS_RESET_TTL, so a leaked link can't
         be replayed)."""
-        base = os.environ.get("PSTORE_URL", "").rstrip("/") or ""
+        base = mailer.site_base() + ""
         tok = secrets.token_urlsafe(32)
         return ("%s/admin/reset-password?t=%s&e=%s"
                 % (base, urllib.parse.quote(tok, safe=""),
@@ -2346,7 +2346,18 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         self.end_headers()
         return None
 
+    def _site_base(self):
+        """Origin used for links inside emails. PSTORE_URL always wins; without
+        it we fall back to this request's scheme+host (only secure schemes)."""
+        scheme = (self.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+        scheme = scheme if scheme in ("https", "http") else "https"
+        host = (self.headers.get("Host") or "").strip()
+        if not host or host.startswith(("\\", "/")):
+            return ""
+        return "%s://%s" % (scheme, host)
+
     def do_GET(self):
+        mailer.set_site_base(self._site_base())
         if self._prelim_guard() is None:
             return
         acquired = security.CONCURRENCY.acquire(timeout=0.05)
@@ -2606,6 +2617,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             self._send(500, {"error": str(e)})
 
     def do_POST(self):
+        mailer.set_site_base(self._site_base())
         if self._prelim_guard() is None:
             return
         if not self._same_origin():
