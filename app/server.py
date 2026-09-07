@@ -6739,7 +6739,8 @@ function render(data){{
       }};
       l.appendChild(cb); l.appendChild(document.createTextNode(FUNCTIONS[slug])); checks.appendChild(l);
     }});
-    title.querySelector("[data-del]").onclick=function(){{
+    var delBtn = title.querySelector("[data-del]");
+    if(delBtn) delBtn.onclick=function(){{
       if(confirm("Delete role "+role.label+"? Users lose its functions.")) api("POST", {{action:"delete_role", slug:role.slug}}, d=>render(d.data));
     }};
     card.appendChild(title); card.appendChild(checks); r.appendChild(card);
