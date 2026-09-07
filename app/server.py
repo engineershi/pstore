@@ -8329,7 +8329,7 @@ document.addEventListener("click", async (e)=>{{
 
     # -------- TEMP incident-recovery endpoints (owner-only, removed after use)
     def _recover_upload_page(self, q):
-        if self._session_uid() is not None:
+        if not self._authed() or self._session_uid() is not None:
             return self._send(403, {"error": "forbidden"})
         html = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -8368,7 +8368,7 @@ async function go(){
         return self._send(200, html, "text/html")
 
     def _recover_export(self, q):
-        if self._session_uid() is not None:
+        if not self._authed() or self._session_uid() is not None:
             return self._send(403, {"error": "forbidden"})
         base = os.path.basename((q.get("f") or [""])[0] or "")
         if not re.match(r"^pstore\.db\.corrupt-.*\.bak$", base):
@@ -8382,7 +8382,7 @@ async function go(){
         return self._send(200, data, "application/octet-stream")
 
     def _recover_upload(self):
-        if self._session_uid() is not None:
+        if not self._authed() or self._session_uid() is not None:
             return self._send(403, {"error": "forbidden"})
         try:
             cl = int(self.headers.get("Content-Length") or 0)
@@ -8415,7 +8415,7 @@ async function go(){
         return self._send(200, {"ok": True, "kind": kind, "size": len(out)})
 
     def _recover_commit(self):
-        if self._session_uid() is not None:
+        if not self._authed() or self._session_uid() is not None:
             return self._send(403, {"error": "forbidden"})
         src = "/data/pstore.db.recover-upload"
         if not os.path.isfile(src) or os.path.getsize(src) < 1:
