@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import ipaddress
 import os
+import re
 import secrets
 import threading
 import time
@@ -146,3 +147,86 @@ def verify_password(password, stored):
     h = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),
                             bytes.fromhex(salt), iters).hex()
     return hmac.compare_digest(h, expect)
+
+
+# ------------------------------------------------------------ input validation
+# Same rules the client mirrors in server._AUTH_VALIDATE_JS; keep in sync.
+_NAME_RE = re.compile(r"^[^<>]{2,120}$")
+_EMAIL_RE = re.compile(r"^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$", re.I)
+
+# Small denylist of the most common weak passwords (lowercase comparison).
+_COMMON_PASSWORDS = frozenset({
+    "password", "password1", "password123", "123456", "12345678", "123456789",
+    "1234567890", "qwerty", "qwerty123", "abc123", "123abc", "111111",
+    "666666", "letmein", "iloveyou", "admin", "admin123", "welcome",
+    "monkey", "dragon", "sunshine", "princess", "football", "baseball",
+    "trustno1", "master", "shadow", "passw0rd", "1qaz2wsx", "zaq12wsx",
+    "qazwsx", "superman", "login", "prime", "default",
+})
+
+
+def validate_name(name):
+    """Return an error string for an unacceptable display name, else None."""
+    if not name:
+        return "Enter your name."
+    if len(name) < 2:
+        return "Name must be at least 2 characters."
+    if len(name) > 120:
+        return "Name must be 120 characters or fewer."
+    if not any(c.isalpha() for c in name):
+        return "Name must contain at least one letter."
+    if any(ord(c) < 32 or c in "<>&" for c in name):
+        return "Name contains unsupported characters."
+    return None
+
+
+def validate_email(email):
+    """Return an error string for an unacceptable address, else None. Accepts
+    subdomains and the `+tag` / hyphen / underscore forms without accepting
+    mangled or obviously spammed input."""
+    if not email:
+        return "Enter your email address."
+    e = email.strip()
+    if e != email or len(e) > 160:
+        return "Enter a valid email address."
+    if not _EMAIL_RE.match(e):
+        return "Enter a valid email address."
+    local, _, domain = e.rpartition("@")
+    if len(local) > 64 or ".." in local or ".." in domain or "@" in local:
+        return "Enter a valid email address."
+    if not local or local[0] in "._-" or local[-1] in "._-":
+        return "Enter a valid email address."
+    return None
+
+
+def password_policy_errors(pw, email="", name=""):
+    """Return a list of unmet password rules ([] = passes). Checks length,
+    character classes, variety, common-password denylist, and that the
+    password doesn't echo the name or email."""
+    if not pw:
+        return ["a password is required"]
+    if len(pw) > 128:
+        return ["at most 128 characters"]
+    low = pw.lower()
+    unmet = []
+    if len(pw) < 8:
+        unmet.append("at least 8 characters")
+    if not any(c.islower() for c in pw):
+        unmet.append("a lowercase letter")
+    if not any(c.isupper() for c in pw):
+        unmet.append("an uppercase letter")
+    if not any(c.isdigit() for c in pw):
+        unmet.append("a number")
+    if not any(not c.isalnum() for c in pw):
+        unmet.append("a symbol (e.g. !, @, #, -)")
+    if low in _COMMON_PASSWORDS:
+        unmet.append("a less common password")
+    if len(set(pw)) < 4:
+        unmet.append("at least 4 different characters")
+    base = (email or "").strip().lower().rpartition("@")[0]
+    for bad in (base, name):
+        b = (bad or "").strip().lower()
+        if len(b) >= 4 and b in low:
+            unmet.append("not containing your name or email")
+            break
+    return unmet
