@@ -96,9 +96,10 @@ class TestSocialSuite(unittest.TestCase):
         return sc.split(";")[0]
 
     @classmethod
-    def _raw(cls, path, method="GET", body=None, cookie=None, headers=None):
+    def _raw(cls, path, method="GET", body=None, cookie=None, headers=None,
+             timeout=8):
         import http.client
-        conn = http.client.HTTPConnection("127.0.0.1", cls.PORT, timeout=8)
+        conn = http.client.HTTPConnection("127.0.0.1", cls.PORT, timeout=timeout)
         hdrs = dict(headers or {})
         if cookie:
             hdrs["Cookie"] = cookie
@@ -221,6 +222,20 @@ class TestSocialSuite(unittest.TestCase):
             n = conn.execute("SELECT COUNT(*) c FROM social_posts").fetchone()["c"]
             conn.close()
         self.assertEqual(n, len(social.PLATFORMS))
+
+    def test_publish_all_niches_covers_every_saved_niche(self):
+        st, _, _, data = self._raw(
+            "/api/social/publish-all", "POST", cookie=self.cookie, timeout=180)
+        self.assertEqual(st, 200)
+        res = json.loads(data)
+        self.assertTrue(res["ok"])
+        self.assertGreaterEqual(res["niches"], 1)
+        self.assertGreaterEqual(res["published"], len(social.PLATFORMS))
+        with server._lock:
+            conn = server._db()
+            n = conn.execute("SELECT COUNT(*) c FROM social_posts").fetchone()["c"]
+            conn.close()
+        self.assertGreaterEqual(n, len(social.PLATFORMS))
 
     def test_publish_unknown_platform_rejected(self):
         st, _, _, data = self._raw(

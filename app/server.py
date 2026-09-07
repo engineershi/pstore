@@ -2687,6 +2687,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                     {k: v[-1] for k, v in urllib.parse.parse_qs(parsed.query).items()})
             if parsed.path == "/api/social/publish":
                 return self._social_publish()
+            if parsed.path == "/api/social/publish-all":
+                return self._social_publish_all()
             if parsed.path == "/api/social/schedule":
                 return self._social_schedule()
             if parsed.path == "/api/social/flush":
@@ -5637,11 +5639,18 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
         platform = str(body.get("platform") or "all").strip()
         if not keyword:
             return self._send(400, {"error": "keyword required"})
+        if platform != "all" and platform not in social.PLATFORMS:
+            return self._send(400, {"error": "unknown platform"})
+        data = self._social_publish_keyword(keyword, platform)
+        return None if data is None else self._send(200, data)
+
+    def _social_publish_keyword(self, keyword, platform="all"):
+        """Upsert published kits for one niche (all platforms or one) and fire
+        the webhook. Returns the JSON payload for the caller, or None when the
+        niche has no top pick."""
         kits = self._social_kits(keyword)
         if not kits:
-            return self._send(404, {"error": "no saved niche or top pick for that keyword"})
-        if platform and platform != "all" and platform not in social.PLATFORMS:
-            return self._send(400, {"error": "unknown platform"})
+            return None
         pick_list = kits if platform == "all" else \
             [k for k in kits if k["platform"] == platform]
         slug = seo._slugify(keyword)
@@ -5671,10 +5680,31 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
             conn.close()
         results = self._publish_kits_best_effort(pick_list)
         _, stats = self._social_db(keyword, slug, kits)
-        return self._send(200, {"ok": True, "published": len(ids), "posts": pick_list,
-                                "stats": stats, "webhook": bool(self._webhook_url()),
-                                "native": _native_posted_count(results),
-                                "keyword": keyword})
+        return {"ok": True, "published": len(ids), "posts": pick_list,
+                "stats": stats, "webhook": bool(self._webhook_url()),
+                "native": _native_posted_count(results),
+                "keyword": keyword}
+
+    def _social_publish_all(self):
+        """One click to cover every saved niche: build + upsert the published kit
+        for every platform (best effort; a niche without a top pick is skipped)."""
+        niches = [n["keyword"] for n in self._all_niches()]
+        total = native = skipped = 0
+        per = []
+        for kw in niches:
+            try:
+                data = self._social_publish_keyword(kw, "all")
+            except Exception:
+                data = None
+            if data is None:
+                per.append({"keyword": kw, "published": 0})
+                skipped += 1
+                continue
+            total += data["published"]
+            native += data["native"]
+            per.append({"keyword": kw, "published": data["published"]})
+        return self._send(200, {"ok": True, "niches": len(niches), "published": total,
+                                "native": native, "skipped": skipped, "per": per})
 
     def _schedule_times(self, count, hours=24, now=None):
         """Spread `count` posts across the next `hours`, but snap each slot to a
@@ -5950,6 +5980,7 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
 <tbody>{pub_rows}</tbody></table></div>
 {perf_note}
 <button class="warm" id="flush">Flush due scheduled posts</button>
+<button class="warm" id="puball">📣 Publish every niche</button>
 <button class="warm" id="topics">Recycle long-tail topics → posts</button>
 <p id="flushout" class="msg"></p></section>
 <section class="card" id="amplify"><h2>🔁 Auto-amplify winners</h2>
@@ -5991,6 +6022,15 @@ async function flush(){{
     : "Flush failed.";
   setTimeout(()=>location.reload(), 900);
 }}
+async function puball(){{
+  $("flushout").textContent = "Publishing every niche…";
+  const r = await fetch("/api/social/publish-all", {{method:"POST", headers:{{"Content-Type":"application/json"}}}});
+  const d = await r.json().catch(()=>({{ok:false}}));
+  $("flushout").textContent = d && d.ok
+    ? "Published " + d.published + " post(s) across " + d.niches + " niche(s)" + (d.native ? " (" + d.native + " native)" : "") + "." + (d.skipped ? " " + d.skipped + " had no top pick." : "")
+    : "Publish-all failed.";
+  setTimeout(()=>location.reload(), 1500);
+}}
 async function recycle(){{
   $("flushout").textContent = "Building topic kits…";
   const r = await fetch("/api/social/topics", {{method:"POST", headers:{{"Content-Type":"application/json"}},
@@ -6024,6 +6064,7 @@ document.addEventListener("click", (e)=>{{
   const s = e.target.closest(".soc-sched");
   if (s){{ sched(s); return; }}
   if (e.target.closest("#flush")){{ flush(); return; }}
+  if (e.target.closest("#puball")){{ puball(); return; }}
   if (e.target.closest("#topics")){{ recycle(); return; }}
   if (e.target.closest("#ampbtn")){{ ampl(); return; }}
   if (e.target.closest("#amptog")){{ amptog(); return; }}
