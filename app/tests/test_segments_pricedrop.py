@@ -89,6 +89,22 @@ class PriceStoreTest(unittest.TestCase):
         b = pricedrop.PriceStore(path)
         self.assertEqual(b.baseline("ABC1"), 99.99)
 
+    def test_prod_price_store_never_points_at_the_db_file(self):
+        # Regression: in production _price_store() used to return DB itself, so
+        # PriceStore.save() (os.replace over the db path) destroyed the sqlite
+        # file with a pricedrops JSON. It must always use a sibling _pricedrops.json.
+        import server
+        h = server.Handler.__new__(server.Handler)
+        for db in ("/data/pstore.db", "/srv/app/pstore.sqlite", "/tmp/ctx/pstore.db"):
+            old = server.DB
+            try:
+                server.DB = db
+                path = h._price_store().path
+                self.assertNotEqual(path, db)
+                self.assertTrue(path.endswith("_pricedrops.json"), path)
+            finally:
+                server.DB = old
+
 
 class DropEmailTest(unittest.TestCase):
     def test_empty(self):
