@@ -1574,29 +1574,48 @@ class Handler(BaseHTTPRequestHandler):
 <label style="display:block;text-align:left;font-size:12.5px;color:var(--muted);font-weight:700">Password
 <input id="pw" type="password" placeholder="password" autocomplete="current-password"></label>
 <div style="text-align:right;margin:-2px 0 2px"><a href="/admin/forgot-password" style="font-size:12px;color:var(--accent)">Forgot your password?</a></div>
+<p id="msg" class="msg" style="min-height:1.2em"></p>
 <button id="go" class="warm">Unlock admin</button>
-<p id="msg" class="msg"></p>
 <p class="login-hint">Public site: <a href="/">pstore home</a> · no login needed.</p>
 <p class="resend">Team member? <a href="/admin/register">Request an account</a> ·
 <button id="resend">resend my confirmation link</button></p>
 </section></div></main>
 <script>
 function $(id){{return document.getElementById(id);}}
-$("go").onclick = async () => {{
+async function doLogin(){{
+  const msg = $("msg");
+  if (!$("em").value.trim()) {{ msg.textContent = "⚠ Enter your email address."; return; }}
+  const go = $("go");
+  go.disabled = true; go.textContent = "Signing in…";
+  msg.textContent = "";
   const next = new URLSearchParams(location.search).get("next") || "/dashboard";
-  const r = await fetch("/admin/login", {{method:"POST", headers:{{"Content-Type":"application/json"}},
-    body: JSON.stringify({{email: $("em").value.trim(), password: $("pw").value, next: next}})}});
-  const d = await r.json().catch(()=>({{ok:false, error:"bad response"}}));
-  if (d.ok) location.href = d.next;
-  else $("msg").textContent = d.error || "Login failed.";
-}};
+  try {{
+    const r = await fetch("/admin/login", {{method:"POST", headers:{{"Content-Type":"application/json"}},
+      body: JSON.stringify({{email: $("em").value.trim(), password: $("pw").value, next: next}})}});
+    let d; try {{ d = await r.json(); }} catch {{ d = {{ok:false, error:"Unexpected server response (" + r.status + ")."}}; }}
+    if (d.ok) {{ location.href = d.next; return; }}
+    msg.textContent = d.error || "Login failed.";
+  }} catch (err) {{
+    msg.textContent = "⚠ Network error — please check your connection and try again.";
+  }}
+  go.disabled = false; go.textContent = "Unlock admin";
+}}
+$("go").onclick = doLogin;
 $("resend").onclick = async () => {{
-  const r = await fetch("/admin/resend", {{method:"POST", headers:{{"Content-Type":"application/json"}},
-    body: JSON.stringify({{email: $("em").value.trim()}})}});
-  const d = await r.json().catch(()=>({{ok:false, error:"bad response"}}));
-  $("msg").textContent = d.alert || d.error || "Resent.";
+  const msg = $("msg");
+  if (!$("em").value.trim()) {{ msg.textContent = "⚠ Enter your email above, then press resend."; return; }}
+  msg.textContent = "Sending…";
+  try {{
+    const r = await fetch("/admin/resend", {{method:"POST", headers:{{"Content-Type":"application/json"}},
+      body: JSON.stringify({{email: $("em").value.trim()}})}});
+    let d; try {{ d = await r.json(); }} catch {{ d = {{}}; }}
+    msg.textContent = d.alert || d.error || "Resent — check your inbox.";
+  }} catch (err) {{
+    msg.textContent = "⚠ Network error — please check your connection and try again.";
+  }}
 }};
-$("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").onclick(); }});
+$("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") doLogin(); }});
+$("em").addEventListener("keydown", e => {{ if (e.key === "Enter") doLogin(); }});
 </script>
 </body></html>"""
         return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
@@ -1744,20 +1763,31 @@ $("pw").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
 <input id="pw" type="password" placeholder="password" autocomplete="new-password"></label>
 <label style="display:block;text-align:left;font-size:12.5px;color:var(--muted);font-weight:700">Confirm password
 <input id="pw2" type="password" placeholder="repeat password" autocomplete="new-password"></label>
+<p id="msg" class="msg" style="min-height:1.2em"></p>
 <button id="go" class="warm">Request access</button>
-<p id="msg" class="msg"></p>
 <p class="login-hint">Already have an account? <a href="/admin/login">Sign in</a>.</p>
 </section></div></main>
 <script>
 function $(id){{return document.getElementById(id);}}
 $("go").onclick = async () => {{
-  if ($("pw").value !== $("pw2").value) {{ $("msg").textContent = "Passwords don't match."; return; }}
-  const r = await fetch("/admin/register", {{method:"POST", headers:{{"Content-Type":"application/json"}},
-    body: JSON.stringify({{name: $("nm").value.trim(), email: $("em").value.trim(), password: $("pw").value}})}});
-  const d = await r.json().catch(()=>({{ok:false, error:"bad response"}}));
-  if (d.ok) {{ if (d.mail) location.href = "/admin/login?sent=1";
-    else $("msg").textContent = d.alert || "Account created, but the confirmation email couldn't be sent (no SMTP). Ask the owner to enable it."; }}
-  else $("msg").textContent = d.error || "Couldn't create the account.";
+  const msg = $("msg");
+  if ($("pw").value !== $("pw2").value) {{ msg.textContent = "⚠ Passwords don't match."; return; }}
+  if (!$("em").value.trim()) {{ msg.textContent = "⚠ Enter your email address."; return; }}
+  if ($("pw").value.length < 8) {{ msg.textContent = "⚠ Password must be at least 8 characters."; return; }}
+  const go = $("go");
+  go.disabled = true; go.textContent = "Sending…";
+  msg.textContent = "";
+  try {{
+    const r = await fetch("/admin/register", {{method:"POST", headers:{{"Content-Type":"application/json"}},
+      body: JSON.stringify({{name: $("nm").value.trim(), email: $("em").value.trim(), password: $("pw").value}})}});
+    let d; try {{ d = await r.json(); }} catch {{ d = {{ok:false, error:"Unexpected server response (" + r.status + ")."}}; }}
+    if (d.ok) {{ if (d.mail) location.href = "/admin/login?sent=1";
+      else msg.textContent = d.alert || "Account created, but the confirmation email couldn't be sent (no SMTP). Ask the owner to enable it."; }}
+    else msg.textContent = d.error || "Couldn't create the account.";
+  }} catch (err) {{
+    msg.textContent = "⚠ Network error — please check your connection and try again.";
+  }}
+  go.disabled = false; go.textContent = "Request access";
 }};
 $("pw2").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").onclick(); }});
 </script>
@@ -1899,18 +1929,28 @@ $("pw2").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncl
 {err}
 <label style="display:block;text-align:left;font-size:12.5px;color:var(--muted);font-weight:700">Account email
 <input id="em" type="email" placeholder="you@example.com" autocomplete="username"></label>
+<p id="msg" class="msg" style="min-height:1.2em"></p>
 <button id="go" class="warm">Email me a reset link</button>
-<p id="msg" class="msg"></p>
 <p class="login-hint">Remembered it after all? <a href="/admin/login">Back to sign in</a>.</p>
 </section></div></main>
 <script>
 function $(id){{return document.getElementById(id);}}
 $("go").onclick = async () => {{
-  const r = await fetch("/admin/forgot-password", {{method:"POST", headers:{{"Content-Type":"application/json"}},
-    body: JSON.stringify({{email: $("em").value.trim()}})}});
-  const d = await r.json().catch(()=>({{ok:false, error:"bad response"}}));
-  if (d.ok) location.href = "/admin/login?forgot=1";
-  else $("msg").textContent = d.error || "Couldn't send the link.";
+  const msg = $("msg");
+  if (!$("em").value.trim()) {{ msg.textContent = "⚠ Enter your account email."; return; }}
+  const go = $("go");
+  go.disabled = true; go.textContent = "Sending…";
+  msg.textContent = "";
+  try {{
+    const r = await fetch("/admin/forgot-password", {{method:"POST", headers:{{"Content-Type":"application/json"}},
+      body: JSON.stringify({{email: $("em").value.trim()}})}});
+    let d; try {{ d = await r.json(); }} catch {{ d = {{ok:false, error:"Unexpected server response (" + r.status + ")."}}; }}
+    if (d.ok) {{ location.href = "/admin/login?forgot=1"; return; }}
+    msg.textContent = d.error || "Couldn't send the link.";
+  }} catch (err) {{
+    msg.textContent = "⚠ Network error — please check your connection and try again.";
+  }}
+  go.disabled = false; go.textContent = "Email me a reset link";
 }};
 $("em").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").onclick(); }});
 </script>
