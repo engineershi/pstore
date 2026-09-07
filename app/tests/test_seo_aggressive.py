@@ -206,7 +206,7 @@ class TestSeoAggressive(unittest.TestCase):
         st, _, _, data = self._raw("/admin/marketing", cookie=self.cookie)
         html = data.decode("utf-8", "replace")
         for label in ("Find", "Build", "Market", "Analyze", "Operate"):
-            self.assertIn('class="navgroup titles">%s</div>' % label, html)
+            self.assertIn('<div class="navgroup"><span class="titles">%s</span>' % label, html)
         self.assertIn("/admin/funnel", html)
 
     # ---------------------------------------------------- demography settings

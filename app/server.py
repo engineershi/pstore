@@ -2497,7 +2497,12 @@ font-weight:800;display:grid;place-items:center;flex:none;text-transform:upperca
         is_owner = self._session_uid() is None
 
         def chip(href, label, key, accent=False):
-            cls = ' class="primary"' if accent else (" class=\"%s\"" % key if key == active else "")
+            if accent:
+                cls = ' class="primary"'
+            elif key == active:
+                cls = ' class="on"'
+            else:
+                cls = ""
             return '<a href="%s"%s>%s</a>' % (href, cls, label)
         def group(title, items):
             parts = []
@@ -2513,7 +2518,7 @@ font-weight:800;display:grid;place-items:center;flex:none;text-transform:upperca
                 parts.append(chip(href, label, key, accent))
             if not parts:
                 return ""
-            return '<div class="navgroup titles">%s</div>%s' % (title, "".join(parts))
+            return '<div class="navgroup"><span class="titles">%s</span>%s</div>' % (title, "".join(parts))
         groups = [
             ("Find",
              [("/dashboard", "🧭 Dashboard", "dashboard"),
@@ -8446,9 +8451,10 @@ document.addEventListener("click", async (e)=>{{
                 for m in members[:30]) or (
                 '<tr><td colspan="4" class="hint">No subscribers here yet.</td></tr>')
             s = stats.get(name, {})
-            rates = ('<div class="row"><div class="feature"><h3>%s</h3><p class="hint">open rate</p></div>'
-                     '<div class="feature"><h3>%s</h3><p class="hint">click rate (CTR)</p></div>'
-                     '<div class="feature"><h3>%s</h3><p class="hint">clicks / lead</p></div></div>'
+            rates = ('<div class="stat-tiles">'
+                     '<div class="stat-tile"><b>%s</b><span>Open rate</span></div>'
+                     '<div class="stat-tile"><b>%s</b><span>Click rate (CTR)</span></div>'
+                     '<div class="stat-tile"><b>%s</b><span>Clicks / lead</span></div></div>'
                      % (str(s.get("open_rate", 0)) + "%",
                         str(s.get("click_rate", 0)) + "%",
                         str(s.get("click_per_lead", 0))))
@@ -8480,12 +8486,13 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
 <p class="tagline">Split subscribers by engagement so the sequence can act per-lead instead of sending everyone the same creep.</p></div>
 {self._admin_nav('segments')}</header>
 <main>
-<section class="card"><h2>📊 Segment mix</h2><div class="row">
-<div class="feature"><h3>{counts.get('hot',0)}</h3><p class="hint">hot</p></div>
-<div class="feature"><h3>{counts.get('warm',0)}</h3><p class="hint">warm</p></div>
-<div class="feature"><h3>{counts.get('cold',0)}</h3><p class="hint">cold</p></div>
-<div class="feature"><h3>{counts.get('converted',0)}</h3><p class="hint">converted</p></div>
-<div class="feature"><h3>{rep.get('hot_share',0)}%</h3><p class="hint">hot share</p></div>
+<section class="card"><h2>📊 Segment mix</h2>
+<div class="stat-tiles">
+<div class="stat-tile"><b>{counts.get('hot',0)}</b><span>Hot</span></div>
+<div class="stat-tile"><b>{counts.get('warm',0)}</b><span>Warm</span></div>
+<div class="stat-tile"><b>{counts.get('cold',0)}</b><span>Cold</span></div>
+<div class="stat-tile"><b>{counts.get('converted',0)}</b><span>Converted</span></div>
+<div class="stat-tile"><b>{rep.get('hot_share',0)}%</b><span>Hot share</span></div>
 </div>
 <p class="hint">Attribution: opens via email open-pixel; clicks via tracked /e/ outbound links (referrer=&lt;subscriber&gt;|&lt;index&gt;). Next-best email angle per segment is shown under each bucket.</p></section>
 {hot}{warm}{cold}{converted}{inactive}
@@ -9614,15 +9621,29 @@ __NAV__
 </main>
 <main class="studiox" id="main-subs" style="display:none">
  <section class="card"><h2>👥 Subscribers</h2>
-  <div class="ibox-head">
-   <input type="search" id="sub-q" placeholder="Search by email…" style="min-width:180px;padding:7px 12px;border:1.5px solid var(--line,#eee);border-radius:12px;font-size:13px">
-   <select id="sub-status" style="padding:7px 10px;border:1.5px solid var(--line,#eee);border-radius:12px;font-size:13px">
-    <option value="">All statuses</option><option value="confirmed">Confirmed</option>
+  <p class="hint">Manage the email list directly: filter by status, tick rows and use the bulk bar, or act on one subscriber at a time. Changes apply instantly.</p>
+  <div class="stat-tiles" id="sub-tiles"></div>
+  <div class="subs-toolbar">
+   <input type="search" id="sub-q" placeholder="Search by email…">
+   <select id="sub-status">
+    <option value="">All statuses</option><option value="confirmed">Active</option>
     <option value="unconfirmed">Unconfirmed</option><option value="unsubscribed">Unsubscribed</option>
    </select>
    <span class="hint" id="sub-count"></span>
+   <span class="hint" style="margin-left:auto" id="sub-bulkmsg"></span>
   </div>
-  <div id="subs-manage" class="chipsrow"></div>
+  <div class="bulkbar" id="sub-bulkbar" style="display:none">
+   <span class="hint">With <b id="sub-nsel">0</b> selected:</span>
+   <button class="ghost mini" onclick="subBulk('resub')">Resubscribe</button>
+   <button class="ghost mini" onclick="subBulk('unsub')">Unsubscribe</button>
+   <button class="ghost mini danger" onclick="subBulk('delete')">Delete</button>
+   <button class="ghost mini" onclick="subSelAll(false)">Clear selection</button>
+  </div>
+  <div class="table-wrap"><table class="plain subs-table">
+   <thead><tr><th style="width:34px"><input type="checkbox" id="sub-selall" aria-label="Select all"></th>
+   <th>Email</th><th>Niche</th><th>Status</th><th class="ct">Step</th><th class="ct">Joined</th><th class="ct">Actions</th></tr></thead>
+   <tbody id="subs-manage"><tr><td colspan="7" class="hint">Loading…</td></tr></tbody>
+  </table></div>
  </section>
 </main>
 <main class="studiox" id="main-drafts" style="display:none">
@@ -9676,9 +9697,31 @@ function pollInbox(){const btn=document.querySelector("#main-inbox .btn.warm");c
 async function sendReply(){const id=window._curMsg;const body=$("mv-reply").value;if(!body.trim()){alert("Write something first.");return;}const btn=$("mv-send");btn.disabled=true;const r=await fetch("/api/mail",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"inbox_reply",id,body})});const d=await r.json();$("mv-msg").textContent=d.error?"✗ "+d.error:(d.sent?"↩ Reply sent to "+d.to+". It'll thread back here.":"");if(d.sent){$("mv-reply").value="";load();}btn.disabled=false;}
 function tab(name){$("main-send").style.display=name==="send"?"":"none";$("main-inbox").style.display=name==="inbox"?"":"none";$("main-subs").style.display=name==="subs"?"":"none";$("main-drafts").style.display=name==="drafts"?"":"none";$("main-sent").style.display=name==="sent"?"":"none";document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on",t.dataset.tab===name));if(name==="subs")renderSubsManage();if(name==="drafts")renderDrafts();if(name==="sent")renderSentTab();if(name==="inbox")renderInbox();}
 function renderAll(){renderNow();renderSubs();renderOutbox();renderLog();renderBlocked();renderInbox();fillNiches();fillSegs();count();}
+function subTiles(all){
+  const active=all.filter(s=>s.confirmed&&!s.unsubscribed).length;
+  const pending=all.filter(s=>!s.confirmed&&!s.unsubscribed).length;
+  const unsub=all.filter(s=>s.unsubscribed).length;
+  $("sub-tiles").innerHTML=
+   `<div class="stat-tile"><b>${all.length}</b><span>Total</span></div>
+    <div class="stat-tile"><b>${active}</b><span>Active</span></div>
+    <div class="stat-tile"><b>${pending}</b><span>Unconfirmed</span></div>
+    <div class="stat-tile"><b>${unsub}</b><span>Unsubscribed</span></div>`;
+}
+function subBadge(s){
+  if(s.unsubscribed)return '<span class="status-badge unsub">Unsubscribed</span>';
+  if(!s.confirmed)return '<span class="status-badge pending">Unconfirmed</span>';
+  return '<span class="status-badge active">Active</span>';
+}
+function subJoined(s){return (s.created_at||"").replace("T"," ").slice(0,10)||"—";}
+function updateSubBulkbar(){
+  const n=document.querySelectorAll("#subs-manage input.subsel:checked").length;
+  $("sub-nsel").textContent=n;
+  $("sub-bulkbar").style.display=n?"":"none";
+}
 function renderSubsManage(){
   if(!DATA)return;
-  const q=( $("sub-q").value||"" ).toLowerCase();
+  subTiles(DATA.subscribers||[]);
+  const q=($("sub-q").value||"").toLowerCase();
   const stF=$("sub-status").value;
   const all=DATA.subscribers||[];
   const list=all.filter(s=>{
@@ -9688,19 +9731,39 @@ function renderSubsManage(){
     if(q&&!(s.email||"").toLowerCase().includes(q))return false;
     return true;
   });
-  $("sub-count").textContent=list.length+" subscriber"+(list.length===1?"":"s");
+  $("sub-count").textContent=list.length+" of "+all.length+" subscriber"+(all.length===1?"":"s");
   const badge=$("subbadge"); badge.style.display=list.length?"":"none";
   $("subs-manage").innerHTML=list.length?list.map(s=>{
-    const st=s.unsubscribed?"unsubscribed":(!s.confirmed?"unconfirmed":"step "+(s.sent_index||0)+"/"+(DATA.sequence_length||5));
-    const act=s.unsubscribed?`<button class="btn ghost" onclick="subAct(${s.id},'resub')">Resubscribe</button>`
-      :`<button class="btn ghost" onclick="subAct(${s.id},'unsub')">Unsubscribe</button>`;
-    return `<div class="subchip"><span><span class="mail">${esc(s.email)}</span><br><span class="kw">${esc(s.keyword||"—")}</span></span>
-    <span class="st">${esc(st)}</span><span class="mact">${act}<button class="btn ghost" style="color:#c62828" onclick="subAct(${s.id},'delete')">Delete</button></span></div>`;
-  }).join(""):'<p class="hint">No subscribers match.</p>';
+    const step=(s.unsubscribed||!s.confirmed)?"—":("step "+(s.sent_index||0)+"/"+(DATA.sequence_length||5));
+    const act=s.unsubscribed?`<button class="ghost mini" onclick="subAct(${s.id},'resub')">Resubscribe</button>`
+      :`<button class="ghost mini" onclick="subAct(${s.id},'unsub')">Unsubscribe</button>`;
+    return `<tr><td class="vt"><input type="checkbox" class="subsel" data-id="${s.id}" onchange="updateSubBulkbar()"></td>
+     <td class="vt"><span class="mail">${esc(s.email)}</span><div class="sub">${esc(s.first_name||"")}</div></td>
+     <td class="vt">${esc(s.keyword||"—")}</td>
+     <td class="vt">${subBadge(s)}</td>
+     <td class="ct vt">${step}</td>
+     <td class="ct vt">${subJoined(s)}</td>
+     <td class="ct vt"><div class="act">${act}<button class="ghost mini danger" onclick="subAct(${s.id},'delete')">Delete</button></div></td></tr>`;
+  }).join(""):'<tr><td colspan="7" class="hint">No subscribers match.</td></tr>';
+  updateSubBulkbar();
 }
 function subAct(id,action){
   fetch("/api/subscribers",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,id})})
     .then(r=>r.json()).then(d=>{if(d.error)alert(d.error);if(d.subscribers)DATA.subscribers=d.subscribers;renderSubsManage();});
+}
+function subSelAll(on){document.querySelectorAll("#subs-manage input.subsel").forEach(c=>{c.checked=on;});updateSubBulkbar();}
+function subBulk(action){
+  const ids=[...document.querySelectorAll("#subs-manage input.subsel:checked")].map(c=>+c.dataset.id).slice(0,100);
+  if(!ids.length)return;
+  const msg=$("sub-bulkmsg");msg.textContent="Working…";
+  Promise.all(ids.map(id=>fetch("/api/subscribers",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,id})}).then(r=>r.json())))
+    .then(res=>{
+      const fresh=res.filter(d=>d.subscribers);
+      const bad=res.filter(d=>d.error);
+      if(fresh.length)DATA.subscribers=fresh[fresh.length-1].subscribers;
+      msg.textContent=(bad.length?("✗ "+bad[0].error+". "):"✓ ")+fresh.length+" updated, "+(ids.length-fresh.length)+" failed.";
+      renderSubsManage();setTimeout(()=>msg.textContent="",3500);
+    }).catch(()=>{msg.textContent="✗ Could not reach the server.";});
 }
 function renderDrafts(){
   if(!DATA)return;
@@ -9749,6 +9812,9 @@ $("c-subj").addEventListener("input",onSpec);
 $("c-body").addEventListener("input",onSpec);
 for(const l of document.querySelectorAll(".tmpls label"))l.addEventListener("click",()=>{document.querySelectorAll(".tmpls label").forEach(x=>x.classList.remove("on"));l.classList.add("on");onCust();});
 $("as-save").addEventListener("click",saveCfg);
+$("sub-q").addEventListener("input",renderSubsManage);
+$("sub-status").addEventListener("change",renderSubsManage);
+$("sub-selall").addEventListener("change",e=>subSelAll(e.target.checked));
 $("bigbtn").addEventListener("click",sendIt);});
 </script>
 </body></html>"""
