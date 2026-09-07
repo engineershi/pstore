@@ -149,7 +149,6 @@ def build_pdf():
         "A live preview shows exactly what lands in the inbox.")
     doc.bullets([
         "Pick recipients with the checkboxes, or type any address(es) — one per line; the recipient count updates live.",
-        "The Studio's tabs organize the whole mail lifecycle: Compose, Inbox (replies), Subscribers (search, filter, unsubscribe/resubscribe/delete), Drafts (save, reopen and edit any composition) and Sent/scheduled (review or cancel scheduled mail).",
         "Switches control the tracked affiliate link, open-tracking pixel, PDF attachment, dedup and sequence progress.",
         "Dry-run first to preview the send counts without emailing anyone.",
         "Auto-send runs the 5-step sequence to every ready subscriber on your chosen UTC hours; the Email Studio page shows the last run and lets you toggle it.",
@@ -431,7 +430,6 @@ def render_admin_manual(nav_html, totop_html):
 <li>Pages <b>and</b> their <code>/api/…</code> endpoints are both gated by function — no role for a tool means the <b>403</b> screen and its API answers <i>forbidden</i>.</li>
 <li>The owner is always allowed everywhere; only the owner sees <b>Users &amp; roles</b> and can create/disable users, change roles and reset passwords.</li>
 <li>Signing in only works after the <b>email is verified</b>; disabling an account kills its sessions instantly.</li>
-<li>Every team member has a <b>🧭 personal dashboard</b> (their landing page after the confirmation link) showing their profile, status, every <b>assigned role</b>, and one-click cards for each granted tool — plus a sign-out link.</li>
 <li><b>Forgotten password?</b> The login page has a <i>Forgot your password?</i> link → a secure, <b>single-use reset link</b> is emailed (valid 1 hour). It never leaks whether an email has an account; the owner login is environment-based and never reset this way.</li>
 <li><b>No SMTP configured?</b> Registration and <i>resend</i> will then say so honestly on the page instead of promising an inbox message that can't arrive (the confirmation link needs real e-mail out). The owner either sets up <code>SMTP_HOST/USER/PASSWORD</code>, or skips e-mail entirely by creating the account as <b>verified</b> directly on the Users page.</li>
 <li>Confirmation links are HMAC-signed and expire after <b>72 hours</b>; anyone who loses one can re-request it from the login page (<i>resend my confirmation link</i>).</li>
@@ -445,7 +443,6 @@ def render_admin_manual(nav_html, totop_html):
 <li>Mark read/unread, <b>archive</b> or <b>delete</b> any message — pure CRUD, nothing hidden.</li>
 <li>Replies you send appear in the studio's <b>Recent activity</b> alongside your campaigns.</li>
 <li><code>SMTP_REPLY_TO</code> (single address) still works as the fallback; the per-subscriber tag simply makes every reply attributable.</li>
-<li>The Studio covers the whole mail lifecycle in tabs: <b>Compose</b>, <b>Inbox</b> (replies), <b>Subscribers</b> (search, status filter, unsubscribe/resubscribe/delete), <b>Drafts</b> (save a composition, reopen and edit it later) and <b>Sent</b> (outbound history with cancel for still-scheduled mail).</li>
 </ul>
 </section>
 </div>

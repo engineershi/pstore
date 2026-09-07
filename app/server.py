@@ -189,89 +189,6 @@ _TOTOP = ('<div class="totop"><a href="#top" aria-label="Back to top">&uarr;</a>
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$")
 
-# Client-side validation shared by the register and reset-password forms.
-# Mirrors security.validate_name / validate_email / password_policy_errors.
-_AUTH_VALIDATE_JS = r"""
-function authNameErr(v){
-  if(!v) return "Enter your name.";
-  if(v.length<2) return "Name must be at least 2 characters.";
-  if(v.length>120) return "Name must be 120 characters or fewer.";
-  if(!/[A-Za-z\u00c0-\u024f]/.test(v)) return "Name must contain at least one letter.";
-  if(/[<>&]/.test(v)) return "Name contains unsupported characters.";
-  return "";
-}
-function authEmailErr(v){
-  v=v.trim();
-  if(!v) return "Enter your email address.";
-  if(!/^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$/i.test(v)) return "Enter a valid email address.";
-  const [local,domain]=v.split("@");
-  if(local.length>64) return "Enter a valid email address.";
-  if(/\.\.|@/.test(local)) return "Enter a valid email address.";
-  return "";
-}
-const AUTH_COMMON=new Set(["password","password1","password123","123456","12345678",
-  "123456789","1234567890","qwerty","qwerty123","abc123","123abc","111111","666666",
-  "letmein","iloveyou","admin","admin123","welcome","monkey","dragon","sunshine",
-  "princess","football","baseball","trustno1","master","shadow","passw0rd",
-  "1qaz2wsx","zaq12wsx","qazwsx","superman","login","prime","default"]);
-function authPwUnmet(pw,email,name){
-  const low=pw.toLowerCase(), out=[];
-  if(!pw) out.push("a password is required");
-  if(pw.length>128) out.push("at most 128 characters");
-  if(pw.length<8) out.push("at least 8 characters");
-  if(!/[a-z]/.test(pw)) out.push("a lowercase letter");
-  if(!/[A-Z]/.test(pw)) out.push("an uppercase letter");
-  if(!/\d/.test(pw)) out.push("a number");
-  if(!/[^\w]/.test(pw)) out.push("a symbol (e.g. !, @, #, -)");
-  if(AUTH_COMMON.has(low)) out.push("a less common password");
-  if(new Set(pw).size<4) out.push("at least 4 different characters");
-  const base=(email||"").trim().toLowerCase().split("@")[0]||"";
-  for(const bad of [base,(name||"").trim().toLowerCase()]){
-    if(bad.length>=4 && low.includes(bad)){ out.push("not containing your name or email"); break; }
-  }
-  return out;
-}
-function authSetErr(slotId,msg,id){
-  const slot=document.getElementById(slotId), f=document.getElementById(id);
-  if(slot) slot.textContent=msg||"";
-  if(f) f.classList.toggle("ferr-in", !!msg);
-}
-function authPwStrength(pw,unmet){
-  let score=0;
-  if(pw.length>=8) score++;
-  if(/[a-z]/.test(pw)) score++;
-  if(/[A-Z]/.test(pw)) score++;
-  if(/\d/.test(pw)) score++;
-  if(/[^\w]/.test(pw)) score++;
-  if(!unmet.length && pw) score++;
-  if(score>=6) return {label:"Strong", pct:100, cls:"strong"};
-  if(score>=4) return {label:"Good", pct:66, cls:"good"};
-  if(score>=2) return {label:"Weak", pct:33, cls:"weak"};
-  return {label:"", pct:0, cls:""};
-}
-function authChecklistPw(pw){
-  const def={len:!!pw, lower:/[a-z]/.test(pw), upper:/[A-Z]/.test(pw),
-    num:/\d/.test(pw), sym:/[^\w]/.test(pw), four:new Set(pw).size>=4};
-  const keys=["len","lower","upper","num","sym","four"];
-  for(const k of keys){
-    const el=document.getElementById("ck-"+k);
-    if(el){ el.classList.toggle("ok", def[k]); el.innerHTML = k==="len"?"8+ chars"
-        : k==="lower"?"a–z": k==="upper"?"A–Z": k==="num"?"0–9"
-        : k==="sym"?"!@#": k==="four"?"4+ kinds":"";
-      el.classList.toggle("oncd", pw.length>0); }
-  }
-  return def;
-}
-function authStrengthEl(pw,unmet){
-  const m=document.getElementById("pw-meter"), l=document.getElementById("pw-meter-label");
-  if(!m) return;
-  const s=authPwStrength(pw,unmet);
-  m.style.width=s.pct+"%";
-  m.className="meter "+s.cls;
-  if(l) l.textContent=s.label;
-}
-"""
-
 _lock = threading.Lock()
 
 # --- niche data refresh -------------------------------------------------------
@@ -1825,21 +1742,10 @@ $("em").addEventListener("keydown", e => {{ if (e.key === "Enter") doLogin(); }}
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex,nofollow"><title>Request a team account — pstore</title><link rel="stylesheet" href="/style.css">
 <style>.login-wrap{{min-height:78vh;display:flex;align-items:center;justify-content:center;padding:24px}}
-.login-card{{width:100%;max-width:420px;text-align:center}}
+.login-card{{width:100%;max-width:380px;text-align:center}}
 .login-card h1{{font-size:26px;letter-spacing:-.4px}}
-.frm{{display:block;text-align:left;font-size:12.5px;color:var(--muted);font-weight:700}}
-.frm input{{width:100%;padding:13px 16px;border:1px solid var(--border);border-radius:14px;font-size:15px;margin:8px 0 4px;background:#fff;box-sizing:border-box}}
-.frm input.ferr-in{{border-color:#d64545}}
-.ferr{{font-size:12px;color:#d64545;min-height:15px;text-align:left;font-weight:600}}
+.login-card input{{width:100%;padding:13px 16px;border:1px solid var(--border);border-radius:14px;font-size:15px;margin:8px 0 12px;background:#fff}}
 .login-card button{{width:100%;margin-top:4px}}
-.meter-wrap{{height:6px;border-radius:4px;background:var(--border);overflow:hidden;margin:6px 0 2px}}
-.meter{{height:100%;width:0;border-radius:4px;transition:width .2s,background .2s}}
-.meter.weak{{background:#d64545}}.meter.good{{background:#e8a20c}}.meter.strong{{background:#2e7d32}}
-.meter-label{{font-size:11px;color:var(--muted);text-align:left;height:14px;font-weight:600}}
-.ck{{display:flex;flex-wrap:wrap;gap:4px;margin:6px 0 12px;text-align:left}}
-.ck span{{font-size:10.5px;font-weight:600;color:var(--muted);background:var(--border);border-radius:20px;padding:3px 8px;opacity:.35}}
-.ck span.oncd{{opacity:.8}}
-.ck span.ok{{background:#2e7d32;color:#fff;opacity:1}}
 .login-hint{{font-size:12.5px;color:var(--muted);margin-top:14px}}
 .login-hint a{{color:var(--accent)}}</style>
 </head><body>
@@ -1849,101 +1755,41 @@ $("em").addEventListener("keydown", e => {{ if (e.key === "Enter") doLogin(); }}
 <h1>📮 Request a <span style="color:var(--accent)">team account</span></h1>
 <p class="tagline" style="margin:0">Sign up with your work email. We'll email you a confirmation link, then the owner grants your access.</p>
 {err}
-<label class="frm" for="nm">Your name
-<input id="nm" type="text" placeholder="Jane Doe" autocomplete="name" maxlength="120" required></label>
-<div class="ferr" id="f-nm"></div>
-<label class="frm" for="em">Work email
-<input id="em" type="email" placeholder="you@example.com" autocomplete="username" maxlength="160" required></label>
-<div class="ferr" id="f-em"></div>
-<label class="frm" for="pw">Password
-<input id="pw" type="password" placeholder="create a strong password" autocomplete="new-password" maxlength="128" required></label>
-<div class="ck" id="ck-box">
-<span id="ck-len">8+ chars</span><span id="ck-lower">a–z</span><span id="ck-upper">A–Z</span>
-<span id="ck-num">0–9</span><span id="ck-sym">!@#</span><span id="ck-four">4+ kinds</span>
-</div>
-<div class="meter-wrap"><div class="meter" id="pw-meter"></div></div>
-<div class="meter-label" id="pw-meter-label"></div>
-<div class="ferr" id="f-pw"></div>
-<label class="frm" for="pw2">Confirm password
-<input id="pw2" type="password" placeholder="repeat password" autocomplete="new-password" maxlength="128" required></label>
-<div class="ferr" id="f-pw2"></div>
+<label style="display:block;text-align:left;font-size:12.5px;color:var(--muted);font-weight:700">Your name
+<input id="nm" type="text" placeholder="Jane Doe" autocomplete="name"></label>
+<label style="display:block;text-align:left;font-size:12.5px;color:var(--muted);font-weight:700">Work email
+<input id="em" type="email" placeholder="you@example.com" autocomplete="username"></label>
+<label style="display:block;text-align:left;font-size:12.5px;color:var(--muted);font-weight:700">Password (8+ characters)
+<input id="pw" type="password" placeholder="password" autocomplete="new-password"></label>
+<label style="display:block;text-align:left;font-size:12.5px;color:var(--muted);font-weight:700">Confirm password
+<input id="pw2" type="password" placeholder="repeat password" autocomplete="new-password"></label>
 <p id="msg" class="msg" style="min-height:1.2em"></p>
-<button id="go" class="warm" type="submit">Request access</button>
+<button id="go" class="warm">Request access</button>
 <p class="login-hint">Already have an account? <a href="/admin/login">Sign in</a>.</p>
 </section></div></main>
-{_AUTH_VALIDATE_JS}
 <script>
 function $(id){{return document.getElementById(id);}}
-function authValName(slot){{ const e=authNameErr($("nm").value.trim()); authSetErr(slot,e,"nm"); return e; }}
-function authValEmail(slot){{ const e=authEmailErr($("em").value); authSetErr(slot,e,"em"); return e; }}
-let authPwTouched=false;
-function authValPw(slot){{
-  const v=$("pw").value;
-  const unmet=authPwUnmet(v, $("em").value, $("nm").value);
-  authSetErr(slot, unmet.length ? ("Password needs " + unmet.join(", ") + ".") : "", "pw");
-  authChecklistPw(v); authStrengthEl(v, unmet);
-  if($("pw2").value || authPwTouched){{
-    authSetErr("f-pw2", $("pw2").value !== v && v ? "Passwords don't match." : "", "pw2");
-  }}
-  return unmet;
-}}
-function authValPw2(slot){{
-  authPwTouched=true;
-  const e=($("pw2").value !== $("pw").value) ? "Passwords don't match." : "";
-  authSetErr(slot, e, "pw2"); return e;
-}}
-$("nm").addEventListener("blur", () => authValName("f-nm"));
-$("em").addEventListener("blur", () => authValEmail("f-em"));
-$("pw").addEventListener("blur", () => authValPw("f-pw"));
-$("pw2").addEventListener("input", () => authValPw2("f-pw2"));
-$("nm").addEventListener("input", () => {{
-  if($("f-nm").textContent) authValName("f-nm");
-  if($("pw").value && $("f-pw").textContent) authValPw("f-pw");
-}});
-$("em").addEventListener("input", () => {{
-  if($("f-em").textContent) authValEmail("f-em");
-  if($("pw").value && $("f-pw").textContent) authValPw("f-pw");
-}});
-$("pw").addEventListener("input", () => {{ authValPw("f-pw"); if($("pw2").value) authValPw2("f-pw2"); }});
-function authSubmit(){{
-  const msg = $("msg"); msg.textContent = "";
-  const e1 = authValName("f-nm"), e2 = authValEmail("f-em");
-  const unmet = authValPw("f-pw"); const e4 = authValPw2("f-pw2");
-  const first = unmet.length ? "pw" : (e1 ? "nm" : (e2 ? "em" : (e4 ? "pw2" : "")));
-  if (first) {{
-    msg.textContent = "⚠ Please fix the highlighted fields.";
-    $(first).focus(); return;
-  }}
+$("go").onclick = async () => {{
+  const msg = $("msg");
+  if ($("pw").value !== $("pw2").value) {{ msg.textContent = "⚠ Passwords don't match."; return; }}
+  if (!$("em").value.trim()) {{ msg.textContent = "⚠ Enter your email address."; return; }}
+  if ($("pw").value.length < 8) {{ msg.textContent = "⚠ Password must be at least 8 characters."; return; }}
   const go = $("go");
   go.disabled = true; go.textContent = "Sending…";
+  msg.textContent = "";
   try {{
-    fetch("/admin/register", {{method:"POST", headers:{{"Content-Type":"application/json"}},
-      body: JSON.stringify({{name: $("nm").value.trim(), email: $("em").value.trim(), password: $("pw").value}})}})
-    .then(async r => {{
-      let d; try {{ d = await r.json(); }} catch {{ d = {{ok:false, error:"Unexpected server response (" + r.status + ")."}}; }}
-      if (d.ok) {{
-        if (d.mail) {{ location.href = "/admin/login?sent=1"; return; }}
-        msg.textContent = d.alert || "Account created, but the confirmation email couldn't be sent (no SMTP). Ask the owner to enable it.";
-        go.disabled = false; go.textContent = "Request access"; return;
-      }}
-      if (d.field === "name") {{ authSetErr("f-nm", d.error, "nm"); msg.textContent = ""; $("nm").focus(); }}
-      else if (d.field === "email") {{ authSetErr("f-em", d.error, "em"); msg.textContent = ""; $("em").focus(); }}
-      else if (d.field === "password") {{ authValPw("f-pw"); msg.textContent = "⚠ " + d.error; $("pw").focus(); }}
-      else {{ msg.textContent = d.error || "Couldn't create the account."; }}
-      go.disabled = false; go.textContent = "Request access";
-    }})
-    .catch(() => {{
-      msg.textContent = "⚠ Network error — please check your connection and try again.";
-      go.disabled = false; go.textContent = "Request access";
-    }});
+    const r = await fetch("/admin/register", {{method:"POST", headers:{{"Content-Type":"application/json"}},
+      body: JSON.stringify({{name: $("nm").value.trim(), email: $("em").value.trim(), password: $("pw").value}})}});
+    let d; try {{ d = await r.json(); }} catch {{ d = {{ok:false, error:"Unexpected server response (" + r.status + ")."}}; }}
+    if (d.ok) {{ if (d.mail) location.href = "/admin/login?sent=1";
+      else msg.textContent = d.alert || "Account created, but the confirmation email couldn't be sent (no SMTP). Ask the owner to enable it."; }}
+    else msg.textContent = d.error || "Couldn't create the account.";
   }} catch (err) {{
-    msg.textContent = "⚠ Please try again.";
-    go.disabled = false; go.textContent = "Request access";
+    msg.textContent = "⚠ Network error — please check your connection and try again.";
   }}
-}}
-$("go").onclick = authSubmit;
-for (const id of ["nm","em","pw","pw2"])
-  $(id).addEventListener("keydown", e => {{ if (e.key === "Enter") authSubmit(); }});
+  go.disabled = false; go.textContent = "Request access";
+}};
+$("pw2").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").onclick(); }});
 </script>
 </body></html>"""
         return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
@@ -1953,26 +1799,18 @@ for (const id of ["nm","em","pw","pw2"])
         if not security.REGISTER_LIMITER.hit(key):
             return self._send(429, {"error": "too many signups from this address, try later"})
         body = self._body()
-        name = str(body.get("name") or "").strip()
-        email = str(body.get("email") or "").strip()
+        name = str(body.get("name") or "").strip()[:120]
+        email = str(body.get("email") or "").strip().lower()
         pw = str(body.get("password") or "")
-        nerr = security.validate_name(name)
-        if nerr:
-            return self._send(400, {"ok": False, "field": "name", "error": nerr})
-        eerr = security.validate_email(email)
-        if eerr:
-            return self._send(400, {"ok": False, "field": "email", "error": eerr})
-        email = email.lower()
-        perr = security.password_policy_errors(pw, email=email, name=name)
-        if perr:
-            return self._send(400, {"ok": False, "field": "password",
-                                    "error": "Password needs " + ", ".join(perr) + "."})
+        if not email or "@" not in email or "." not in email.split("@")[-1]:
+            return self._send(400, {"ok": False, "error": "Enter a valid email address"})
+        if len(pw) < 8:
+            return self._send(400, {"ok": False, "error": "Password must be at least 8 characters"})
         if _user_row(email):
-            return self._send(409, {"ok": False, "field": "email",
+            return self._send(409, {"ok": False,
                                     "error": "An account with that email already exists."})
         if (hmac.compare_digest(email.encode("utf-8"), _ADMIN_EMAIL.encode("utf-8"))):
-            return self._send(400, {"ok": False, "field": "email",
-                                    "error": "That email belongs to the owner account."})
+            return self._send(400, {"ok": False, "error": "That email belongs to the owner account."})
         with _lock:
             conn = _db()
             try:
@@ -2206,89 +2044,43 @@ $("em").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
         err = ('<p class="msg" style="color:#d64545">%s</p>' % seo._clean(error)) if error else ""
         tok_json = json.dumps(tok)
         email_json = json.dumps(email)
-        reset_js = ("fetch(\"/admin/reset-password\", "
+        reset_js = ("const r = await fetch(\"/admin/reset-password\", "
                     "{method:\"POST\", headers:{\"Content-Type\":\"application/json\"}, "
-                    "body: JSON.stringify({t: %s, e: %s, password: $(\"pw\").value}))"
+                    "body: JSON.stringify({t: %s, e: %s, password: $(\"pw\").value})});"
                     % (tok_json, email_json))
         body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex,nofollow"><title>Choose a new password — pstore</title><link rel="stylesheet" href="/style.css">
 <style>.login-wrap{{min-height:78vh;display:flex;align-items:center;justify-content:center;padding:24px}}
-.login-card{{width:100%;max-width:420px;text-align:center}}
+.login-card{{width:100%;max-width:380px;text-align:center}}
 .login-card h1{{font-size:24px;letter-spacing:-.4px}}
-.frm{{display:block;text-align:left;font-size:12.5px;color:var(--muted);font-weight:700}}
-.frm input{{width:100%;padding:13px 16px;border:1px solid var(--border);border-radius:14px;font-size:15px;margin:8px 0 4px;background:#fff;box-sizing:border-box}}
-.frm input.ferr-in{{border-color:#d64545}}
-.ferr{{font-size:12px;color:#d64545;min-height:15px;text-align:left;font-weight:600}}
+.login-card input{{width:100%;padding:13px 16px;border:1px solid var(--border);border-radius:14px;font-size:15px;margin:8px 0 12px;background:#fff}}
 .login-card button{{width:100%;margin-top:4px}}
-.meter-wrap{{height:6px;border-radius:4px;background:var(--border);overflow:hidden;margin:6px 0 2px}}
-.meter{{height:100%;width:0;border-radius:4px;transition:width .2s,background .2s}}
-.meter.weak{{background:#d64545}}.meter.good{{background:#e8a20c}}.meter.strong{{background:#2e7d32}}
-.meter-label{{font-size:11px;color:var(--muted);text-align:left;height:14px;font-weight:600}}
-.ck{{display:flex;flex-wrap:wrap;gap:4px;margin:6px 0 12px;text-align:left}}
-.ck span{{font-size:10.5px;font-weight:600;color:var(--muted);background:var(--border);border-radius:20px;padding:3px 8px;opacity:.35}}
-.ck span.oncd{{opacity:.8}}
-.ck span.ok{{background:#2e7d32;color:#fff;opacity:1}}
 .login-hint{{font-size:12.5px;color:var(--muted);margin-top:14px}}</style>
 </head><body>
 <header><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a></header>
 <main class="login-wrap"><div class="login-card">
 <section class="card">
 <h1>🛡️ Choose a <span style="color:var(--accent)">new password</span></h1>
-<p class="tagline" style="margin:0">For <b>{{email}}</b>. Pick something strong — you'll use it every day.</p>
+<p class="tagline" style="margin:0">For <b>{{email}}</b>. At least 8 characters.</p>
 {err}
-<label class="frm" for="pw">New password
-<input id="pw" type="password" placeholder="create a strong password" autocomplete="new-password" maxlength="128" required></label>
-<div class="ck" id="ck-box">
-<span id="ck-len">8+ chars</span><span id="ck-lower">a–z</span><span id="ck-upper">A–Z</span>
-<span id="ck-num">0–9</span><span id="ck-sym">!@#</span><span id="ck-four">4+ kinds</span>
-</div>
-<div class="meter-wrap"><div class="meter" id="pw-meter"></div></div>
-<div class="meter-label" id="pw-meter-label"></div>
-<div class="ferr" id="f-pw"></div>
-<label class="frm" for="pw2">Confirm new password
-<input id="pw2" type="password" placeholder="repeat new password" autocomplete="new-password" maxlength="128" required></label>
-<div class="ferr" id="f-pw2"></div>
-<p id="msg" class="msg" style="min-height:1.2em"></p>
-<button id="go" class="warm" type="submit">Save new password</button>
+<label style="display:block;text-align:left;font-size:12.5px;color:var(--muted);font-weight:700">New password
+<input id="pw" type="password" placeholder="new password" autocomplete="new-password"></label>
+<label style="display:block;text-align:left;font-size:12.5px;color:var(--muted);font-weight:700">Confirm new password
+<input id="pw2" type="password" placeholder="repeat new password" autocomplete="new-password"></label>
+<button id="go" class="warm">Save new password</button>
+<p id="msg" class="msg"></p>
 </section></div></main>
-{_AUTH_VALIDATE_JS}
 <script>
 function $(id){{return document.getElementById(id);}}
-const NMAIL = {email_json};
-function authValPw(slot){{
-  const v=$("pw").value;
-  const unmet=authPwUnmet(v, NMAIL, "");
-  authSetErr(slot, unmet.length ? ("Password needs " + unmet.join(", ") + ".") : "", "pw");
-  authChecklistPw(v); authStrengthEl(v, unmet);
-  if($("pw2").value) authSetErr("f-pw2", $("pw2").value !== v && v ? "Passwords don't match." : "", "pw2");
-  return unmet;
-}}
-function authValPw2(slot){{
-  const e=($("pw2").value !== $("pw").value) ? "Passwords don't match." : "";
-  authSetErr(slot, e, "pw2"); return e;
-}}
-$("pw").addEventListener("input", () => {{ authValPw("f-pw"); if($("pw2").value) authValPw2("f-pw2"); }});
-$("pw2").addEventListener("input", () => authValPw2("f-pw2"));
-function authSubmit(){{
-  const msg=$("msg"); msg.textContent="";
-  const unmet=authValPw("f-pw"), e4=authValPw2("f-pw2");
-  if(unmet.length){{ msg.textContent="⚠ " + "Password needs " + unmet.join(", ") + "."; $("pw").focus(); return; }}
-  if(e4){{ $("pw2").focus(); return; }}
-  const go=$("go"); go.disabled=true; go.textContent="Saving…";
+$("go").onclick = async () => {{
+  if ($("pw").value !== $("pw2").value) {{ $("msg").textContent = "Passwords don't match."; return; }}
   {reset_js}
-  .then(async r => {{
-    let d; try {{ d = await r.json(); }} catch {{ d = {{ok:false, error:"Unexpected server response (" + r.status + ")."}}; }}
-    if (d.ok) {{ location.href = "/admin/login?reset=1"; return; }}
-    go.disabled=false; go.textContent="Save new password";
-    if (d.field === "password") {{ authValPw("f-pw"); msg.textContent = "⚠ " + d.error; $("pw").focus(); }}
-    else msg.textContent = d.error || "Couldn't update the password.";
-  }})
-  .catch(() => {{ msg.textContent = "⚠ Network error — please check your connection and try again.";
-    go.disabled=false; go.textContent="Save new password"; }});
-}}
-$("go").onclick = authSubmit;
-for (const id of ["pw","pw2"]) $(id).addEventListener("keydown", e => {{ if (e.key === "Enter") authSubmit(); }});
+  const d = await r.json().catch(()=>({{ok:false, error:"bad response"}}));
+  if (d.ok) location.href = "/admin/login?reset=1";
+  else $("msg").textContent = d.error || "Couldn't update the password.";
+}};
+$("pw2").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").onclick(); }});
 </script>
 </body></html>"""
         body = body.replace("{email}", seo._clean(email))
@@ -2303,10 +2095,8 @@ for (const id of ["pw","pw2"]) $(id).addEventListener("keydown", e => {{ if (e.k
         tok = str(body.get("t") or "")
         email = str(body.get("e") or "").strip().lower()
         pw = str(body.get("password") or "")
-        perr = security.password_policy_errors(pw, email=email)
-        if perr:
-            return self._send(400, {"ok": False, "field": "password",
-                                    "error": "Password needs " + ", ".join(perr) + "."})
+        if len(pw) < 8:
+            return self._send(400, {"ok": False, "error": "Password must be at least 8 characters"})
         uid = self._reset_claim(tok, email)
         if uid is None:
             return self._send(400, {"ok": False,
@@ -2354,88 +2144,6 @@ for (const id of ["pw","pw2"]) $(id).addEventListener("keydown", e => {{ if (e.k
 <p class="login-hint">Missing something? The owner enables functions by assigning you roles at
 <a href="/admin/users">Users &amp; roles</a> — reach out to them.</p>
 </section></main></body></html>"""
-        return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
-
-    def _team_dashboard(self):
-        """Dedicated team-member dashboard — profile, roles, tools, sign out."""
-        user = self._current_user()
-        if not user:
-            self.send_response(302)
-            self.send_header("Location", "/admin/login?next=/dashboard")
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            return None
-        name = user.get("name") or user.get("email", "")
-        email = user.get("email", "")
-        status = user.get("status", "")
-        roles = user.get("roles") or []
-        funcs = self._granted_functions()
-        role_chips = "".join(
-            '<span style="display:inline-block;padding:4px 12px;border-radius:20px;'
-            'background:#fff5ee;color:#a4421a;font-size:13px;font-weight:700;'
-            'border:1px solid #ffd2b8">%s</span>' % seo._clean(r) for r in roles
-        ) if roles else '<span style="color:var(--muted);font-size:13px">No roles assigned yet</span>'
-        if funcs:
-            tool_cards = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-top:10px">%s</div>' % "".join(
-                '<a href="%s" style="display:block;padding:16px;border:1.5px solid var(--border);border-radius:14px;'
-                'text-decoration:none;color:var(--text);background:#fff;font-size:14px;font-weight:700;'
-                'transition:transform .15s" onmouseover="this.style.transform=\'translateY(-2px)\'"'
-                'onmouseout="this.style.transform=\'none\'">%s</a>'
-                % ((FUNCTION_PATHS.get(f, ("",))[0] if isinstance(FUNCTION_PATHS.get(f), tuple) else (FUNCTION_PATHS.get(f) or "/dashboard")),
-                   seo._clean(FN.get(f, f))) for f in funcs)
-        else:
-            tool_cards = ('<p style="margin-top:10px;color:var(--muted);font-size:13px">'
-                          'No tool access yet — the owner assigns roles under '
-                          '<a href="/admin/users" style="color:var(--accent)">Users &amp; roles</a>.</p>')
-        body = f"""<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex,nofollow"><title>My dashboard — pstore</title><link rel="stylesheet" href="/style.css">
-<style>.dash-wrap{{max-width:700px;margin:0 auto;padding:32px 20px 60px}}
-.profile-card{{display:flex;gap:18px;align-items:center;padding:20px 24px;border:1.5px solid var(--border);
-border-radius:18px;background:#fff}}
-.avatar{{width:60px;height:60px;border-radius:50%;background:var(--accent);color:#fff;font-size:24px;
-font-weight:800;display:grid;place-items:center;flex:none;text-transform:uppercase}}
-.profile-info{{flex:1;min-width:0}}
-.profile-info h2{{margin:0;font-size:20px;letter-spacing:-.3px}}
-.profile-info p{{margin:2px 0 0;color:var(--muted);font-size:13px}}
-.status-badge{{display:inline-block;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700}}
-.status-badge.verified{{background:#e6f4ea;color:#1e7e34}}
-.status-badge.pending{{background:#fff8e1;color:#b8860b}}
-.status-badge.disabled{{background:#fdecea;color:#c62828}}
-.roles-section{{margin-top:18px}}
-.roles-section h3{{font-size:15px;margin:0 0 6px}}
-.tools-section{{margin-top:22px}}
-.tools-section h3{{font-size:15px;margin:0 8px 0}}
-.footer-links{{margin-top:28px;display:flex;gap:14px;flex-wrap:wrap}}
-.footer-links a{{font-size:13px;color:var(--accent);text-decoration:none}}
-@media(max-width:640px){{.profile-card{{flex-direction:column;text-align:center}}.avatar{{width:50px;height:50px;font-size:20px}}
-.profile-info{{text-align:center}}.tools-section a{{font-size:13px}}}}</style>
-</head><body>
-<header><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
-<nav class="mininav" style="display:flex;gap:14px;justify-content:flex-end;padding:8px 20px 0">
-<a href="/admin/logout" style="font-size:13px;color:var(--muted);text-decoration:none">Sign out</a></nav></header>
-<main class="dash-wrap">
-<div class="profile-card">
-<div class="avatar">{seo._clean((name or email)[:1] or "?")}</div>
-<div class="profile-info">
-<h2>{seo._clean(name)}</h2>
-<p>{seo._clean(email)}</p>
-<span class="status-badge {seo._clean(status)}">{seo._clean(status)}</span>
-</div></div>
-<div class="roles-section">
-<h3>Assigned roles</h3>
-<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">{role_chips}</div>
-</div>
-<div class="tools-section">
-<h3>Your tools</h3>
-{tool_cards}
-</div>
-<div class="footer-links">
-<a href="/admin/logout">Sign out</a>
-<a href="/">Back to home</a>
-</div>
-</main>
-</body></html>"""
         return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
 
     def _admin_nav(self, active=None):
@@ -2889,8 +2597,6 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._send(200, page, "text/html; charset=utf-8")
             # owner dashboard (static app UI) — kept off "/" so the root stays crawlable
             if path == "/dashboard" or path == "/index.html":
-                if path == "/dashboard" and self._session_uid() is not None:
-                    return self._team_dashboard()
                 with open(os.path.join(STATIC, "index.html"), "rb") as fh:
                     return self._send(200, fh.read(), "text/html; charset=utf-8")
             if path == "/app.js":
@@ -6610,13 +6316,7 @@ input[type=text],input[type=email],input[type=password]{{width:100%;padding:10px
 <button id="n_go" class="btn" style="width:100%">Create user</button>
 </div>
 <p id="n_msg" class="msg"></p></section>
-<section class="card"><h2>👥 Team</h2>
-  <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px">
-   <input id="u-search" type="search" placeholder="Search by name or email…" autocomplete="off"
-          style="flex:1;min-width:160px;padding:8px 12px;border:1px solid var(--border);border-radius:10px;font-size:13px">
-   <span class="hint" id="u-count"></span>
-  </div>
-  <div id="users"></div></section>
+<section class="card"><h2>👥 Team</h2><div id="users"></div></section>
 <section class="card"><h2>🎛 Role matrix <span class="status-pill">functions per role</span></h2>
 <div id="roles"></div></section>
 </main>
@@ -6630,10 +6330,7 @@ function api(method, body, cb){{fetch("/api/users", {{method:method, headers:{{"
 function bake(roleSlugs){{return roleSlugs.filter(s=>s).join(", ") || "— none —";}}
 function render(data){{
   var u=$("users"); u.innerHTML="";
-  var q=($("u-search").value||"").toLowerCase();
-  var users=(data.users||[]).filter(x=>!q||((x.name||"").toLowerCase().includes(q)||(x.email||"").toLowerCase().includes(q)));
-  if($("u-count")) $("u-count").textContent=users.length+"/"+(data.users||[]).length+" user"+(users.length===1?"":"s");
-  users.forEach(usr=>{{
+  data.users.forEach(usr=>{{
     var div=el("div","user-row");
     var left=el("div","", "<b>"+(usr.name||"—")+"</b><div style='font-size:13px;color:var(--muted)'>"+usr.email+"</div>"+
       "<div style='margin-top:6px'><span class='status-pill "+usr.status+"'>"+usr.status+"</span>"+
@@ -6707,10 +6404,6 @@ $("n_go").onclick=function(){{
   }});
 }};
 fetch("/api/users").then(r=>r.json()).then(render);
-$("u-search").addEventListener("input",()=>{{ var u=$("users"); u.innerHTML="<p class='hint'>Loading…</p>"; }});
-$("u-search").addEventListener("input",()=>{{
-  fetch("/api/users").then(r=>r.json()).then(render);
-}});
 </script>
 </body></html>"""
         return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
@@ -8277,25 +7970,6 @@ document.addEventListener("click", async (e)=>{{
         }
 
     def _subscribers_json(self):
-        if self.command == "POST":
-            body = self._body()
-            action = (body.get("action") or "").strip()
-            sid = int(body.get("id") or 0)
-            if action in ("unsub", "resub", "delete") and sid:
-                with _lock:
-                    conn = _db()
-                    if action == "unsub":
-                        conn.execute("UPDATE subscribers SET unsubscribed=1 WHERE id=?", (sid,))
-                    elif action == "resub":
-                        conn.execute("UPDATE subscribers SET unsubscribed=0 WHERE id=?", (sid,))
-                    elif action == "delete":
-                        conn.execute("DELETE FROM subscribers WHERE id=?", (sid,))
-                    conn.commit(); conn.close()
-            with _lock:
-                conn = _db()
-                rows = conn.execute("SELECT * FROM subscribers ORDER BY id DESC LIMIT 500").fetchall()
-                conn.close()
-            return self._send(200, {"ok": True, "subscribers": [dict(r) for r in rows]})
         with _lock:
             conn = _db()
             stats = self._subs_stats(conn)
@@ -8393,8 +8067,8 @@ document.addEventListener("click", async (e)=>{{
                         str(s.get("click_rate", 0)) + "%",
                         str(s.get("click_per_lead", 0))))
             return ('<section class="card"><h2 style="color:%s">%s <span class="hint">— %d</span></h2>%s'
-                    '<div class="table-wrap"><table><thead><tr><th>Email</th><th>Niche</th><th class="ct">Opens</th>'
-                    '<th class="ct">Clicks</th></tr></thead><tbody>%s</tbody></table></div></section>'
+                    '<table><thead><tr><th>Email</th><th>Niche</th><th class="ct">Opens</th>'
+                    '<th class="ct">Clicks</th></tr></thead><tbody>%s</tbody></table></section>'
                     ) % (color, label, counts.get(name, 0), rates, rows)
         hot = seg_card("hot", "🔥 Hot — opened + clicked", "#b12704")
         warm = seg_card("warm", "🌤 Warm — opened, not clicked", "#e67e22")
@@ -8412,9 +8086,7 @@ document.addEventListener("click", async (e)=>{{
 <meta name="robots" content="noindex,nofollow">
 <style>table{{width:100%;border-collapse:collapse;margin-top:8px}}td,th{{text-align:left;padding:6px 8px;
 border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
-.feature h3{{margin:0;font-size:15px}}
-.table-wrap{{overflow-x:auto;-webkit-overflow-scrolling:touch}}
-@media(max-width:640px){{.hero h1{{font-size:24px}}.hero .tagline{{font-size:14px}}section.card{{padding:14px}}td,th{{font-size:12px;padding:5px 6px}}}}</style></head><body>
+.feature h3{{margin:0;font-size:15px}}</style></head><body>
 <header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
 <div class="hero"><h1>Lead lifecycle <span>segments.</span></h1>
 <p class="tagline">Split subscribers by engagement so the sequence can act per-lead instead of sending everyone the same creep.</p></div>
@@ -9298,24 +8970,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}</s
             return self._send(200, self._inbox_delete(body.get("id") or 0))
         if action == "inbox_reply":
             return self._send(200, self._inbox_reply(body.get("id") or 0,
-                                                      body.get("body") or ""))
-        if action == "draft_save":
-            spec = json.dumps(body.get("spec") or {})
-            recips = json.dumps(body.get("recipients") or {})
-            with _lock:
-                conn = _db()
-                cur = conn.execute("INSERT INTO outbox (spec,recipients,status) VALUES (?,'[]','draft')",
-                                   (spec,))
-                oid = cur.lastrowid
-                conn.commit(); conn.close()
-            return self._send(200, {"ok": True, "id": oid})
-        if action == "draft_delete":
-            oid = int(body.get("id") or 0)
-            with _lock:
-                conn = _db()
-                conn.execute("DELETE FROM outbox WHERE id=? AND status='draft'", (oid,))
-                conn.commit(); conn.close()
-            return self._send(200, {"ok": True})
+                                                     body.get("body") or ""))
         return self._send(400, {"ok": False, "error": "unknown action"})
 
     def _admin_emails(self, q):
@@ -9410,9 +9065,6 @@ __NAV__
 <div class="tabbar">
  <button class="tab on" data-tab="send" onclick="tab('send')">✍️ Compose &amp; send</button>
  <button class="tab" data-tab="inbox" onclick="tab('inbox')">📥 Inbox <span class="ibadge" id="ibadge" style="display:none"></span></button>
- <button class="tab" data-tab="subs" onclick="tab('subs')">👥 Subscribers <span class="ibadge" id="subbadge" style="display:none"></span></button>
- <button class="tab" data-tab="drafts" onclick="tab('drafts')">📝 Drafts</button>
- <button class="tab" data-tab="sent" onclick="tab('sent')">📤 Sent / scheduled</button>
 </div>
 <main class="studiox" id="main-send">
  <section class="card"><h2>🕹 Sender &amp; auto-schedule</h2>
@@ -9511,7 +9163,6 @@ __NAV__
   <div class="row" style="margin-top:12px">
    <button class="bigbtn" id="bigbtn" disabled>Loading…</button>
   </div>
-  <p style="margin-top:6px"><button class="btn ghost" onclick="saveDraft()" style="font-size:13px">💾 Save as draft</button></p>
   <p id="outmsg" class="netmsg" style="margin-top:10px"></p>
  </section>
 
@@ -9547,32 +9198,6 @@ __NAV__
    </div>
    <p id="mv-msg" class="netmsg" style="margin-top:8px"></p>
   </div>
- </section>
-</main>
-<main class="studiox" id="main-subs" style="display:none">
- <section class="card"><h2>👥 Subscribers</h2>
-  <div class="ibox-head">
-   <input type="search" id="sub-q" placeholder="Search by email…" style="min-width:180px;padding:7px 12px;border:1.5px solid var(--line,#eee);border-radius:12px;font-size:13px">
-   <select id="sub-status" style="padding:7px 10px;border:1.5px solid var(--line,#eee);border-radius:12px;font-size:13px">
-    <option value="">All statuses</option><option value="confirmed">Confirmed</option>
-    <option value="unconfirmed">Unconfirmed</option><option value="unsubscribed">Unsubscribed</option>
-   </select>
-   <span class="hint" id="sub-count"></span>
-  </div>
-  <div id="subs-manage" class="chipsrow"></div>
- </section>
-</main>
-<main class="studiox" id="main-drafts" style="display:none">
- <section class="card"><h2>📝 Drafts</h2>
-  <div id="drafts-list"></div>
- </section>
-</main>
-<main class="studiox" id="main-sent" style="display:none">
- <section class="card"><h2>📤 Sent &amp; scheduled</h2>
-  <div class="table-wrap"><table class="plain">
-   <thead><tr><th>#</th><th>When (UTC)</th><th>To</th><th>Status</th><th>Result</th><th></th></tr></thead>
-   <tbody id="sent-body"><tr><td colspan="6" class="hint">Loading…</td></tr></tbody>
-  </table></div>
  </section>
 </main>
 <footer><p>Times are UTC. Every email carries a signed unsubscribe link and List-Unsubscribe header; tracked links go through <code>/e/</code> and record source=email clicks. Replies sent to your tagged address land on the Inbox tab and map back to the subscriber who wrote.</p></footer>
@@ -9611,66 +9236,8 @@ function msgAction(id,status,silent){fetch("/api/mail",{method:"POST",headers:{"
 function removeMsg(id){fetch("/api/mail",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"inbox_delete",id})}).then(r=>r.json()).then(()=>load());}
 function pollInbox(){const btn=document.querySelector("#main-inbox .btn.warm");const old=btn.textContent;btn.textContent="Checking…";btn.disabled=true;fetch("/api/mail",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"inbox_poll"})}).then(r=>r.json()).then(d=>{if(d.error){$("ib-net").textContent="⚠ "+d.error;return;}DATA.inbox=d.inbox||DATA.inbox;if(d.inbox_unread!==undefined)DATA.inbox_unread=d.inbox_unread;renderInbox();}).finally(()=>{btn.textContent=old;btn.disabled=false;});}
 async function sendReply(){const id=window._curMsg;const body=$("mv-reply").value;if(!body.trim()){alert("Write something first.");return;}const btn=$("mv-send");btn.disabled=true;const r=await fetch("/api/mail",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"inbox_reply",id,body})});const d=await r.json();$("mv-msg").textContent=d.error?"✗ "+d.error:(d.sent?"↩ Reply sent to "+d.to+". It'll thread back here.":"");if(d.sent){$("mv-reply").value="";load();}btn.disabled=false;}
-function tab(name){$("main-send").style.display=name==="send"?"":"none";$("main-inbox").style.display=name==="inbox"?"":"none";$("main-subs").style.display=name==="subs"?"":"none";$("main-drafts").style.display=name==="drafts"?"":"none";$("main-sent").style.display=name==="sent"?"":"none";document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on",t.dataset.tab===name));if(name==="subs")renderSubsManage();if(name==="drafts")renderDrafts();if(name==="sent")renderSentTab();if(name==="inbox")renderInbox();}
+function tab(name){$("main-send").style.display=name==="send"?"":"none";$("main-inbox").style.display=name==="inbox"?"":"none";document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on",t.dataset.tab===name));if(name==="inbox")renderInbox();}
 function renderAll(){renderNow();renderSubs();renderOutbox();renderLog();renderBlocked();renderInbox();fillNiches();fillSegs();count();}
-function renderSubsManage(){
-  if(!DATA)return;
-  const q=( $("sub-q").value||"" ).toLowerCase();
-  const stF=$("sub-status").value;
-  const all=DATA.subscribers||[];
-  const list=all.filter(s=>{
-    if(stF==="confirmed"&&(!s.confirmed||s.unsubscribed))return false;
-    if(stF==="unconfirmed"&&(s.confirmed||s.unsubscribed))return false;
-    if(stF==="unsubscribed"&&!s.unsubscribed)return false;
-    if(q&&!(s.email||"").toLowerCase().includes(q))return false;
-    return true;
-  });
-  $("sub-count").textContent=list.length+" subscriber"+(list.length===1?"":"s");
-  const badge=$("subbadge"); badge.style.display=list.length?"":"none";
-  $("subs-manage").innerHTML=list.length?list.map(s=>{
-    const st=s.unsubscribed?"unsubscribed":(!s.confirmed?"unconfirmed":"step "+(s.sent_index||0)+"/"+(DATA.sequence_length||5));
-    const act=s.unsubscribed?`<button class="btn ghost" onclick="subAct(${s.id},'resub')">Resubscribe</button>`
-      :`<button class="btn ghost" onclick="subAct(${s.id},'unsub')">Unsubscribe</button>`;
-    return `<div class="subchip"><span><span class="mail">${esc(s.email)}</span><br><span class="kw">${esc(s.keyword||"—")}</span></span>
-    <span class="st">${esc(st)}</span><span class="mact">${act}<button class="btn ghost" style="color:#c62828" onclick="subAct(${s.id},'delete')">Delete</button></span></div>`;
-  }).join(""):'<p class="hint">No subscribers match.</p>';
-}
-function subAct(id,action){
-  fetch("/api/subscribers",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,id})})
-    .then(r=>r.json()).then(d=>{if(d.error)alert(d.error);if(d.subscribers)DATA.subscribers=d.subscribers;renderSubsManage();});
-}
-function renderDrafts(){
-  if(!DATA)return;
-  const drafts=(DATA.outbox||[]).filter(o=>o.status==="draft");
-  $("drafts-list").innerHTML=drafts.length?drafts.map(d=>{
-    let spec={};try{spec=JSON.parse(d.spec)}catch(e){}
-    const subj=spec.subject||spec.type||"draft";
-    return `<div class="subchip"><span><span class="mail">#${d.id} — ${esc(subj)}</span><br><span class="kw">saved ${esc(d.created_at||"")}</span></span>
-    <span class="mact"><button class="btn ghost" onclick="loadDraft(${d.id})">Open</button><button class="btn ghost" style="color:#c62828" onclick="delDraft(${d.id})">Delete</button></span></div>`;
-  }).join(""):'<p class="hint">No drafts yet — use "Save as draft" below compose to save one.</p>';
-}
-function loadDraft(id){const d=(DATA.outbox||[]).find(o=>o.id===id);if(!d)return;let s={};try{s=JSON.parse(d.spec)}catch(e){}
-  const r=JSON.parse(d.recipients||"[]");
-  tab("send");
-  $("c-niche").value=s.niche||"";$("c-step").value=s.step||1;
-  if(s.type==="custom"){$("c-subj").value=s.subject||"";$("c-body").value=s.body||"";
-    document.querySelectorAll('input[name="tmpl"]').forEach(x=>x.checked=x.value==="custom");
-    document.querySelectorAll('.tmpls label').forEach(x=>x.classList.toggle("on",x.querySelector("input").value==="custom"));
-    onCust();}
-}
-function delDraft(id){fetch("/api/mail",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"draft_delete",id})}).then(r=>r.json()).then(()=>load());}
-function saveDraft(){
-  const pay={action:"draft_save",spec:{type:tmpl(),niche:$("c-niche").value,step:parseInt($("c-step").value||"1"),subject:$("c-subj").value,body:$("c-body").value},recipients:recSpec()};
-  fetch("/api/mail",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(pay)}).then(r=>r.json()).then(d=>{alert(d.ok?"Draft saved #"+d.id:(d.error||"Save failed"));load();});
-}
-function renderSentTab(){
-  if(!DATA)return;
-  const rows=(DATA.outbox||[]).filter(o=>o.status!=="draft");
-  $("sent-body").innerHTML=rows.length?rows.map(o=>{
-    let res="";try{const r=JSON.parse(o.result||"null");if(r)res=`${r.recipients??""} → sent ${r.sent??0} / err ${r.errors??0}`;}catch(e){}
-    return `<tr><td>${o.id}</td><td class="ct">${esc(o.scheduled_at||"now")}</td><td class="ct">${(o.recipients?JSON.parse(o.recipients).length:"0")}</td><td><span class="badge">${esc(o.status)}</span></td><td>${esc(res||(o.result||""))}</td><td>${o.status==="scheduled"||o.status==="sending"?`<button class="btn ghost" onclick="cancel(${o.id})">Cancel</button>`:""}</td></tr>`;
-  }).join(""):'<tr><td colspan="6" class="hint">Nothing sent or scheduled yet.</td></tr>';
-}
 async function sendIt(){const pay={action:"send",spec:spec(),options:opts(),recipients:recSpec()};const when=document.querySelector('input[name="when"]:checked').value;let dt="";if(when==="sched"){dt=$("w-dt").value;if(!dt){alert("Pick a schedule time first.");return;}pay.schedule_at=dt;}const btn=$("bigbtn");btn.disabled=true;$("outmsg").textContent="Working…";const r=await fetch("/api/mail",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(pay)});const d=await r.json();if(d.scheduled){$("outmsg").textContent=`📅 Scheduled #${d.outbox_id} — ${d.recipients} recipient(s) at ${dt} UTC.`;}else if(d.error){$("outmsg").textContent="✗ "+d.error;}else if(d.dry_run){$("outmsg").textContent=`👁 Dry run: ${d.sent} ready · ${d.skipped} skipped · ${d.errors} errors · of ${d.recipients} recipient(s).`;}else{$("outmsg").textContent=`📨 Sent ${d.sent} · skipped ${d.skipped} · errors ${d.errors} · of ${d.recipients}.`;}load();setTimeout(()=>{btn.disabled=false;updBtn();},700);}
 document.addEventListener("DOMContentLoaded",async()=>{const r=await fetch("/api/mail");DATA=await r.json();renderAll();
 $("f-niche").addEventListener("change",e=>{FILT.niche=e.target.value;renderSubs();});

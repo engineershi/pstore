@@ -263,65 +263,6 @@ class TestEmailSuite(unittest.TestCase):
         st, _, _, _ = self._raw("/api/sequence/send")
         self.assertEqual(st, 401)
 
-    def test_subscriber_management_actions(self):
-        self._subscribe("mgmt@example.com")
-        sid = self._sub("mgmt@example.com")["id"]
-        # unsubscribe
-        st, _, _, data = self._raw("/api/subscribers", "POST",
-                                   body=json.dumps({"action": "unsub", "id": sid}),
-                                   cookie=self.cookie,
-                                   headers={"Content-Type": "application/json"})
-        self.assertEqual(st, 200)
-        self.assertTrue(self._sub("mgmt@example.com")["unsubscribed"])
-        # resubscribe
-        st, _, _, data = self._raw("/api/subscribers", "POST",
-                                   body=json.dumps({"action": "resub", "id": sid}),
-                                   cookie=self.cookie,
-                                   headers={"Content-Type": "application/json"})
-        self.assertEqual(st, 200)
-        self.assertFalse(self._sub("mgmt@example.com")["unsubscribed"])
-        # delete
-        st, _, _, data = self._raw("/api/subscribers", "POST",
-                                   body=json.dumps({"action": "delete", "id": sid}),
-                                   cookie=self.cookie,
-                                   headers={"Content-Type": "application/json"})
-        self.assertEqual(st, 200)
-        self.assertIsNone(self._sub("mgmt@example.com"))
-
-    def test_emails_studio_has_draft_save_delete_and_tab_surfaces(self):
-        st, _, _, data = self._raw("/admin/emails", cookie=self.cookie)
-        html = data.decode("utf-8")
-        for needle in ("main-subs", "main-drafts", "main-sent", "sub-q",
-                       "renderDrafts", "saveDraft", "Save as draft"):
-            self.assertIn(needle, html)
-        # save draft
-        st, _, _, data = self._raw("/api/mail", "POST",
-                                   body=json.dumps({"action": "draft_save",
-                                                    "spec": {"type": "custom",
-                                                             "subject": "Draft hello",
-                                                             "body": "Body"},
-                                                    "recipients": {}}),
-                                   cookie=self.cookie,
-                                   headers={"Content-Type": "application/json"})
-        self.assertEqual(st, 200)
-        did = json.loads(data)["id"]
-        self.assertGreater(did, 0)
-        # it shows as a draft in the studio payload
-        st, _, _, data = self._raw("/api/mail", cookie=self.cookie)
-        outbox = json.loads(data)["outbox"]
-        drafts = [o for o in outbox if o["status"] == "draft" and o["id"] == did]
-        self.assertEqual(len(drafts), 1)
-        self.assertIn("Draft hello", drafts[0]["spec"])
-        # delete draft
-        st, _, _, data = self._raw("/api/mail", "POST",
-                                   body=json.dumps({"action": "draft_delete", "id": did}),
-                                   cookie=self.cookie,
-                                   headers={"Content-Type": "application/json"})
-        self.assertEqual(st, 200)
-        st, _, _, data = self._raw("/api/mail", cookie=self.cookie)
-        outbox = json.loads(data)["outbox"]
-        self.assertNotIn(did, [o["id"] for o in outbox if o["status"] == "draft"])
-
     def test_sequence_send_refuses_when_smtp_unconfigured(self):
         saved = (mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD)
         mailer.SMTP_HOST = mailer.SMTP_USER = mailer.SMTP_PASSWORD = ""
