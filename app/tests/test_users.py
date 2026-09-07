@@ -18,6 +18,7 @@ import uuid
 from http.server import ThreadingHTTPServer
 
 sys_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+import server
 if sys_path not in os.sys.path:
     os.sys.path.insert(0, sys_path)
 
@@ -531,6 +532,19 @@ class TestUsersServer(unittest.TestCase):
         self.assertIn("emailer", slugs)
         for u in d["users"]:
             self.assertNotIn("pass_hash", u)
+
+    def test_users_page_functions_js_is_valid(self):
+        # Regression: the <script> on /admin/users builds FUNCTIONS from an
+        # object literal; it used to emit adjacent {..}{..} objects, a JS
+        # syntax error that killed the whole page (no list / role UI).
+        st, _, body = self._raw("GET", "/admin/users", cookie=self.owner_cookie)
+        self.assertEqual(st, 200)
+        m = re.search(r"var FUNCTIONS = (\{.*?\});", body.decode("utf-8", "replace"), re.S)
+        self.assertIsNotNone(m, "FUNCTIONS object literal missing on users page")
+        literal = m.group(1)
+        self.assertNotIn("}{", literal, "adjacent object literals = broken JS")
+        parsed = json.loads(literal)
+        self.assertEqual(parsed, server.FN)
 
     def test_role_crud_and_delete_unassigns(self):
         email = "kim@team.example"

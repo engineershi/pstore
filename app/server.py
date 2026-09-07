@@ -75,6 +75,41 @@ def _ensure_db_file():
 
 _ensure_db_file()
 
+_DISK_WARN_PCT = 8
+_DISK_WARN_BYTES = 64 * 1024 * 1024
+
+
+def _disk_usage():
+    """(free_bytes, total_bytes, free_pct) for the directory holding DB, or None."""
+    try:
+        st = os.statvfs(os.path.dirname(DB) or ".")
+    except OSError:
+        return None
+    frag = st.f_frsize or st.f_bsize or 1
+    total = st.f_blocks * frag
+    free = st.f_bavail * frag
+    if total <= 0:
+        return None
+    return free, total, int(free * 100.0 / total)
+
+
+def _disk_warning():
+    """Short advisory string when the DB's disk is running low, else ''."""
+    u = _disk_usage()
+    if not u:
+        return ""
+    free, total, pct = u
+    where = os.path.dirname(DB) or "app"
+    mb = free // (1024 * 1024)
+    if free >= _DISK_WARN_BYTES and pct >= _DISK_WARN_PCT:
+        return ""
+    if free < _DISK_WARN_BYTES:
+        return ("DISK LOW: only %d MB free (%d%%) on %s — writes may fail. "
+                "Free up space to protect the database." % (mb, pct, where))
+    return ("DISK LOW: %d MB free (%d%% of %d MB) on %s — write volume is "
+            "climbing; free space to keep the database safe."
+            % (mb, pct, total // (1024 * 1024), where))
+
 # --- admin auth -------------------------------------------------------------
 # Everything under /admin + the owner tools/APIs sits behind an admin email +
 # password (PSTORE_ADMIN_EMAIL / PSTORE_ADMIN_PASSWORD) with an in-memory
@@ -1046,6 +1081,9 @@ def _init():
                 pass
             conn = _db()
             conn.close()
+    _w = _disk_warning()
+    if _w:
+        print("WARN: %s" % _w, flush=True)
     # Restore API keys/settings persisted via the UI (env still wins at
     # read time): PA-API creds and the social webhook survive restarts.
     try:
@@ -2623,6 +2661,12 @@ font-weight:800;display:grid;place-items:center;flex:none;text-transform:upperca
                                      "/api/sem", "/api/seo-audit")
                            if ok(e))
         api_html = api_html or '<p class="hint">No API endpoints for your functions.</p>'
+        disk_warn = ""
+        _ds = _disk_warning()
+        if _ds:
+            disk_warn = ('<div style="max-width:860px;margin:14px auto;padding:12px 16px;'
+                         'border-radius:10px;background:#fff4e5;color:#8a5300;'
+                         'border:1px solid #e9c78a">%s</div>' % seo._clean(_ds))
         body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex,nofollow"><title>Admin — all pages · pstore</title>
@@ -2642,6 +2686,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
 {self._admin_nav('admin')}
 </header>
 <main>
+{disk_warn}
 {tools_html}
 <section class="card"><h2>🌐 Public site — global pages</h2><div class="page-grid">{site_html}</div></section>
 <section class="card"><h2>🛍 Public site — saved niches</h2>
@@ -6586,9 +6631,7 @@ document.addEventListener("click", (e) => {{
         nav = self._admin_nav("users")
         if not self._authed() or self._session_uid() is not None:
             return self._function_error("/admin/users")
-        fn_rows = "".join(
-            '{"%s":"%s"}' % (slug, seo._clean(label))
-            for slug, label in FUNCTIONS)
+        fn_rows = json.dumps(FN, ensure_ascii=False)
         body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex,nofollow"><title>Users &amp; roles — pstore</title><link rel="stylesheet" href="/style.css">
@@ -6638,7 +6681,7 @@ input[type=text],input[type=email],input[type=password]{{width:100%;padding:10px
 </main>
 <footer><p>{_TOTOP}</p></footer>
 <script>
-var FUNCTIONS = {{{fn_rows}}};
+var FUNCTIONS = {fn_rows};
 function $(id){{return document.getElementById(id);}}
 function el(tag, cls, html){{var e=document.createElement(tag); if(cls)e.className=cls; if(html!=null)e.innerHTML=html; return e;}}
 function api(method, body, cb){{fetch("/api/users", {{method:method, headers:{{"Content-Type":"application/json"}},

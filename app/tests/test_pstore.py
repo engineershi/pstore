@@ -30,6 +30,38 @@ class FakeResponse:
         self.body = body if isinstance(body, bytes) else body.encode("utf-8")
 
 
+class DiskSpaceWarnTest(unittest.TestCase):
+    """The DB lives on a small persistent disk; a full disk breaks writes and
+    can corrupt the sqlite file (as it did in the 2026-09-07 incident). Keep a
+    loud warning so the owner frees space before writes fail."""
+
+    def _statvfs(self, free_mb, total_mb):
+        import types
+        frag = 4096
+        return types.SimpleNamespace(
+            f_frsize=frag, f_bsize=frag,
+            f_blocks=total_mb * 1024 * 1024 // frag,
+            f_bavail=free_mb * 1024 * 1024 // frag)
+
+    def test_quiet_when_disk_healthy(self):
+        import unittest.mock as mock
+        with mock.patch.object(os, "statvfs", return_value=self._statvfs(800, 1024)):
+            self.assertEqual(server._disk_warning(), "")
+
+    def test_warns_when_free_mb_low(self):
+        import unittest.mock as mock
+        with mock.patch.object(os, "statvfs", return_value=self._statvfs(30, 1024)):
+            self.assertIn("DISK LOW", server._disk_warning())
+            self.assertIn("30 MB", server._disk_warning())
+
+    def test_warns_when_free_pct_low(self):
+        # 20 GB free but that is only ~2% of a 1 TB disk -> warn on percent.
+        import unittest.mock as mock
+        with mock.patch.object(os, "statvfs", return_value=self._statvfs(20000, 1048576)):
+            self.assertIn("DISK LOW", server._disk_warning())
+            self.assertIn("20000 MB", server._disk_warning())
+
+
 class FakeURL:
     """Assign responses per URL prefix; __call__ plays the role of _urlopen."""
     def __init__(self, routes):
