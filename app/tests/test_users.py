@@ -153,7 +153,7 @@ class TestUsersServer(unittest.TestCase):
         conn.close()
         return status, loc, data, (new_cookie.split(";")[0] if new_cookie else "")
 
-    def _register(self, email, pw="teampass-123", name="Team Member"):
+    def _register(self, email, pw="Teampass-123!", name="Team Member"):
         return self._raw("POST", "/admin/register",
                          body=json.dumps({"name": name, "email": email,
                                           "password": pw}),
@@ -191,7 +191,7 @@ class TestUsersServer(unittest.TestCase):
     def test_login_blocked_until_verified(self):
         email = "bob@team.example"
         self._register(email)
-        cookie, status = self._login(email, "teampass-123")
+        cookie, status = self._login(email, "Teampass-123!")
         self.assertEqual(status, 401)
         self.assertEqual(cookie, "")
 
@@ -209,7 +209,7 @@ class TestUsersServer(unittest.TestCase):
         self.assertEqual(st2, 200)
         self.assertIn("welcome aboard", pending.decode("utf-8"))
         # a normal login still works afterwards
-        cookie, status = self._login(email, "teampass-123")
+        cookie, status = self._login(email, "Teampass-123!")
         self.assertEqual(status, 200)
         self.assertTrue(cookie.startswith("pstore_admin="))
 
@@ -234,7 +234,7 @@ class TestUsersServer(unittest.TestCase):
         email = "carol2@team.example"
         self._register(email)
         self._raw("GET", self._last_verify_link(email))
-        cookie, status = self._login(email, "teampass-123")
+        cookie, status = self._login(email, "Teampass-123!")
         st, _, body = self._raw("GET", "/admin/pending", cookie=cookie)
         self.assertEqual(st, 200)
         self.assertIn("No tool access yet", body.decode("utf-8"))
@@ -255,7 +255,7 @@ class TestUsersServer(unittest.TestCase):
                                                  "roles": ["emailer"]}),
                                 cookie=self.owner_cookie, ctype="application/json")
         self.assertEqual(st, 200)
-        cookie, status = self._login(email, "teampass-123")
+        cookie, status = self._login(email, "Teampass-123!")
         self.assertEqual(status, 200)
         st, _, body = self._raw("GET", "/admin/emails", cookie=cookie)
         self.assertEqual(st, 200)
@@ -279,7 +279,7 @@ class TestUsersServer(unittest.TestCase):
                   body=json.dumps({"action": "set_roles", "id": uid,
                                    "roles": ["social", "seo"]}),
                   cookie=self.owner_cookie, ctype="application/json")
-        cookie, _ = self._login(email, "teampass-123")
+        cookie, _ = self._login(email, "Teampass-123!")
         st, _, _ = self._raw("GET", "/admin/social", cookie=cookie)
         self.assertEqual(st, 200)
         st, _, _ = self._raw("GET", "/admin/seoengines", cookie=cookie)
@@ -289,6 +289,28 @@ class TestUsersServer(unittest.TestCase):
         st, _, body = self._raw("GET", "/admin/pending", cookie=cookie)
         html = body.decode("utf-8")
         self.assertIn("Social publisher", html)
+
+    def test_team_dashboard_is_dedicated_page(self):
+        # a team member with the dashboard function gets their own page
+        email = "frost@team.example"
+        self._register(email)
+        self._raw("GET", self._last_verify_link(email))
+        uid = self._user_row(email)["id"]
+        self._raw("POST", "/api/users",
+                  body=json.dumps({"action": "set_roles", "id": uid,
+                                   "roles": ["full"]}),
+                  cookie=self.owner_cookie, ctype="application/json")
+        cookie, _ = self._login(email, "Teampass-123!")
+        st, _, body = self._raw("GET", "/dashboard", cookie=cookie)
+        self.assertEqual(st, 200)
+        html = body.decode("utf-8")
+        self.assertIn("My dashboard", html)
+        self.assertIn("Assigned roles", html)
+        self.assertIn("/admin/logout", html)
+        # the owner dashboard stays the app UI, not the team page
+        st, _, body = self._raw("GET", "/dashboard", cookie=self.owner_cookie)
+        self.assertEqual(st, 200)
+        self.assertNotIn("My dashboard", body.decode("utf-8"))
         self.assertIn("SEO &amp; consoles", html)
 
     def test_disabled_user_loses_access_and_session(self):
@@ -300,7 +322,7 @@ class TestUsersServer(unittest.TestCase):
                   body=json.dumps({"action": "set_roles", "id": uid,
                                    "roles": ["full"]}),
                   cookie=self.owner_cookie, ctype="application/json")
-        cookie, _ = self._login(email, "teampass-123")
+        cookie, _ = self._login(email, "Teampass-123!")
         st, _, _ = self._raw("GET", "/dashboard", cookie=cookie)
         self.assertEqual(st, 200)
         self._raw("POST", "/api/users",
@@ -309,7 +331,7 @@ class TestUsersServer(unittest.TestCase):
                   cookie=self.owner_cookie, ctype="application/json")
         st, _, body = self._raw("GET", "/api/niches", cookie=cookie)
         self.assertEqual(st, 401)
-        _, status = self._login(email, "teampass-123")
+        _, status = self._login(email, "Teampass-123!")
         self.assertEqual(status, 401)
 
     def test_reset_password(self):
@@ -321,7 +343,7 @@ class TestUsersServer(unittest.TestCase):
                   body=json.dumps({"action": "reset_password", "id": uid,
                                    "password": "newpass-456"}),
                   cookie=self.owner_cookie, ctype="application/json")
-        _, status = self._login(email, "teampass-123")
+        _, status = self._login(email, "Teampass-123!")
         self.assertEqual(status, 401)
         cookie, status = self._login(email, "newpass-456")
         self.assertEqual(status, 200)  # verified, no roles yet -> pending
@@ -354,19 +376,19 @@ class TestUsersServer(unittest.TestCase):
         q = dict(urllib.parse.parse_qs(urllib.parse.urlsplit(link).query))
         st, _, body = self._raw("POST", "/admin/reset-password",
                                 body=json.dumps({"t": q["t"][0], "e": q["e"][0],
-                                                 "password": "freshpass-789"}),
+                                                 "password": "Freshpass-789!"}),
                                 ctype="application/json")
         self.assertEqual(st, 200)
         self.assertTrue(json.loads(body)["ok"])
         # old password dead, new one works
-        _, status = self._login(email, "teampass-123")
+        _, status = self._login(email, "Teampass-123!")
         self.assertEqual(status, 401)
-        cookie, status = self._login(email, "freshpass-789")
+        cookie, status = self._login(email, "Freshpass-789!")
         self.assertEqual(status, 200)
         # single-use: the same link can't set a password twice
         st, _, body = self._raw("POST", "/admin/reset-password",
                                 body=json.dumps({"t": q["t"][0], "e": q["e"][0],
-                                                 "password": "againpass-111"}),
+                                                 "password": "Againpass-111!"}),
                                 ctype="application/json")
         self.assertEqual(st, 400)
         self.assertIn("invalid, expired or already used", json.loads(body)["error"])
@@ -432,11 +454,60 @@ class TestUsersServer(unittest.TestCase):
         st, _, body = self._register("owner@test.example")
         self.assertEqual(st, 400)
 
+    def _regerr(self, **kw):
+        data_isolation = kw.pop("data_isolation", "pol")
+        d = {"name": "Jane Doe",
+             "email": ("%s@team.example" % data_isolation),
+             "password": "Polished-42!"}
+        d.update(kw)
+        st, _, body = self._raw("POST", "/admin/register",
+                                body=json.dumps(d), ctype="application/json")
+        security.REGISTER_LIMITER.clear("reg|" + self.IPKEY)
+        return st, json.loads(body) if body else {}
+
+    def test_register_rejects_bad_name_and_email(self):
+        cases = [({"name": ""}, "name", "Enter your name"),
+                 ({"name": "X"}, "name", "2 characters"),
+                 ({"name": "J" * 121}, "name", "120 characters"),
+                 ({"name": "<script>"}, "name", "unsupported"),
+                 ({"name": "12345"}, "name", "letter"),
+                 ({"email": "nope"}, "email", "valid email"),
+                 ({"email": "a@b"}, "email", "valid email"),
+                 ({"email": "a..b@team.example"}, "email", "valid email")]
+        for i, ent in enumerate(cases):
+            kw, field, frag = ent
+            st, j = self._regerr(data_isolation=("pol%d" % i), **kw)
+            self.assertEqual(st, 400, kw)
+            self.assertEqual(j.get("field"), field, kw)
+            self.assertIn(frag, j["error"])
+
+    def test_register_enforces_password_policy(self):
+        cases = [({"password": "short"}, "8 characters"),
+                 ({"password": "alllower1!"}, "uppercase letter"),
+                 ({"password": "PASSWORD1!"}, "lowercase letter"),
+                 ({"password": "Onlyletters!!"}, "a number"),
+                 ({"password": "NoSymbol1a"}, "symbol"),
+                 ({"password": "password1"}, "less common"),
+                 ({"password": "12345678"}, "less common"),
+                 ({"password": "aaaaaa11"}, "4 different"),
+                 ({"name": "Team", "password": "Teampass-42!"}, "name or email")]
+        for i, ent in enumerate(cases):
+            kw, frag = ent
+            st, j = self._regerr(data_isolation=("en%d" % i), **kw)
+            self.assertEqual(st, 400, kw)
+            self.assertEqual(j.get("field"), "password", kw)
+            self.assertIn(frag, j["error"])
+
+    def test_register_accepts_policy_strong_password(self):
+        st, j = self._regerr(data_isolation="acc")
+        self.assertEqual(st, 200)
+        self.assertTrue(j["ok"])
+
     def test_users_api_is_owner_only(self):
         email = "joe@team.example"
         self._register(email)
         self._raw("GET", self._last_verify_link(email))
-        cookie, _ = self._login(email, "teampass-123")
+        cookie, _ = self._login(email, "Teampass-123!")
         st, _, body = self._raw("GET", "/api/users", cookie=cookie)
         self.assertEqual(st, 403)
         st, _, body = self._raw("GET", "/admin/users", cookie=cookie)
@@ -515,7 +586,7 @@ class TestUsersServer(unittest.TestCase):
                   body=json.dumps({"action": "set_roles", "id": uid,
                                    "roles": ["emailer"]}),
                   cookie=self.owner_cookie, ctype="application/json")
-        cookie, _ = self._login(email, "teampass-123")
+        cookie, _ = self._login(email, "Teampass-123!")
         st, _, body = self._raw("GET", "/admin/emails", cookie=cookie)
         html = body.decode("utf-8")
         self.assertIn("Email Studio", html)
