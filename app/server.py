@@ -8367,7 +8367,7 @@ async function go(){
   finally{b.disabled=false;}
 }
 </script></body></html>"""
-        return self._send(200, html, "text/html")
+        return self._send(200, html.encode("utf-8"), "text/html")
 
     def _recover_export(self, q):
         if not self._authed() or self._session_uid() is not None:
