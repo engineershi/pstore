@@ -94,11 +94,17 @@ def build_pdf():
         "page to IndexNow for near-instant Bing and Google discovery. Confirm the "
         "key is live on the Keys page (/keys).")
     doc.paragraph(
-        "To also reach Google, Bing and Yandex at full speed, open the Search "
-        "Engines hub (/admin/seoengines). Paste each engine's verification token "
-        "on the Keys page (or set them via env), then click 'Submit sitemap'. "
-        "The hub also shows per-engine referral traffic collected by your own "
-        "beacon — no external token needed for that view.")
+        "To reach Google, Bing and Yandex at full speed, open the Search "
+        "Engines hub (/admin/seoengines): connect Google Search Console and "
+        "Yandex via OAuth, paste your Bing API key, then Fetch stats pulls real "
+        "clicks and impressions per engine and Submit sitemap re-pings it. Until "
+        "a console is connected, the Traffic panel shows referral-attributed page "
+        "views and clicks from your own on-site beacon.")
+    doc.paragraph(
+        "Own the site everywhere it is listed: claim your domain with Google, "
+        "Bing, Yandex and Pinterest from the Keys page (/keys) - paste each "
+        "engine's verification token (or the meta tag it gives you) and every "
+        "public page emits the matching meta tag so the claim verifies.")
     doc.page_break()
 
     doc.heading("Step 3 — Capture the email")
@@ -167,6 +173,12 @@ def build_pdf():
         "Facebook, LinkedIn, Instagram, Pinterest and Threads. Each kit has a "
         "platform caption, hashtags and a tracked link with its own code, so every "
         "post's clicks are counted individually in Analytics.")
+    doc.paragraph(
+        "Marketing boosts on the Workbench (/tool) mint a real, UTM-tracked "
+        "campaign per promo angle: Run persists it, folds in the SEM long-tail "
+        "phrases, warms the lead-magnet PDF and pings IndexNow; the Social page "
+        "can publish it as a live, attributed Boost post. Each boost keeps a "
+        "stable link, so its clicks aggregate over time.")
     doc.page_break()
 
     doc.heading("Step 7-8 — Launch and keep data fresh")
@@ -188,7 +200,10 @@ def build_pdf():
     doc.bullets([
         "Set the affiliate tag and SMTP first — nothing else matters until those work.",
         "Stack traffic: SEO (compounding) + social (fast) + email (cheap) + QR and landing pages (offline).",
-        "Watch Analytics and double down on the most-clicked products and best sources.",
+        "Watch Analytics and double down on the most-clicked products and best "
+        "sources - it also shows page views and lead-page interactions (promo "
+        "taps, countdown hits, sticky CTA clicks, PDF downloads) so you can tune "
+        "the landing page itself, not just the links.",
         "Choose niches like a fund: high demand, lower saturation first.",
         "Comply always: opted-in emails, FTC/Associates disclosure, direct tagged links.",
     ])
@@ -197,6 +212,49 @@ def build_pdf():
         "SEO audit, note the SEM long-tails, Launch marketing, generate the ebook, "
         "publish one or two social posts, dry-run then send the emails, confirm "
         "auto-refresh is on, and paste the text links and QR code anywhere relevant.")
+    doc.page_break()
+
+    doc.heading("Team access and roles")
+    doc.paragraph(
+        "pstore runs as a small team. From the login page a colleague requests "
+        "an account, signs up with their work email and receives a branded "
+        "confirmation email - the account stays unverified until they click that "
+        "link, which activates it and signs them straight in. Colleagues with "
+        "tool access land on the Dashboard; everyone else lands on a welcome "
+        "page until the owner grants roles.")
+    doc.bullets([
+        "Every tool belongs to one function (Idea tools, Email Studio, Social, "
+        "SEO and consoles, Content, Marketing and ROI, Analytics, Keys). A role "
+        "is a custom matrix of functions; a user can hold several roles and "
+        "their access is the union, enforced server-side on pages and their "
+        "APIs alike.",
+        "Only the owner manages users and roles (/admin/users) - create or "
+        "disable users, change roles, reset passwords. Disabling an account "
+        "kills its sessions instantly.",
+        "Team members edit their own profile on the Dashboard (display name, or "
+        "a new password with the same policy rules as signup); their session "
+        "survives a name change.",
+        "Forgot your password? The login page emails a secure, single-use reset "
+        "link (valid one hour) that never leaks whether an email has an account.",
+    ])
+    doc.page_break()
+
+    doc.heading("Inbox - conversations, not just broadcasts")
+    doc.paragraph(
+        "Every send carries a unique tagged Reply-To (pstore+<subscriber-id>@"
+        "yourdomain), so when a customer replies the Email Studio Inbox tab "
+        "catches it. Either it polls your IMAP mailbox (IMAP_HOST / IMAP_USER / "
+        "IMAP_PASSWORD) every 60 seconds, or any forwarder can POST /api/cron/"
+        "inbox with your EMAIL_CRON_SECRET to trigger a pull on demand.")
+    doc.bullets([
+        "Each reply is linked to its subscriber: the tag in the Reply-To wins, "
+        "with a from-address match as fallback.",
+        "Open a message to read it, then Reply right from the studio - the "
+        "answer threads (Re:) in the customer's mail client.",
+        "Mark read/unread, archive or delete any message; the Studio's tabs "
+        "cover the whole lifecycle: Compose, Inbox, Subscribers, Drafts and "
+        "Sent (with cancel for still-scheduled mail).",
+    ])
     return doc.save()
 
 
