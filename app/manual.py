@@ -117,6 +117,15 @@ def _chapters():
             "Bing, Yandex and Pinterest from the Keys page (/keys) - paste each "
             "engine's verification token (or the meta tag it gives you) and every "
             "public page emits the matching meta tag so the claim verifies.")
+        doc.paragraph(
+            "Prove the tags are alive, not just written: on the Search Engines hub "
+            "(/admin/seoengines) pick a page and press 'Verify live tags'. pstore "
+            "fetches that page exactly like a crawler and checks every social and "
+            "search-engine header tag - og: and twitter: cards, canonical, robots, "
+            "each ownership meta, sitemap.xml and robots.txt - then really downloads "
+            "the og:image to confirm it resolves. Each tag turns green or red, so a "
+            "breakage (like a share card that no longer renders) shows up instantly "
+            "instead of silently hurting your previews and claims.")
         doc.page_break()
 
     def c5(doc, num, label, blurb):
@@ -583,6 +592,7 @@ def render_admin_manual(nav_html, totop_html):
 <h3 id="s2">4 · Step 2 — Rank on Google (SEO)</h3>
 <p>Open the <a class="tooltag" href="/admin/seo">🔍 SEO audit</a> and check the <b>site health strip</b> — every niche should be <i>indexable</i>. Fix red badges (title too long, missing description, no products). Then open <a class="tooltag" href="/admin/sem">🎯 SEM</a> for each niche: intent brief, long-tail keywords and people-also-ask prompts tell you exactly what to add to rank.</p>
 <p>Indexing is <b>automatic</b> — saving a niche pings IndexNow. Verify the key on <a class="tooltag" href="/keys">🔑 Keys</a>. For the three big consoles, open <a class="tooltag" href="/admin/seoengines">🔎 Engines</a>: connect Google Search Console or Yandex via OAuth, paste your Bing API key, then <b>Fetch stats</b> pulls real clicks/impressions per engine and <b>Submit sitemap</b> re-pings it. Until a console is connected, the Traffic panel shows referral-attributed page views + clicks from your own on-site beacon.</p>
+<p>Prove every <b>social and search-engine header tag</b> is active, not just written: on the Engines hub pick a page and press <b>Verify live tags</b>. pstore fetches the live page like a crawler and checks each og:/twitter: card, canonical, robots, ownership meta, sitemap.xml and robots.txt — then really downloads the og:image to confirm it resolves. Every tag turns <span style="color:#1e8e3e">green</span> or <span style="color:#c0392b">red</span>, so a broken share card or a token that never reached the live head shows up instantly.</p>
 
 <h3 id="s3">5 · Step 3 — Capture the email</h3>
 <p>Every niche page and the homepage already render an <b>opt-in form</b> that collects first name + email. The first name personalises every email (<i>"Hi Jane,"</i>) to lift open rates.</p>
