@@ -656,6 +656,26 @@ body:has(.totop.show) > header:first-of-type { scroll-margin-top: 0; }
 body.show-sticky footer { margin-bottom: 92px; }
 body.show-sticky .totop { bottom: 104px; }
 
+/* ---------- pagination ---------- */
+.pager { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 16px 0; }
+.pager a.pg {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 36px; height: 36px; padding: 0 13px; border-radius: 999px;
+  background: #fff; border: 1px solid var(--border);
+  color: var(--text); font-size: 13px; font-weight: 600; text-decoration: none;
+  transition: border-color 0.14s ease, color 0.14s ease, background 0.14s ease;
+}
+.pager a.pg:hover { border-color: var(--accent); color: var(--accent); background: #fff; }
+.pager a.pg.on {
+  background: linear-gradient(135deg, var(--grad-from), var(--grad-to));
+  border-color: transparent; color: #fff;
+  box-shadow: 0 5px 12px rgba(15, 139, 157, 0.28);
+}
+.pager a.pg.dim { opacity: 0.45; pointer-events: none; }
+.pager .pg-dots { padding: 0 2px; color: var(--muted); font-weight: 700; }
+form.nper { align-items: center; margin: 16px 0 0; }
+form.nper select { min-width: 180px; }
+
 /* ---------- homepage components ---------- */
 /* Quick-verdict band: decision-first picks above the fold. */
 .qband { background: linear-gradient(180deg, #f5f7fd, #fff); border-color: #dbe2f2; }

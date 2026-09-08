@@ -17,6 +17,7 @@ GET  /api/niches        -> list saved niches from sqlite
    POST /api/ai/config     -> activate a provider runtime (admin)
 """
 import datetime
+import hashlib
 import hmac
 import json
 import os
@@ -57,6 +58,24 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(ROOT, "static")
 DB = os.environ.get("PSTORE_DB", os.path.join(ROOT, "pstore.db"))
 PORT = int(os.environ.get("PORT", "8765"))
+
+# Content fingerprint for the stylesheet so every HTML page can cache-bust its
+# /style.css link —— new deploys reflect in the browser immediately (the file is
+# served with a CDN TTL, so without a fresh URL users would see stale CSS).
+try:
+    with open(os.path.join(STATIC, "style.css"), "rb") as _fh:
+        _STYLE_VERSION = hashlib.sha256(_fh.read()).hexdigest()[:10]
+except Exception:
+    _STYLE_VERSION = "0"
+
+
+def _stamp_style_version(data, ctype):
+    """Cache-bust every HTML page's /style.css link with the file fingerprint so
+    CSS edits show up right after deploy instead of lingering at the CDN edge."""
+    if "text/html" in ctype and b'href="/style.css"' in data:
+        data = data.replace(b'href="/style.css"',
+                            b'href="/style.css?v=' + _STYLE_VERSION.encode() + b'"')
+    return data
 
 
 def _ensure_db_file():
@@ -1219,6 +1238,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send(self, code, body, ctype="application/json; charset=utf-8"):
         data = body if isinstance(body, bytes) else json.dumps(body).encode("utf-8")
+        data = _stamp_style_version(data, ctype)
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
@@ -1236,6 +1256,7 @@ class Handler(BaseHTTPRequestHandler):
         free-tier cold start. Pages with A/B variants pass edge=False to keep the
         per-visitor headline intact."""
         data = body if isinstance(body, bytes) else body.encode("utf-8")
+        data = _stamp_style_version(data, ctype)
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
@@ -6311,15 +6332,21 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
                     badge = "<span class='badge' style='background:#fff6e0;color:#c77d00'>scheduled %s</span>" % \
                         seo._clean(p.get("scheduled_at") or "")
                     break
-            kit_cards.append(f"""<div class="sub soc-kit">
-<h3>📣 {seo._clean(kit['platform'])} <span class="who">· {seo._clean(kit['name'])}</span> {badge} <span class="who">· {hashing} click(s) on this post</span></h3>
-<textarea readonly rows="5">{seo._clean(kit['body'])}</textarea>
+            kit_cards.append(f"""<div class="soc-kit">
+<div class="soc-head">
+  <div>
+    <h3>📣 {seo._clean(kit['platform'])} <span class="who">· {seo._clean(kit['name'])}</span></h3>
+    <p class="clicks">{hashing} click(s) on this post</p>
+  </div>
+  {badge}
+</div>
+<textarea readonly rows="4">{seo._clean(kit['body'])}</textarea>
 <p class="key" title="Tracked link (UTM) — every share uses this exact URL">{seo._clean(kit['link'])}</p>
-<div class="row">
+<div class="soc-acts" role="group" aria-label="Post actions">
 <button class="warm soc-pub" data-kw="{seo._clean(keyword)}" data-platform="{seo._clean(kit['platform'])}">Publish now</button>
-<button class="soc-sched" data-kw="{seo._clean(keyword)}" data-platform="{seo._clean(kit['platform'])}">Schedule (24h)</button>
-<button class="soc-copy">Copy post</button>
-<a class="btn" target="_blank" rel="noopener" href="/social/{seo._clean(slug)}/{seo._clean(kit['utm_content'])}">View live ↗</a>
+<button class="ghost soc-sched" data-kw="{seo._clean(keyword)}" data-platform="{seo._clean(kit['platform'])}">Schedule (24h)</button>
+<button class="ghost soc-copy">Copy post</button>
+<a class="btn ghost soc-view" target="_blank" rel="noopener" href="/social/{seo._clean(slug)}/{seo._clean(kit['utm_content'])}">View live ↗</a>
 </div>
 </div>""")
         kit_html = "".join(kit_cards) if kit_cards else \
@@ -6359,8 +6386,18 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
 <title>Social — pstore</title><link rel="stylesheet" href="/style.css">
 <meta name="robots" content="noindex,nofollow">
 <style>
-.soc-kit textarea {{ width:100%; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; }}
-.soc-kit .key {{ margin:8px 0 0; word-break:break-all; }}
+.social-kits {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:16px; margin-top:16px; min-width:0; }}
+.soc-kit {{ background:#fff; border:1px solid var(--border,#e6e8ee); border-radius:18px; padding:20px; box-shadow:var(--shadow,#00000014); min-width:0; }}
+.soc-kit .soc-head {{ display:flex; justify-content:space-between; align-items:flex-start; gap:10px; flex-wrap:wrap; }}
+.soc-kit h3 {{ margin:0; font-size:16px; }}
+.soc-kit .who {{ font-size:12.5px; color:var(--muted,#667085); font-weight:600; }}
+.soc-kit .clicks {{ margin:3px 0 0; font-size:12.5px; color:var(--muted,#667085); }}
+.soc-kit .badge {{ white-space:nowrap; margin:0; }}
+.soc-kit textarea {{ width:100%; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; line-height:1.6; margin-top:14px; }}
+.soc-kit .key {{ margin:10px 0 0; word-break:break-all; background:var(--bg,#f4f7fb); border:1px solid var(--border,#e6e8ee); border-radius:999px; padding:7px 14px; font-size:12px; }}
+.soc-acts {{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-top:14px; }}
+.soc-acts > * {{ flex:0 0 auto; margin:0; white-space:nowrap; }}
+.soc-acts button, .soc-acts a.btn {{ min-height:38px; padding:0 16px; font-size:13px; }}
 </style>
 </head><body>
 <header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
@@ -6374,7 +6411,7 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
 <form class="row" method="get" action="/admin/social">
   <label>Niche <select name="keyword" onchange="this.form.submit()">{opts}</select></label>
 </form>
-<div class="cols">{kit_html}</div>
+<div class="cols social-kits">{kit_html}</div>
 <p id="out" class="msg"></p>
 </section>
 <section class="card"><h2>✅ Published posts &amp; clicks</h2>
@@ -8604,7 +8641,13 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
 <title>Price-drop engine — pstore</title><link rel="stylesheet" href="/style.css">
 <meta name="robots" content="noindex,nofollow">
 <style>table{{width:100%;border-collapse:collapse;margin-top:8px}}td,th{{text-align:left;padding:6px 8px;
-border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}</style></head><body>
+border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
+.actions{{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:10px}}
+#msg{{display:block;margin-top:10px;min-height:18px}}
+#out ul{{list-style:none;padding:0;margin:0;display:grid;gap:8px}}
+#out li{{background:var(--bg,#f4f7fb);border:1px solid var(--border,#e6e8ee);border-radius:12px;padding:10px 14px;font-size:13px}}
+#out li .p-new{{color:#b12704;font-weight:800}}
+</style></head><body>
 <header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
 <div class="hero"><h1>Price-drop <span>deal engine.</span></h1>
 <p class="tagline">Watch ranked products, flag real price declines, and push a scarcity 'buy now' email + banner.</p></div>
@@ -8614,9 +8657,11 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}</s
 <p class="hint">Baselines are stored on first sight. A drop of &ge; {pricedrop.DEFAULT_MIN_DROP_PCT}% and &ge; ${pricedrop.DEFAULT_MIN_DROP_ABS} counts as a real deal.</p>
 <table><thead><tr><th>ASIN</th><th class="ct">Baseline</th></tr></thead><tbody>{rows}</tbody></table>
 <p class="hint" style="margin-top:12px"><b>Run a check</b> to re-scrape current prices and flag who just dropped:</p>
+<div class="actions" role="group" aria-label="Price-drop actions">
 <button class="warm" onclick="runCheck()">🔄 Run price-drop check</button>
-<button class="warm" onclick="sendDrops()" style="margin-left:8px">📨 Email hot + converted leads</button>
-<span id="msg" class="msg"></span></section>
+<button class="ghost" onclick="sendDrops()">📨 Email hot + converted leads</button>
+</div>
+<p id="msg" class="msg"></p></section>
 <section class="card" id="out"><h2>✨ Deals right now</h2><p class="hint">Nothing yet — run a check to see drops.</p></section>
 <script>
 {js}
@@ -10307,8 +10352,70 @@ if ($("r_save")) $("r_save").onclick = async () => {{
         winner by conversion, not vibes."""
         keyword = (q.get("keyword") or [""])[0].strip()
         niches = self._all_niches()
+        # ----- list pagination (10/20/30 niches per page) so the three A/B
+        # editors below stay fast even with a large niche set -----
+        total = len(niches)
+        try:
+            per_choice = (q.get("per") or ["10"])[0].strip() or "10"
+            per = int(per_choice)
+        except (TypeError, ValueError):
+            per = 10
+        if per not in (10, 20, 30):
+            per = 10
+        try:
+            page = max(1, int((q.get("page") or ["1"])[0].strip() or "1"))
+        except (TypeError, ValueError):
+            page = 1
+        npages = max(1, (total + per - 1) // per)
+        page = min(page, npages)
+        view = niches[(page - 1) * per: page * per]
+
+        def _vlink(pn):
+            parts = [("page", str(min(max(pn, 1), npages))), ("per", str(per))]
+            if keyword:
+                parts.append(("keyword", keyword))
+            return "/admin/variants?" + urllib.parse.urlencode(parts)
+
+        def _pager():
+            if npages <= 1:
+                return ""
+            if npages <= 9:
+                seq = list(range(1, npages + 1))
+            else:
+                seq = [1]
+                if page > 3:
+                    seq.append("...")
+                for pn in range(max(2, page - 1), min(npages - 1, page + 1) + 1):
+                    seq.append(pn)
+                if page < npages - 2:
+                    seq.append("...")
+                seq.append(npages)
+            bits = ['<nav class="pager" aria-label="Pagination">']
+            bits.append('<a class="pg%s" href="%s">&#8249; Prev</a>'
+                        % ("" if page > 1 else " dim", _vlink(page - 1)))
+            for pn in seq:
+                if pn == "...":
+                    bits.append('<span class="pg-dots">…</span>')
+                else:
+                    bits.append('<a class="pg%s" href="%s">%d</a>'
+                                % (" on" if pn == page else "", _vlink(pn), pn))
+            bits.append('<a class="pg%s" href="%s">Next &#8250;</a>'
+                        % ("" if page < npages else " dim", _vlink(page + 1)))
+            bits.append('</nav>')
+            return "".join(bits)
+
+        def _per_select():
+            opts = "".join(
+                '<option value="%d"%s>%d niches / page</option>'
+                % (p, " selected" if p == per else "", p) for p in (10, 20, 30))
+            kw = ('<input type="hidden" name="keyword" value="%s">'
+                  % seo._clean(keyword)) if keyword else ""
+            return ('<form class="row nper" method="get" action="/admin/variants">%s'
+                    '<select name="per" onchange="this.form.submit()">%s</select> '
+                    '<span class="hint">%d niche(s) total</span></form>'
+                    % (kw, opts, total))
         row = []
-        for n in niches:
+        for n in view:
             s = seo._slugify(n["keyword"])
             if keyword and s != seo._slugify(keyword):
                 continue
@@ -10342,7 +10449,7 @@ if ($("r_save")) $("r_save").onclick = async () => {{
             row = ['<p class="hint">No niches yet — mine one on the dashboard first.</p>']
         # ----- email-subject A/B editor (per niche + sequence step) -----
         subjects_row = []
-        for n in niches:
+        for n in view:
             s = seo._slugify(n["keyword"])
             if keyword and s != seo._slugify(keyword):
                 continue
@@ -10377,7 +10484,7 @@ if ($("r_save")) $("r_save").onclick = async () => {{
                          "actually pulls reads, not just sends.</p>" + "".join(subjects_row))
         # ----- social-caption A/B editor (per niche + platform) -----
         captions_row = []
-        for n in niches:
+        for n in view:
             s = seo._slugify(n["keyword"])
             if keyword and s != seo._slugify(keyword):
                 continue
@@ -10420,9 +10527,12 @@ if ($("r_save")) $("r_save").onclick = async () => {{
 <button id="autoclean" class="warm">Run auto-cleanup now</button>
 <p id="cleanmsg" class="msg"></p></section>
 {'<section class="card"><p class="hint">Filtering by keyword: %s. <a href="/admin/variants">Show all →</a></p></section>' % seo._clean(keyword) if keyword else ''}
+{_per_select()}
+{_pager()}
 {''.join(row)}
 {subjects_html}
 {captions_html}
+{_pager()}
 </main>
 <footer><p>Leave a variant empty to disable it. The control (default) headline is always shown when no variants are set. Winner-takes-CTA after you see enough clicks.</p></footer>
 <script>
