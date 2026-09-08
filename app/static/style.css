@@ -88,7 +88,7 @@ header h1 a { text-decoration: none; }
   max-width: 560px;
 }
 .hero-badges { margin-top: 14px; }
-nav {
+nav:has(.navgroup) {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
   gap: 14px 22px;
@@ -99,6 +99,24 @@ nav {
   border-radius: 20px;
   padding: 18px 20px;
   box-shadow: var(--shadow);
+}
+/* Public site nav — slim pill row (masthead style, matches homepage .chip). */
+nav:not(:has(.navgroup)) {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  margin-top: 14px; padding: 0;
+  background: none; border: none; border-radius: 0; box-shadow: none;
+}
+nav:not(:has(.navgroup)) a:not(.chip) {
+  display: inline-flex; align-items: center;
+  padding: 7px 14px; border-radius: 999px;
+  background: rgba(255, 255, 255, 0.86);
+  border: 1px solid var(--border);
+  color: var(--text); font-weight: 600; font-size: 13px;
+  text-decoration: none;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+nav:not(:has(.navgroup)) a:not(.chip):hover {
+  background: #fff; border-color: var(--accent); color: var(--accent);
 }
 nav .navgroup { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 nav .titles {
@@ -611,9 +629,9 @@ table.plain tr:hover td { background: #f4fafb; }
 ::-webkit-scrollbar-thumb:hover { background-color: var(--accent); }
 ::-webkit-scrollbar-track { background: transparent; }
 
-/* Sticky top nav so the toolbar stays reachable while a long list scrolls. */
-nav { position: sticky; top: 0; z-index: 50; background: rgba(244, 247, 251, 0.90); backdrop-filter: blur(8px); margin-top: 14px; }
-body > header nav { margin-left: 0; margin-right: 0; }
+/* Sticky top admin nav so the toolbar stays reachable while a long list scrolls. */
+nav:has(.navgroup) { position: sticky; top: 0; z-index: 50; background: rgba(244, 247, 251, 0.90); backdrop-filter: blur(8px); margin-top: 14px; }
+body > header nav:has(.navgroup) { margin-left: 0; margin-right: 0; }
 /* Keep anchor targets clear of the sticky nav on in-page jumps. */
 [id] { scroll-margin-top: 74px; }
 
@@ -632,6 +650,11 @@ body > header nav { margin-left: 0; margin-right: 0; }
 }
 .totop.show { opacity: 1; transform: translateY(0); pointer-events: auto; }
 body:has(.totop.show) > header:first-of-type { scroll-margin-top: 0; }
+
+/* Sticky conversion bar: reserve clearance so it never covers the site footer
+   links or collides with the back-to-top pill when fully scrolled. */
+body.show-sticky footer { margin-bottom: 92px; }
+body.show-sticky .totop { bottom: 104px; }
 
 /* ---------- homepage components ---------- */
 /* Quick-verdict band: decision-first picks above the fold. */

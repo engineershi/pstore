@@ -150,6 +150,7 @@ def _style_css(style):
     display:none; justify-content:center; }}
   body.show-sticky .sticky-cta {{ display:flex; }}
   .sticky-cta .cta {{ margin:0; width:100%; max-width:520px; font-size:16px; padding:15px 22px; }}
+  body.show-sticky .wrap {{ margin-bottom: 92px; }}
   /* reveal-on-scroll */
   .reveal {{ opacity:0; transform:translateY(14px); transition:opacity .5s ease, transform .5s ease; }}
   .reveal.in {{ opacity:1; transform:none; }}

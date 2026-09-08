@@ -4247,6 +4247,8 @@ pre.preview{white-space:pre-wrap;word-break:break-word;background:#f8fafc;border
 .tblflow{overflow-x:auto}
 #traf{min-width:620px}
 .stengx .eng-grid h2{font-size:17px}
+.stengx .features{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+.stengx .feature h3{overflow-wrap:anywhere;word-break:break-word;font-size:15px;line-height:1.35}
 .stengx .hero h1{font-size:clamp(24px,6vw,40px)}
 @media (max-width: 620px){
  .stengx .row{gap:8px}
@@ -4274,7 +4276,8 @@ pre.preview{white-space:pre-wrap;word-break:break-word;background:#f8fafc;border
   <p id="traffic-msg" class="msg"></p>
  </section>
  <section class="card"><h2>🩺 On-site health</h2>
-  <div class="row"><div class="feature"><h3 id="h-host">—</h3><p class="hint">host</p></div>
+  <div class="features">
+   <div class="feature"><h3 id="h-host">—</h3><p class="hint">host</p></div>
    <div class="feature"><h3 id="h-sitemap">—</h3><p class="hint">sitemap</p></div>
    <div class="feature"><h3 id="h-robots">—</h3><p class="hint">robots</p></div></div>
  </section>
