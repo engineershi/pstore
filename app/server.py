@@ -304,7 +304,7 @@ function authPwStrength(pw,unmet){
   return {label:"", pct:0, cls:""};
 }
 function authChecklistPw(pw){
-  const def={len:!!pw, lower:/[a-z]/.test(pw), upper:/[A-Z]/.test(pw),
+  const def={len:pw.length>=8, lower:/[a-z]/.test(pw), upper:/[A-Z]/.test(pw),
     num:/\d/.test(pw), sym:/[^\w]/.test(pw), four:new Set(pw).size>=4};
   const keys=["len","lower","upper","num","sym","four"];
   for(const k of keys){
