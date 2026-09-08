@@ -947,6 +947,13 @@ class TestRoutes(unittest.TestCase):
             seo._PINTEREST_SITE_VERIFICATION_RUNTIME = None
             seo.set_pinterest_site_verification("p:domain_verify: tokPIN123")
             self.assertEqual(seo.pinterest_site_verification(), "tokPIN123")
+            # the /keys/site/pinterest page shows THE pinterest token, not the
+            # Google one the generic site branch used to render
+            st, _, body = self._get("/keys/site/pinterest")
+            self.assertEqual(st, 200)
+            html = body.decode("utf-8", "replace")
+            self.assertIn("tokPIN123", html)
+            self.assertNotIn('name="google-site-verification"', html)
         finally:
             seo._PINTEREST_SITE_VERIFICATION_RUNTIME = saved
 

@@ -4778,7 +4778,13 @@ $("key").addEventListener("keydown", e => {{ if (e.key === "Enter") $("save").on
                 cur = indexnow.key()
                 masked = cur or "(no key set)"
             else:
-                cur = seo.google_site_verification()
+                site_getter = {
+                    "gsc": seo.google_site_verification,
+                    "bing": seo.bing_site_verification,
+                    "yandex": seo.yandex_site_verification,
+                    "pinterest": seo.pinterest_site_verification,
+                }.get(entry_id)
+                cur = site_getter() if site_getter else ""
                 masked = cur or "(no key set)"
         elif group_id == "market":
             if entry_id == "affiliate":
