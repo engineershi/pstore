@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 import threading
 import unittest
 import urllib.parse
@@ -416,6 +417,46 @@ class TestSocialSuite(unittest.TestCase):
         self.assertEqual(st, 200)
         self.assertTrue(ctype.startswith("image/svg+xml"))
         self.assertIn(b"Best picks, ranked fresh", data)
+
+    def test_og_png_prewarm_caches_to_disk(self):
+        saved = server.OG_CACHE_DIR
+        tmp = tempfile.mkdtemp(prefix="ogcache_")
+        try:
+            server.OG_CACHE_DIR = tmp
+            server._prewarm_og_pngs()
+            path = os.path.join(tmp, "keto-snacks.png")
+            self.assertTrue(os.path.exists(path), "prewarm must persist the real card")
+            with open(path, "rb") as f:
+                disk = f.read()
+            self.assertTrue(disk.startswith(b"\x89PNG\r\n\x1a\n"))
+            st, _, ctype, data = self._raw("/og/keto-snacks.png")
+            self.assertEqual(st, 200)
+            self.assertEqual(data, disk, "endpoint serves the exact prewarmed bytes")
+        finally:
+            server.OG_CACHE_DIR = saved
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_og_png_served_from_disk_after_restart(self):
+        # Simulate a fresh process (empty in-memory cache): the persistent
+        # disk cache must answer instantly with identical bytes.
+        saved = server.OG_CACHE_DIR
+        saved_cache = dict(server._PNG_CACHE)
+        tmp = tempfile.mkdtemp(prefix="ogcache_")
+        try:
+            server.OG_CACHE_DIR = tmp
+            server._cache_og_png_card("keto-snacks")
+            server._PNG_CACHE.clear()
+            with open(os.path.join(tmp, "keto-snacks.png"), "rb") as f:
+                disk = f.read()
+            st, _, ctype, data = self._raw("/og/keto-snacks.png")
+            self.assertEqual(st, 200)
+            self.assertTrue(ctype.startswith("image/png"))
+            self.assertEqual(data, disk)
+        finally:
+            server.OG_CACHE_DIR = saved
+            server._PNG_CACHE.clear()
+            server._PNG_CACHE.update(saved_cache)
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def test_og_favicon_png_served(self):
         st, _, ctype, data = self._raw("/og/favicon.png")

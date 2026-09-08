@@ -362,6 +362,109 @@ _SESSIONS = {}  # token -> monotonic expiry
 _EBOOKS = {}  # keyword -> build_ebook() dict, LRU-ish (capped below)
 _SOCIAL_WEBHOOK = os.environ.get("SOCIAL_WEBHOOK", "")  # optional real-posting hook
 _PNG_CACHE = {}  # slug -> raster og card bytes (pure-Python render, capped)
+OG_CACHE_DIR = os.environ.get("PSTORE_OG_CACHE") or None  # persistent /og/*.png cache
+
+
+def _og_cache_dir():
+    """Directory for the persistent og-card PNG cache. Env override wins;
+    otherwise a data disk if present, else the app root. Computed once so the
+    boot prewarmer and the request handler share one location."""
+    global OG_CACHE_DIR
+    if OG_CACHE_DIR is None:
+        try:
+            base = ("/data/og-cache" if os.path.isdir("/data")
+                    else os.path.join(ROOT, ".og-cache"))
+            os.makedirs(base, exist_ok=True)
+            OG_CACHE_DIR = base
+        except Exception:
+            OG_CACHE_DIR = os.path.join(ROOT, ".og-cache")
+    return OG_CACHE_DIR
+
+
+def _render_og_png(slug):
+    """Render one raster share card (real niche card, favicon, or the generic
+    brand fallback) as PNG bytes, or None. Pure function shared by the request
+    handler and the background prewarmer so /og/<slug>.png never has to render
+    on the request path in steady state."""
+    try:
+        if slug == "favicon":
+            try:
+                return social.favicon_png()
+            except Exception:
+                return None
+        conn = _db()
+        try:
+            rows = conn.execute("SELECT keyword, products FROM niches").fetchall()
+        finally:
+            conn.close()
+        for r in rows:
+            try:
+                if slug != seo._slugify(r["keyword"]):
+                    continue
+                items = json.loads(r["products"] or "[]")
+                pick = market_engine.pick_for_buyers(items)
+                title = (pick or {}).get("title") or ("Best " + r["keyword"])
+                stars = (pick or {}).get("stars")
+                reviews = (pick or {}).get("reviews")
+                return social.og_png(slug, r["keyword"], title, stars, reviews)
+            except Exception:
+                continue
+        try:
+            return social.og_png(slug, slug.replace("-", " ").title() or "Niche",
+                                 "Best picks, ranked fresh", None, None)
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def _cache_og_png_card(slug):
+    """Render + persist one share card to disk and memory. Idempotent and
+    synchronous so callers (handler, prewarmer, tests) get deterministic state."""
+    card = _render_og_png(slug)
+    if card is None:
+        return None
+    try:
+        path = os.path.join(_og_cache_dir(), "%s.png" % slug)
+        with open(path, "wb") as f:
+            f.write(card)
+    except Exception:
+        pass
+    with _lock:
+        if len(_PNG_CACHE) >= 48:
+            try:
+                _PNG_CACHE.pop(next(iter(_PNG_CACHE)))
+            except Exception:
+                pass
+        _PNG_CACHE[slug] = card
+    return card
+
+
+def _warm_og_png(slug):
+    """Kick a background render+cache for one share card (niche save/refresh)."""
+    threading.Thread(target=lambda: _cache_og_png_card(slug), daemon=True).start()
+
+
+def _prewarm_og_pngs():
+    """Boot-time warm: render every saved niche's share card plus favicon and
+    the home generic card into the persistent cache, so the first /og/*.png
+    request after a deploy is an instant cache read instead of a slow render
+    that can trip the edge/gateway."""
+    try:
+        slugs = ["favicon", "home"]
+        conn = _db()
+        try:
+            for r in conn.execute("SELECT keyword FROM niches"):
+                try:
+                    slugs.append(seo._slugify(r["keyword"]))
+                except Exception:
+                    continue
+        finally:
+            conn.close()
+        for s in slugs:
+            _cache_og_png_card(s)
+    except Exception:
+        pass
 _CRON_SECRET = os.environ.get("EMAIL_CRON_SECRET", "")  # keyed /api/cron/send trigger
 _AUTOSEND_HOURS = [int(h) for h in (os.environ.get("AUTOSEND_HOURS") or "").split(",")
                    if h.strip().isdigit()]  # UTC hours the sequence auto-sends (empty=off)
@@ -606,6 +709,10 @@ def _refresh_niche(keyword):
                  data.get("score"), data.get("saturation"), keyword))
             conn.commit()
             conn.close()
+        try:
+            _warm_og_png(seo._slugify(keyword or ""))
+        except Exception:
+            pass
         return {"status": "ok", "keyword": keyword,
                 "products": len(data.get("products") or []),
                 "score": data.get("score"), "saturation": data.get("saturation")}
@@ -3557,6 +3664,10 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             nid = cur.lastrowid
             conn.close()
         self._push_indexnow(body.get("keyword"))
+        try:
+            _warm_og_png(seo._slugify(body.get("keyword") or ""))
+        except Exception:
+            pass
         # auto-build long-tail pages under the fresh niche so the plain dashboard
         # "save" immediately has indexable depth (same as the one-click suggest
         # build). Off unless explicitly disabled via setting.
@@ -6205,47 +6316,23 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
 
     def _og_image_png(self, slug):
         """Raster 1200x630 share card at /og/<slug>.png — the same layout as the
-        SVG card but a real PNG so Pinterest/Twitter/Facebook render it. Renders
-        once per slug (in-memory cache, capped) to hold the pure-Python cost.
+        SVG card but a real PNG so Pinterest/Twitter/Facebook render it. Served
+        from the persistent disk cache first, then memory, then rendered — so a
+        request never blocks on the pure-Python render cost in steady state.
         /og/favicon.png renders the small brand icon instead."""
-        with _lock:
-            hit = _PNG_CACHE.get(slug)
-        if hit is None:
-            card = None
-            if slug == "favicon":
-                try:
-                    card = social.favicon_png()
-                except Exception:
-                    card = None
-            else:
-                for n in self._all_niches():
-                    try:
-                        if slug != seo._slugify(n["keyword"]):
-                            continue
-                        items = n["products"] or []
-                        pick = market_engine.pick_for_buyers(items)
-                        title = (pick or {}).get("title") or ("Best " + n["keyword"])
-                        stars = (pick or {}).get("stars")
-                        reviews = (pick or {}).get("reviews")
-                        card = social.og_png(slug, n["keyword"], title, stars, reviews)
-                        break
-                    except Exception:
-                        continue
-            if card is None:
-                try:
-                    card = social.og_png(slug, slug.replace("-", " ").title() or "Niche",
-                                         "Best picks, ranked fresh", None, None)
-                except Exception:
-                    card = None
-            if card is None:
-                return self._send(404, {"error": "og image not found"})
+        card = None
+        try:
+            with open(os.path.join(_og_cache_dir(), "%s.png" % slug), "rb") as f:
+                card = f.read()
+        except Exception:
+            pass
+        if card is None:
             with _lock:
-                if len(_PNG_CACHE) >= 48:
-                    try:
-                        _PNG_CACHE.pop(next(iter(_PNG_CACHE)))
-                    except Exception:
-                        pass
-                _PNG_CACHE[slug] = card
+                card = _PNG_CACHE.get(slug)
+        if card is None:
+            card = _cache_og_png_card(slug)
+        if card is None:
+            return self._send(404, {"error": "og image not found"})
         self.send_response(200)
         self.send_header("Content-Type", "image/png")
         self.send_header("Cache-Control", "public, max-age=3600")
@@ -11311,6 +11398,8 @@ def main():
                             daemon=True)
     warm.start()
     print("admin Grow payloads: pre-warming in background (autosuggest + suggest engine)")
+    threading.Thread(target=_prewarm_og_pngs, name="warm-og-pngs", daemon=True).start()
+    print("og share-card PNGs: pre-warming in background (niche + favicon + home)")
     if _REFRESH_INTERVAL_SEC > 0:
         threading.Thread(target=_auto_refresh_loop, daemon=True).start()
         print("niche auto-refresh: every %ds, stale after %dm, %d/cycle"
