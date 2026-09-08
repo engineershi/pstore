@@ -78,6 +78,156 @@ def _stamp_style_version(data, ctype):
     return data
 
 
+# ---------------------------------------------------------- live head-tag check
+_TITLE_RX = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.S)
+_CANON_RX = re.compile(r'<link[^>]*\brel="canonical"[^>]*\bhref="([^"]+)"[^>]*>',
+                       re.IGNORECASE)
+_META_RX = re.compile(
+    r'<meta(?=[^>]*\b(?:name|property)="([^"]+)")(?=[^>]*\bcontent="([^"]+)")'
+    r'[^>]*>', re.IGNORECASE)
+
+
+def _headcheck_fetch(url, cap=65536, timeout=10):
+    """Crawler-style GET of a page on our own origin. ``cap`` bounds the body we
+    keep (image probes only need the header + first bytes). Never raises."""
+    try:
+        req = urllib.request.Request(url, method="GET", headers={
+            "User-Agent": "pstore-headcheck/1.0", "Accept": "*/*"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = getattr(resp, "status", 200)
+            ctype = (resp.headers.get("Content-Type") or "").split(";")[0].lower()
+            sample = resp.read(cap)
+            return status, ctype, sample
+    except Exception as exc:
+        return None, None, ("%s: %s" % (type(exc).__name__, str(exc)))[:180].encode()
+
+
+def _header_tag_report(path, origin):
+    """Self-verify every social + search-engine <head> tag on a live public page.
+
+    Behave like a crawler: fetch the page over HTTP from the caller's own origin
+    (the stack that is actually serving it), then confirm each expected tag is
+    present and consistent with BASE_URL — and that the og:image, sitemap and
+    robots actually resolve, so a tag that is 'in code' but broken 'in the wild'
+    shows up red. Returns a JSON-ready report dict."""
+    base = seo.BASE_URL.rstrip("/")
+    want = base + path
+    tags = []
+    def tag(name, ok, value="", note=""):
+        tags.append({"name": name, "ok": ok, "value": value, "note": note})
+
+    status, ctype, body = _headcheck_fetch(origin + path)
+    if status is None:
+        tag("page fetch %s" % path, False, "", body.decode("utf-8", "replace"))
+        return {"ok": False, "path": path, "url": want, "tags": tags,
+                "summary": "page unreachable"}
+    if ctype != "text/html":
+        tag("page fetch %s" % path, False, ctype, "not HTML")
+        return {"ok": False, "path": path, "url": want, "tags": tags,
+                "summary": "page is %s, not HTML" % ctype}
+    head = body[:66000].decode("utf-8", "replace")
+    metas = {}
+    for name, content in _META_RX.findall(head):
+        metas[name.lower()] = content
+
+    def meta(*keys):
+        for k in keys:
+            v = metas.get(k)
+            if v is not None:
+                return v.strip()
+        return ""
+
+    title = (_TITLE_RX.search(head) or [None, ""])[1] if _TITLE_RX.search(head) else ""
+    title = title.strip().replace(" | %s" % seo.SITE_NAME, "") or (meta("og:title"))
+    canonical = ((_CANON_RX.search(head) or [None, ""])[1]) if _CANON_RX.search(head) else ""
+
+    tag("title", bool(title), title[:80], "%d chars" % len(title))
+    d = meta("description")
+    tag("description", bool(d), d[:80], "%d chars" % len(d))
+    tag("canonical", canonical == want, canonical, "" if canonical == want else
+        "expected " + want)
+    rob = meta("robots")
+    tag("robots", rob == "" or "noindex" not in rob, rob or "indexable",
+        "noindex is intentional for /social and unlaunched pages")
+    tag("og:locale", meta("og:locale") == "en_US", meta("og:locale") or "—")
+    tag("og:type", meta("og:type") == "website", meta("og:type") or "—")
+    ot = meta("og:title")
+    tag("og:title", bool(ot) and ot == (title or ot), ot[:80])
+    tag("og:description", bool(meta("og:description")),
+        meta("og:description")[:80])
+    tag("og:url", meta("og:url") == want, meta("og:url") or "—",
+        "" if meta("og:url") == want or not meta("og:url") else "expected " + want)
+    tag("og:site_name", bool(meta("og:site_name")), meta("og:site_name") or "—")
+
+    og_img = meta("og:image")
+    img_ok = bool(og_img) and og_img.startswith("http") and \
+        og_img.split("/")[2].split(":")[0] == base.split("/")[2].split(":")[0]
+    tag("og:image", img_ok, og_img or "—",
+        "must be absolute and on " + base if not img_ok else "")
+    tag("og:image:width", meta("og:image:width") in ("1200", ""),
+        meta("og:image:width") or "—" if meta("og:image:width") else "1200")
+    tag("og:image:height", meta("og:image:height") in ("630", ""),
+        meta("og:image:height") or "—" if meta("og:image:height") else "630")
+    tag("og:image:alt", bool(meta("og:image:alt")), meta("og:image:alt")[:60])
+    tag("twitter:card", meta("twitter:card") == "summary_large_image",
+        meta("twitter:card") or "—")
+    tag("twitter:title", bool(meta("twitter:title")),
+        meta("twitter:title")[:80])
+    tag("twitter:description", bool(meta("twitter:description")),
+        meta("twitter:description")[:80])
+    tw_img = meta("twitter:image")
+    tag("twitter:image", bool(tw_img) and (not og_img or tw_img == og_img),
+        tw_img or "—")
+
+    image_status = image_ctype = image_bytes = None
+    if img_ok and og_img:
+        try:
+            image_status, image_ctype, image_bytes = \
+                _headcheck_fetch(origin + urllib.parse.urlsplit(og_img).path,
+                                 cap=4096)
+        except Exception:
+            pass
+    good_img = bool(img_ok and image_status == 200 and
+                    image_ctype and image_ctype.startswith("image/")
+                    and image_bytes)
+    tag("og:image live", good_img, "%s %s" % (image_status, image_ctype),
+        "" if good_img else "the share card did not resolve (wrong slug or no "
+                            "products in that niche)")
+
+    for eng, want_name, tok in (
+            ("google", "google-site-verification",
+             seo.google_site_verification()),
+            ("bing", "msvalidate.01", seo.bing_site_verification()),
+            ("yandex", "yandex-verification", seo.yandex_site_verification()),
+            ("pinterest", "p:domain_verify",
+             seo.pinterest_site_verification())):
+        if not tok:
+            tag("%s ownership meta" % eng, None, "—",
+                "no token configured — add one on the Engines hub")
+        else:
+            present = meta(want_name) == tok
+            tag("%s ownership meta" % eng, present,
+                meta(want_name) or "—",
+                "" if present else "token saved here but missing from the live head")
+
+    smap_s, smap_t, _ = _headcheck_fetch(origin + "/sitemap.xml", cap=512)
+    tag("sitemap.xml", smap_s == 200, smap_t or str(smap_s),
+        "search engines discover pages through it")
+    rob_s, rob_t, _ = _headcheck_fetch(origin + "/robots.txt", cap=512)
+    tag("robots.txt", rob_s == 200, rob_t or str(rob_s),
+        "must list the sitemap")
+    if rob_s == 200:
+        real_smap = _headcheck_fetch(origin + "/robots.txt", cap=2048)[2]
+        tag("robots → sitemap", b"Sitemap:" in real_smap and
+            b"/sitemap.xml" in real_smap, "Sitemap: %s/sitemap.xml" % base,
+            "robots.txt should point crawlers at the sitemap")
+
+    reds = [t for t in tags if t["ok"] is False]
+    return {"ok": not reds, "path": path, "url": want, "tags": tags,
+            "summary": "%d of %d checks green · %d red"
+                       % (len(tags) - len(reds), len(tags), len(reds))}
+
+
 def _ensure_db_file():
     """First boot on a persistent disk: if the configured DB file is missing,
     seed it from the in-image copy so the baked niches/settings survive."""
@@ -4221,6 +4371,22 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                                         "error": "client id/secret not set (env)"})
             self._set_cookie(state, max_age=600, cookie=_OAUTH_COOKIE, path="/admin")
             return self._send(200, {"ok": True, "url": url})
+        if action == "tagcheck":
+            """Verify every social + search-engine <head> tag on a live public
+            page, crawler-style: fetch the page through the caller's own origin,
+            assert each expected tag is present/consistent, then prove the
+            og:image and the crawler files really resolve."""
+            path = (body.get("path") or "").strip()
+            if (not path.startswith("/") or ".." in path or len(path) > 400
+                    or path.lstrip("/").split("/", 1)[0] in
+                    ("admin", "api", "style.css", "og", "static")):
+                return self._send(200, {"ok": False,
+                                        "error": "pick a public page path "
+                                                 "(/, /n/<slug>, /lp/<slug>)"})
+            host = (self.headers.get("Host") or "").strip()
+            scheme = (self.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+            origin = ("%s://%s" % (scheme or "http", host)) if host else seo.BASE_URL
+            return self._send(200, _header_tag_report(path, origin))
         return self._send(400, {"error": "unknown action"})
 
     def _seoengine_oauth_cb(self, engine, q):
@@ -4310,6 +4476,14 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         </div>""" % (names[eng], eng, eng, eng, connect_btn, eng, eng, eng,
                       eng, extra, setup[eng], eng))
         engines_rows = "".join(cards)
+        path_opts = ['<option value="/">/ — home</option>']
+        for n in self._all_niches():
+            slug = seo._slugify(n.get("keyword") or "")
+            if slug:
+                path_opts.append(
+                    '<option value="/n/%s">/n/%s</option>'
+                    % (seo._clean(slug), seo._clean(slug)))
+        path_opts = "".join(path_opts)
         page = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Search engines — pstore</title><link rel="stylesheet" href="/style.css">
@@ -4346,7 +4520,16 @@ pre.preview{white-space:pre-wrap;word-break:break-word;background:#f8fafc;border
  <section class="card"><h2>🌍 Consoles</h2>
   <div class="eng-grid" id="engines">{engines_rows}</div>
  </section>
- <section class="card"><h2>📊 Traffic by engine <span class="hint">(last {days} days, referral-attributed)</span></h2>
+ <section class="card" style="margin:0;border:1px solid var(--line,#eee)">
+   <h2>🔖 Verify your live header tags</h2>
+   <p class="hint">Crawler-style check of one public page: every social (og:, twitter:) and search-engine (ownership metas, canonical, robots) tag plus a real fetch of the og:image, sitemap.xml and robots.txt — so a tag that is only "in code" but broken in the wild turns red.</p>
+   <div class="row" style="flex-wrap:wrap;gap:8px;align-items:center">
+    <select id="tgp" style="max-width:100%">{paths}</select>
+    <button class="warm" onclick="tagCheck()">Verify live tags</button>
+   </div>
+   <div id="tagout" style="margin-top:8px;min-height:10px"></div>
+  </section>
+  <section class="card"><h2>📊 Traffic by engine <span class="hint">(last {days} days, referral-attributed)</span></h2>
   <div class="tblflow"><table class="plain" id="traf">
    <thead><tr><th>Engine</th><th class="ct">Pageviews</th><th class="ct">Affiliate clicks</th><th class="ct">CTR→click</th><th>Console rates (last 28d)</th></tr></thead>
    <tbody><tr><td colspan="5" class="hint">Loading…</td></tr></tbody></table></div>
@@ -4381,6 +4564,16 @@ function act(a,e){fetch("/api/seoengines",{method:"POST",headers:{"Content-Type"
   load();});}
 function saveKey(e){const k=$("vk-"+e).value;fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"bingkey",key:k})}).then(()=>load());}
 function verifyTok(e){const t=$("vt-"+e).value;fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"verify",engine:e,token:t})}).then(()=>{out(e,t?"verification meta saved ✓":"verification meta cleared");load();});}
+function chip(ok){return ok===false?'<span class="badg" style="background:#ffe6e6;color:#c0392b">✗</span>':ok===true?'<span class="badg" style="background:#e6ffe8;color:#1e8e3e">✓</span>':'<span class="badg" style="background:#eceff3;color:#667">◦</span>';}
+function tagCheck(){const $o=$("tagout");if(!$o)return;const p=$("tgp").value;
+ $o.innerHTML='<p class="hint">Fetching '+esc(p)+' the way a search engine would…</p>';
+ fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"tagcheck",path:p})})
+ .then(r=>r.json()).then(d=>{if(d.error){$o.innerHTML='<p class="err">'+esc(d.error)+'</p>';return;}
+  $o.innerHTML='<p class="msg"'+(d.ok?"":' style="color:#c0392b"')+'>'+esc(d.summary)+'</p>'
+   +'<div class="tblflow" style="margin-top:8px"><table class="plain" style="min-width:620px"><thead><tr><th></th><th>Tag</th><th>Found on the live page</th><th>Note</th></tr></thead><tbody>'
+   +d.tags.map(t=>'<tr><td style="width:34px">'+chip(t.ok)+'</td><td><code>'+esc(t.name)+'</code></td><td style="overflow-wrap:anywhere;word-break:break-word">'+esc(t.value)+'</td><td class="hint" style="overflow-wrap:anywhere;word-break:break-word">'+esc(t.note)+'</td></tr>').join('')
+   +'</tbody></table></div>';})
+ .catch(e=>$o.innerHTML='<p class="err">check failed: '+esc(e.message)+'</p>');}
 function formatStats(d){const t=(d.totals||{});const r=(d.rows||[]).slice(0,12);let s=`${esc(d.engine||"")} · ${d.days}d · clicks ${t.clicks??0} · impressions ${t.impressions??0} · position ${t.position??"—"} · ctr ${t.ctr??0}%`;
  if(r.length) s+="\\n\\n" + r.map(x=>`${esc(x.page)}  → ${x.clicks}c / ${x.impressions}i @pos ${x.position}`).join("\\n");
  return s;}
@@ -4400,6 +4593,7 @@ function msgs(){const u=new URLSearchParams(location.search);const m=u.get("msg"
 document.addEventListener("DOMContentLoaded",load);
 </script>
 </body></html>""".replace("{nav}", nav).replace("{engines_rows}", engines_rows).replace(
+            "{paths}", path_opts).replace(
             "{totop}", _TOTOP).replace("{days}", "28").replace("{base}", seo.BASE_URL)
         return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
 
@@ -5992,7 +6186,22 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
                 return None
             except Exception:
                 continue
-        return self._send(404, {"error": "og image not found"})
+        # Fallback: any declared og:image (e.g. /og/home.png on the home page)
+        # must resolve — render a generic brand card so a share never breaks.
+        try:
+            fallback = social.og_svg(slug, slug.replace("-", " ").title() or "Niche",
+                                     "Best picks, ranked fresh", None, None)
+        except Exception:
+            fallback = None
+        if fallback is None:
+            return self._send(404, {"error": "og image not found"})
+        self.send_response(200)
+        self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
+        self.send_header("Cache-Control", "public, max-age=3600")
+        self.send_header("Content-Length", str(len(fallback)))
+        self.end_headers()
+        self.wfile.write(fallback)
+        return None
 
     def _og_image_png(self, slug):
         """Raster 1200x630 share card at /og/<slug>.png — the same layout as the
@@ -6022,6 +6231,12 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
                         break
                     except Exception:
                         continue
+            if card is None:
+                try:
+                    card = social.og_png(slug, slug.replace("-", " ").title() or "Niche",
+                                         "Best picks, ranked fresh", None, None)
+                except Exception:
+                    card = None
             if card is None:
                 return self._send(404, {"error": "og image not found"})
             with _lock:

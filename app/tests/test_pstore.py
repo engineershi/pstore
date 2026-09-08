@@ -668,6 +668,109 @@ class TestRoutes(unittest.TestCase):
         for page in seo.STATIC_PAGES:
             self.assertIn(("/%s</loc>" % page).encode(), body)
 
+    # ------------------------------------------------ live header-tag checker
+
+    def test_head_emits_social_and_search_engine_tags(self):
+        st, _, body = self._get("/n/keto-snacks")
+        self.assertEqual(st, 200)
+        html = body.decode("utf-8", "replace")
+        for snippet in (
+            'property="og:locale"', 'property="og:type"', 'property="og:title"',
+            'property="og:description"', 'property="og:url"',
+            'property="og:site_name"', 'property="og:image"',
+            'property="og:image:width" content="1200"',
+            'property="og:image:height" content="630"',
+            'property="og:image:alt"', 'name="twitter:card"',
+            'name="twitter:title"', 'name="twitter:description"',
+            'name="twitter:image"', 'rel="canonical"'):
+            self.assertIn(snippet, html, snippet)
+        # indexable pages must NOT carry a noindex robots meta
+        self.assertNotIn("noindex", html)
+
+    def test_tagcheck_all_green_on_saved_niche(self):
+        st, body = self._raw_json(
+            "/api/seoengines",
+            {"action": "tagcheck", "path": "/n/keto-snacks"}, cookie=self.cookie)
+        self.assertEqual(st, 200)
+        d = json.loads(body)
+        self.assertTrue(d["ok"], d.get("summary"))
+        names = [t["name"] for t in d["tags"]]
+        for want in ("og:image", "og:image live", "twitter:card", "canonical",
+                     "sitemap.xml", "robots.txt"):
+            self.assertIn(want, names)
+        img = next(t for t in d["tags"] if t["name"] == "og:image live")
+        self.assertTrue(img["ok"])
+        self.assertIn("image/", img["value"])
+
+    def test_tagcheck_rejects_admin_and_api_paths(self):
+        for evil in ("/admin", "/api/niches", "/og/keto-snacks.png",
+                     "/../etc/passwd"):
+            st, body = self._raw_json(
+                "/api/seoengines",
+                {"action": "tagcheck", "path": evil}, cookie=self.cookie)
+            self.assertEqual(st, 200)
+            d = json.loads(body)
+            self.assertIn("error", d, evil)
+
+    def test_tagcheck_requires_auth(self):
+        st, _ = self._raw_json("/api/seoengines",
+                               {"action": "tagcheck", "path": "/n/keto-snacks"})
+        self.assertEqual(st, 401)
+
+    def test_tagcheck_reports_ownership_meta_mismatch(self):
+        saved_fn = seo.google_site_verification
+        saved_metas = seo.verification_metas
+        saved_rt = getattr(seo, "_GOOGLE_SITE_VERIFICATION_RUNTIME", None)
+        try:
+            seo.verification_metas = lambda: ""
+            seo.google_site_verification = lambda: "tokCONFIG"
+            st, body = self._raw_json(
+                "/api/seoengines",
+                {"action": "tagcheck", "path": "/n/keto-snacks"}, cookie=self.cookie)
+            d = json.loads(body)
+            g = next(t for t in d["tags"] if t["name"] == "google ownership meta")
+            self.assertFalse(g["ok"])
+            self.assertIn("missing", g["note"])
+        finally:
+            seo.google_site_verification = saved_fn
+            seo.verification_metas = saved_metas
+            seo._GOOGLE_SITE_VERIFICATION_RUNTIME = saved_rt
+
+    def test_tagcheck_ownership_meta_green_when_live(self):
+        saved_fn = seo.google_site_verification
+        saved_rt = getattr(seo, "_GOOGLE_SITE_VERIFICATION_RUNTIME", None)
+        try:
+            seo.set_google_site_verification("tokLIVE123")
+            st, body = self._raw_json(
+                "/api/seoengines",
+                {"action": "tagcheck", "path": "/n/keto-snacks"}, cookie=self.cookie)
+            d = json.loads(body)
+            g = next(t for t in d["tags"] if t["name"] == "google ownership meta")
+            self.assertTrue(g["ok"], g)
+        finally:
+            seo.google_site_verification = saved_fn
+            seo._GOOGLE_SITE_VERIFICATION_RUNTIME = saved_rt
+
+    def test_og_card_fallback_resolves_any_declared_image(self):
+        # seo.py home page declares og:image=/og/home.png; every declared card
+        # must resolve or shares dangle.
+        st, ctype, body = self._get("/og/home.png")
+        self.assertEqual(st, 200, body[:200])
+        self.assertEqual(ctype, "image/png")
+        st, ctype, _ = self._get("/og/home")
+        self.assertEqual(st, 200)
+        self.assertIn("svg", ctype)
+        st, _, _ = self._get("/og/no-such-niche-xyz.png")
+        self.assertEqual(st, 200)
+
+    def test_seoengines_page_has_tagcheck_ui(self):
+        st, _, body = self._get("/admin/seoengines")
+        self.assertEqual(st, 200)
+        html = body.decode("utf-8", "replace")
+        self.assertIn("Verify live tags", html)
+        self.assertIn("function tagCheck", html)
+        self.assertIn('id="tgp"', html)
+
     def test_blog_landing_lists_niche_articles(self):
         st, ctype, body = self._get("/blog")
         self.assertEqual(st, 200)

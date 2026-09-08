@@ -399,9 +399,23 @@ class TestSocialSuite(unittest.TestCase):
         self.assertEqual((w, h), (1200, 630))
         self.assertEqual(data[25], 2)  # color type RGB
 
-    def test_og_png_404_unknown_slug(self):
-        st, _, _, _ = self._raw("/og/not-a-real-niche.png")
-        self.assertEqual(st, 404)
+    def test_og_png_fallback_for_unknown_slug(self):
+        # Every og:image a page declares must resolve, so unknown slugs render
+        # a generic brand card instead of a dangling 404 share image.
+        st, _, ctype, data = self._raw("/og/not-a-real-niche.png")
+        self.assertEqual(st, 200)
+        self.assertTrue(ctype.startswith("image/png"))
+        self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertGreater(len(data), 1000)
+        import struct as _st
+        w, h = _st.unpack(">II", data[16:24])
+        self.assertEqual((w, h), (1200, 630))
+
+    def test_og_svg_fallback_for_unknown_slug(self):
+        st, _, ctype, data = self._raw("/og/not-a-real-niche")
+        self.assertEqual(st, 200)
+        self.assertTrue(ctype.startswith("image/svg+xml"))
+        self.assertIn(b"Best picks, ranked fresh", data)
 
     def test_og_favicon_png_served(self):
         st, _, ctype, data = self._raw("/og/favicon.png")

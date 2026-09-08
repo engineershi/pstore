@@ -212,6 +212,9 @@ def _head(title, desc, canonical, path, jsonld=None, og_image=None, noindex=Fals
     if og_image:
         abs_img = og_image if str(og_image).startswith("http") else BASE_URL + og_image
         img_html = (f'<meta property="og:image" content="{_clean(abs_img)}">\n'
+                    f'<meta property="og:image:width" content="1200">\n'
+                    f'<meta property="og:image:height" content="630">\n'
+                    f'<meta property="og:image:alt" content="{_clean(title)}">\n'
                     f'<meta name="twitter:image" content="{_clean(abs_img)}">\n')
     gsc = verification_metas()
     rob = ('<meta name="robots" content="noindex,nofollow">\n' if noindex else "")
