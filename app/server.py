@@ -309,9 +309,9 @@ function authChecklistPw(pw){
   const keys=["len","lower","upper","num","sym","four"];
   for(const k of keys){
     const el=document.getElementById("ck-"+k);
-    if(el){ el.classList.toggle("ok", def[k]); el.innerHTML = k==="len"?"8+ chars"
-        : k==="lower"?"a–z": k==="upper"?"A–Z": k==="num"?"0–9"
-        : k==="sym"?"!@#": k==="four"?"4+ kinds":"";
+    if(el){ el.classList.toggle("ok", def[k]); el.innerHTML = k==="len"?"8+ characters"
+        : k==="lower"?"a lowercase letter": k==="upper"?"an uppercase letter"
+        : k==="num"?"a number": k==="sym"?"a symbol (!@#)": k==="four"?"4+ different chars":"";
       el.classList.toggle("oncd", pw.length>0); }
   }
   return def;
@@ -1911,10 +1911,13 @@ $("em").addEventListener("keydown", e => {{ if (e.key === "Enter") doLogin(); }}
 .meter{{height:100%;width:0;border-radius:4px;transition:width .2s,background .2s}}
 .meter.weak{{background:#d64545}}.meter.good{{background:#e8a20c}}.meter.strong{{background:#2e7d32}}
 .meter-label{{font-size:11px;color:var(--muted);text-align:left;height:14px;font-weight:600}}
-.ck{{display:flex;flex-wrap:wrap;gap:4px;margin:6px 0 12px;text-align:left}}
-.ck span{{font-size:10.5px;font-weight:600;color:var(--muted);background:var(--border);border-radius:20px;padding:3px 8px;opacity:.35}}
-.ck span.oncd{{opacity:.8}}
-.ck span.ok{{background:#2e7d32;color:#fff;opacity:1}}
+.ck{{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;margin:8px 0 12px;text-align:left}}
+.ck span{{display:flex;align-items:center;gap:7px;font-size:12px;font-weight:600;color:var(--muted)}}
+.ck span::before{{content:"";width:9px;height:9px;border-radius:50%;background:var(--border);flex:0 0 auto;transition:background .18s}}
+.ck span.oncd{{opacity:1}}
+.ck span.oncd::before{{background:#e8a20c}}
+.ck span.ok{{color:#1e8e3e}}
+.ck span.ok::before{{background:#2e7d32}}
 .login-hint{{font-size:12.5px;color:var(--muted);margin-top:14px}}
 .login-hint a{{color:var(--accent)}}</style>
 </head><body>
@@ -1933,8 +1936,8 @@ $("em").addEventListener("keydown", e => {{ if (e.key === "Enter") doLogin(); }}
 <label class="frm" for="pw">Password
 <input id="pw" type="password" placeholder="create a strong password" autocomplete="new-password" maxlength="128" required></label>
 <div class="ck" id="ck-box">
-<span id="ck-len">8+ chars</span><span id="ck-lower">a–z</span><span id="ck-upper">A–Z</span>
-<span id="ck-num">0–9</span><span id="ck-sym">!@#</span><span id="ck-four">4+ kinds</span>
+<span id="ck-len">8+ characters</span><span id="ck-lower">a lowercase letter</span><span id="ck-upper">an uppercase letter</span>
+<span id="ck-num">a number</span><span id="ck-sym">a symbol (!@#)</span><span id="ck-four">4+ different chars</span>
 </div>
 <div class="meter-wrap"><div class="meter" id="pw-meter"></div></div>
 <div class="meter-label" id="pw-meter-label"></div>
@@ -1946,7 +1949,9 @@ $("em").addEventListener("keydown", e => {{ if (e.key === "Enter") doLogin(); }}
 <button id="go" class="warm" type="submit">Request access</button>
 <p class="login-hint">Already have an account? <a href="/admin/login">Sign in</a>.</p>
 </section></div></main>
+<script>
 {_AUTH_VALIDATE_JS}
+</script>
 <script>
 function $(id){{return document.getElementById(id);}}
 function authValName(slot){{ const e=authNameErr($("nm").value.trim()); authSetErr(slot,e,"nm"); return e; }}
@@ -2283,7 +2288,7 @@ $("em").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
         email_json = json.dumps(email)
         reset_js = ("fetch(\"/admin/reset-password\", "
                     "{method:\"POST\", headers:{\"Content-Type\":\"application/json\"}, "
-                    "body: JSON.stringify({t: %s, e: %s, password: $(\"pw\").value}))"
+                    "body: JSON.stringify({t: %s, e: %s, password: $(\"pw\").value})})"
                     % (tok_json, email_json))
         body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -2300,10 +2305,13 @@ $("em").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
 .meter{{height:100%;width:0;border-radius:4px;transition:width .2s,background .2s}}
 .meter.weak{{background:#d64545}}.meter.good{{background:#e8a20c}}.meter.strong{{background:#2e7d32}}
 .meter-label{{font-size:11px;color:var(--muted);text-align:left;height:14px;font-weight:600}}
-.ck{{display:flex;flex-wrap:wrap;gap:4px;margin:6px 0 12px;text-align:left}}
-.ck span{{font-size:10.5px;font-weight:600;color:var(--muted);background:var(--border);border-radius:20px;padding:3px 8px;opacity:.35}}
-.ck span.oncd{{opacity:.8}}
-.ck span.ok{{background:#2e7d32;color:#fff;opacity:1}}
+.ck{{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;margin:8px 0 12px;text-align:left}}
+.ck span{{display:flex;align-items:center;gap:7px;font-size:12px;font-weight:600;color:var(--muted)}}
+.ck span::before{{content:"";width:9px;height:9px;border-radius:50%;background:var(--border);flex:0 0 auto;transition:background .18s}}
+.ck span.oncd{{opacity:1}}
+.ck span.oncd::before{{background:#e8a20c}}
+.ck span.ok{{color:#1e8e3e}}
+.ck span.ok::before{{background:#2e7d32}}
 .login-hint{{font-size:12.5px;color:var(--muted);margin-top:14px}}</style>
 </head><body>
 <header><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a></header>
@@ -2315,8 +2323,8 @@ $("em").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
 <label class="frm" for="pw">New password
 <input id="pw" type="password" placeholder="create a strong password" autocomplete="new-password" maxlength="128" required></label>
 <div class="ck" id="ck-box">
-<span id="ck-len">8+ chars</span><span id="ck-lower">a–z</span><span id="ck-upper">A–Z</span>
-<span id="ck-num">0–9</span><span id="ck-sym">!@#</span><span id="ck-four">4+ kinds</span>
+<span id="ck-len">8+ characters</span><span id="ck-lower">a lowercase letter</span><span id="ck-upper">an uppercase letter</span>
+<span id="ck-num">a number</span><span id="ck-sym">a symbol (!@#)</span><span id="ck-four">4+ different chars</span>
 </div>
 <div class="meter-wrap"><div class="meter" id="pw-meter"></div></div>
 <div class="meter-label" id="pw-meter-label"></div>
@@ -2327,7 +2335,9 @@ $("em").addEventListener("keydown", e => {{ if (e.key === "Enter") $("go").oncli
 <p id="msg" class="msg" style="min-height:1.2em"></p>
 <button id="go" class="warm" type="submit">Save new password</button>
 </section></div></main>
+<script>
 {_AUTH_VALIDATE_JS}
+</script>
 <script>
 function $(id){{return document.getElementById(id);}}
 const NMAIL = {email_json};
