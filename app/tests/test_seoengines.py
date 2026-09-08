@@ -419,6 +419,14 @@ class TestSeoengineServer(unittest.TestCase):
             ctype="application/json")
         self.assertEqual(seo.google_site_verification(), "gt-token-xyz")
         seo.set_google_site_verification("")
+        st, _, body = self._raw(
+            "POST", "/api/seoengines", cookie=self.cookie,
+            body=json.dumps({"action": "verify", "engine": "pinterest",
+                             "token": "pt-token-xyz"}),
+            ctype="application/json")
+        self.assertEqual(st, 200)
+        self.assertEqual(seo.pinterest_site_verification(), "pt-token-xyz")
+        seo.set_pinterest_site_verification("")
 
     def test_sync_gsc_over_http(self):
         self.server._set_setting("seoeng.gsc.token", json.dumps(GSC_TOK))

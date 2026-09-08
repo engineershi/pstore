@@ -921,6 +921,35 @@ class TestRoutes(unittest.TestCase):
         d = _json.loads(body)
         self.assertTrue(d["ok"], d)
 
+    def test_keys_save_pinterest_runtime_override(self):
+        """The Pinterest website-claim flow: paste the <meta name="p:domain_verify"
+        ... /> tag Pinterest gives you, save it, and every public page's <head>
+        must carry the meta so the domain claim verifies."""
+        import json as _json
+        from urllib.parse import urlencode
+        saved = seo._PINTEREST_SITE_VERIFICATION_RUNTIME
+        try:
+            snippet = '<meta name="p:domain_verify" content="ccf23677ef749c6fecb9f46175e28677"/>'
+            body = urlencode({"group": "site", "keyid": "pinterest",
+                              "key": snippet}).encode()
+            st, _, _, body = self._raw("/api/keys/save", "POST", body=body,
+                                       cookie=self.cookie)
+            self.assertEqual(st, 200)
+            self.assertTrue(_json.loads(body)["ok"])
+            self.assertEqual(seo.pinterest_site_verification(),
+                             "ccf23677ef749c6fecb9f46175e28677")
+            st, _, body = self._get("/")
+            self.assertEqual(st, 200)
+            html = body.decode("utf-8", "replace")
+            self.assertIn('<meta name="p:domain_verify" '
+                          'content="ccf23677ef749c6fecb9f46175e28677">', html)
+            # bare-token + p:domain_verify: forms normalize the same way
+            seo._PINTEREST_SITE_VERIFICATION_RUNTIME = None
+            seo.set_pinterest_site_verification("p:domain_verify: tokPIN123")
+            self.assertEqual(seo.pinterest_site_verification(), "tokPIN123")
+        finally:
+            seo._PINTEREST_SITE_VERIFICATION_RUNTIME = saved
+
     def test_ai_key_page_test_dispatches(self):
         import json as _json
         from urllib.parse import urlencode

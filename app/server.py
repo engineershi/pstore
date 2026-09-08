@@ -1588,6 +1588,8 @@ class Handler(BaseHTTPRequestHandler):
                     "/admin/verify", "/admin/resend", "/admin/pending",
                     "/admin/forgot-password", "/admin/reset-password"):
             return False
+        if path == "/api/me":  # self-service profile for any signed-in team member
+            return not (self._authed() and self._session_uid() is not None)
         if self._session_uid() is None:  # owner: everything
             return False
         fn = self._function_for_path(path)
@@ -2492,9 +2494,11 @@ font-weight:800;display:grid;place-items:center;flex:none;text-transform:upperca
 .tools-section{{margin-top:22px}}
 .tools-section h3{{font-size:15px;margin:0 8px 0}}
 .footer-links{{margin-top:28px;display:flex;gap:14px;flex-wrap:wrap}}
-.footer-links a{{font-size:13px;color:var(--accent);text-decoration:none}}
-@media(max-width:640px){{.profile-card{{flex-direction:column;text-align:center}}.avatar{{width:50px;height:50px;font-size:20px}}
-.profile-info{{text-align:center}}.tools-section a{{font-size:13px}}}}</style>
+ .footer-links a{{font-size:13px;color:var(--accent);text-decoration:none}}
+ .plab{{display:block;font-size:12.5px;font-weight:700;color:var(--muted);margin:10px 0 4px}}
+ .pin{{width:100%;box-sizing:border-box;padding:11px 14px;border:1px solid var(--border);border-radius:12px;font-size:14px;background:#fff}}
+ @media(max-width:640px){{.profile-card{{flex-direction:column;text-align:center}}.avatar{{width:50px;height:50px;font-size:20px}}
+ .profile-info{{text-align:center}}.tools-section a{{font-size:13px}}}}</style>
 </head><body>
 <header><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
 <nav class="mininav" style="display:flex;gap:14px;justify-content:flex-end;padding:8px 20px 0">
@@ -2506,7 +2510,23 @@ font-weight:800;display:grid;place-items:center;flex:none;text-transform:upperca
 <h2>{seo._clean(name)}</h2>
 <p>{seo._clean(email)}</p>
 <span class="status-badge {seo._clean(status)}">{seo._clean(status)}</span>
-</div></div>
+</div>
+<button id="prof-btn" class="btn ghost" type="button">✏️ Edit profile</button></div>
+<section id="prof-edit" class="card" style="display:none;margin-top:18px">
+<h3>Edit my profile</h3>
+<p class="tagline" style="margin:0">Your email stays fixed as your login. You can change your full name and set a new password.</p>
+<label class="plab" for="me-name">Full name</label>
+<input id="me-name" class="pin" type="text" maxlength="120" autocomplete="name" value="{seo._clean(name)}">
+<label class="plab" for="me-pw">New password <span class="hint">optional — leave blank to keep your current one</span></label>
+<input id="me-pw" class="pin" type="password" maxlength="128" autocomplete="new-password" placeholder="8+ chars">
+<label class="plab" for="me-pw2">Confirm new password</label>
+<input id="me-pw2" class="pin" type="password" maxlength="128" autocomplete="new-password" placeholder="repeat password">
+<p id="me-msg" class="msg" style="min-height:1.2em"></p>
+<div style="display:flex;gap:10px;flex-wrap:wrap">
+<button id="me-save" class="btn warm" type="button">Save changes</button>
+<button id="me-cancel" class="btn ghost" type="button">Cancel</button>
+</div>
+</section>
 <div class="roles-section">
 <h3>Assigned roles</h3>
 <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">{role_chips}</div>
@@ -2520,6 +2540,27 @@ font-weight:800;display:grid;place-items:center;flex:none;text-transform:upperca
 <a href="/">Back to home</a>
 </div>
 </main>
+<script>
+function $(id){{return document.getElementById(id);}}
+$("prof-btn").onclick = () => {{ $("prof-edit").style.display = "block"; $("me-msg").textContent = ""; $("me-name").focus(); }};
+$("me-cancel").onclick = () => {{ $("prof-edit").style.display = "none"; $("me-msg").textContent = ""; }};
+$("me-save").onclick = async () => {{
+  const msg = $("me-msg"); msg.textContent = ""; const go = $("me-save");
+  go.disabled = true; go.textContent = "Saving…";
+  try {{
+    const r = await fetch("/api/me", {{method:"POST", headers:{{"Content-Type":"application/json"}},
+      body: JSON.stringify({{name: $("me-name").value.trim(), password: $("me-pw").value, password2: $("me-pw2").value}})}});
+    const d = await r.json().catch(() => ({{}}));
+    if (r.ok) {{ location.reload(); return; }}
+    msg.textContent = "⚠ " + (d.error || "Couldn't update the profile.");
+  }} catch (err) {{
+    msg.textContent = "⚠ Network error — please try again.";
+  }}
+  go.disabled = false; go.textContent = "Save changes";
+}};
+for (const id of ["me-name","me-pw","me-pw2"])
+  $(id).addEventListener("keydown", e => {{ if (e.key === "Enter") $("me-save").onclick(); }});
+</script>
 </body></html>"""
         return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
 
@@ -2946,6 +2987,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._admin_users()
             if path == "/api/users":
                 return self._users_api()
+            if path == "/api/me":
+                return self._me_api()
             if path == "/admin/cms":
                 return self._admin_cms(q)
             if path == "/api/cms/pages":
@@ -3111,6 +3154,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._seoengines_post()
             if parsed.path == "/api/users":
                 return self._users_api_post()
+            if parsed.path == "/api/me":
+                return self._me_api()
             if parsed.path == "/api/sequence/send":
                 return self._sequence_send()
             if parsed.path == "/api/mail":
@@ -4158,11 +4203,12 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             webmasters.store_set("seoeng.bing.apikey",
                                  (body.get("key") or "").strip())
             return self._send(200, {"ok": True})
-        if action == "verify" and engine in ("google", "bing", "yandex"):
+        if action == "verify" and engine in ("google", "bing", "yandex", "pinterest"):
             token = (body.get("token") or "").strip()
             setter = {"google": seo.set_google_site_verification,
                       "bing": seo.set_bing_site_verification,
-                      "yandex": seo.set_yandex_site_verification}[engine]
+                      "yandex": seo.set_yandex_site_verification,
+                      "pinterest": seo.set_pinterest_site_verification}[engine]
             setter(token)
             return self._send(200, {"ok": True, "engine": engine,
                                     "active": bool(token)})
@@ -4545,6 +4591,13 @@ $("key").addEventListener("keydown", e => {{ if (e.key === "Enter") $("save").on
                                         "error": None if ok else
                                         "no token set — grab it from Google Search Console's HTML-tag method",
                                         "save": True})
+            if key_id == "pinterest":
+                val = key or seo.pinterest_site_verification()
+                ok = bool(val.strip())
+                return self._send(200, {"ok": ok, "provider": "pinterest",
+                                        "error": None if ok else
+                                        "no token set — grab it from Pinterest's website-claim HTML-tag method",
+                                        "save": True})
             return self._send(200, {"ok": False, "error": "unknown site token"})
         return self._send(200, amazon.test_scraper_key(key_id, key))
 
@@ -4578,6 +4631,11 @@ $("key").addEventListener("keydown", e => {{ if (e.key === "Enter") $("save").on
                 return self._send(200, {"ok": True, "provider": "gsc",
                                         "set": bool(key),
                                         "note": "applies now; set PSTORE_GOOGLE_SITE_VERIFICATION env to persist"})
+            if key_id == "pinterest":
+                seo.set_pinterest_site_verification(key)
+                return self._send(200, {"ok": True, "provider": "pinterest",
+                                        "set": bool(key),
+                                        "note": "applies now; set PSTORE_PINTEREST_VERIFICATION env to persist"})
             return self._send(200, {"ok": False, "error": "unknown site token"})
         if group == "market":
             if key_id == "affiliate":
@@ -4658,6 +4716,11 @@ $("key").addEventListener("keydown", e => {{ if (e.key === "Enter") $("save").on
                      "home": "https://search.google.com/search-console",
                      "status": "set" if seo.google_site_verification() else "not set",
                      "page": "/keys/site/gsc"},
+                    {"id": "pinterest", "name": "Pinterest domain-claim token", "env": "PSTORE_PINTEREST_VERIFICATION",
+                     "url": "https://www.pinterest.com/settings/website",
+                     "home": "https://www.pinterest.com/settings/website",
+                     "status": "set" if seo.pinterest_site_verification() else "not set",
+                     "page": "/keys/site/pinterest"},
                 ],
             },
             {
@@ -6580,6 +6643,8 @@ document.addEventListener("click", (e)=>{{
             rows = "<tr><td colspan='8' class='hint'>No saved niches yet — mine one on the dashboard.</td></tr>"
         gsc_state = ('<span style="color:#1e8e3e">Configured</span> — the site emits your google-site-verification meta.' if audit["google_verification"]
                      else '<span style="color:#c0392b">Not set</span> — prove Search Console ownership to get the site indexed.')
+        pint_state = ('<span style="color:#1e8e3e">Claimed</span> — the site emits your p:domain_verify meta.' if audit.get("pinterest_verification")
+                      else '<span style="color:#c0392b">Not set</span> — add your Pinterest domain-claim token under /keys/site/pinterest.')
         site_keys = ('<div class="row" style="align-items:stretch;margin-top:10px">'
                      '<div class="feature"><h3>✓</h3><p class="hint">Search Console token<br>'
                      '<a href="/keys/site/gsc">/keys/site/gsc ↗</a></p></div>'
@@ -6617,6 +6682,7 @@ document.addEventListener("click", (e)=>{{
 <section class="card"><h2>🔍 Site health</h2>
 <div class="row" style="align-items:stretch">{strip}</div>
 <p class="hint" style="margin-top:10px">Search Console owner token: {gsc_state}</p>
+<p class="hint" style="margin-top:6px">Pinterest website claim: {pint_state}</p>
 <p class="hint" style="margin-top:6px">Sitemap <a href="{seo._clean(audit['sitemap'])}">{seo._clean(audit['sitemap'])}</a> · Robots <a href="{seo._clean(audit['robots'])}">{seo._clean(audit['robots'])}</a> · Canonical base <code>{seo._clean(audit['site_url'])}</code></p>
 <p class="hint" style="margin-top:4px">Locked to team members granted the <b>SEO &amp; consoles</b> function — the owner hands it out under <a href="/admin/users">Users &amp; roles</a>.</p>
 {site_keys}
@@ -6863,6 +6929,54 @@ $("u-search").addEventListener("input",()=>{{
     def _data_out(self, action, err=None, status=200):
         data = json.dumps({"error": err, "data": self._users_json()}).encode("utf-8")
         return self._send(status, data, "application/json; charset=utf-8")
+
+    def _me_api(self):
+        """Self-service profile endpoint for team members: view or update their
+        own name and password. The owner has no row in `users` and is handled
+        elsewhere (env vars), so this is restricted to real user sessions."""
+        uid = self._session_uid()
+        if uid is None or not self._authed():
+            return self._send(403, {"error": "team profile only"})
+        row = _user_row_by_id(uid)
+        if not row:
+            return self._send(404, {"error": "user not found"})
+        if self.command == "GET":
+            return self._send(200, {"email": row["email"], "name": row["name"] or "",
+                                    "status": row.get("status") or "unverified",
+                                    "roles": json.loads(row.get("roles") or "[]")})
+        body = self._body()
+        name = str(body.get("name") or "").strip()
+        pw = str(body.get("password") or "")
+        pw2 = str(body.get("password2") or "")
+        new_hash = None
+        if name:
+            nerr = security.validate_name(name)
+            if nerr:
+                return self._send(400, {"error": nerr})
+        if pw or pw2:
+            if pw != pw2:
+                return self._send(400, {"error": "Passwords don't match."})
+            perr = security.password_policy_errors(pw, email=row["email"], name=name or row.get("name") or "")
+            if perr:
+                return self._send(400, {"error": "Password needs " + ", ".join(perr) + "."})
+            new_hash = security.hash_password(pw)
+        if not name and new_hash is None:
+            return self._send(400, {"error": "Nothing to update."})
+        with _lock:
+            conn = _db()
+            try:
+                if name and new_hash is not None:
+                    conn.execute("UPDATE users SET name=?, pass_hash=? WHERE id=?",
+                                 (name, new_hash, uid))
+                elif name:
+                    conn.execute("UPDATE users SET name=? WHERE id=?", (name, uid))
+                else:
+                    conn.execute("UPDATE users SET pass_hash=? WHERE id=?", (new_hash, uid))
+                conn.commit()
+            finally:
+                conn.close()
+        return self._send(200, {"ok": True, "name": name or row["name"] or "",
+                                "alert": "Profile updated."})
 
     def _owners_only(self):
         return bool(self._authed() and self._session_uid() is None)

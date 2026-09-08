@@ -23,11 +23,13 @@ BASE_URL = os.environ.get("PSTORE_URL", "https://pstore-gxbv.onrender.com").rstr
 GOOGLE_SITE_VERIFICATION = os.environ.get("PSTORE_GOOGLE_SITE_VERIFICATION", "")
 BING_SITE_VERIFICATION = os.environ.get("PSTORE_BING_SITE_VERIFICATION", "")
 YANDEX_SITE_VERIFICATION = os.environ.get("PSTORE_YANDEX_VERIFICATION", "")
+PINTEREST_SITE_VERIFICATION = os.environ.get("PSTORE_PINTEREST_VERIFICATION", "")
 # Runtime override set via the /keys hub (never written to disk) so a saved
 # token takes effect immediately without a restart.
 _GOOGLE_SITE_VERIFICATION_RUNTIME = None
 _BING_SITE_VERIFICATION_RUNTIME = None
 _YANDEX_SITE_VERIFICATION_RUNTIME = None
+_PINTEREST_SITE_VERIFICATION_RUNTIME = None
 
 
 _META_RE = re.compile(r"content\s*=\s*[\"']?([^\"' >]+)[\"']?", re.I)
@@ -47,6 +49,8 @@ def _gsc_token(value):
     if val.startswith("<"):
         m = _META_RE.search(val)
         val = m.group(1).strip() if m else ""
+    elif val.lower().startswith("p:domain_verify:"):
+        val = val[len("p:domain_verify:"):].strip().strip("\"' ")
     elif val.lower().startswith("google-site-verification:"):
         val = val.split(":", 1)[1].strip()
     elif val.lower().startswith("content="):
@@ -77,6 +81,13 @@ def set_yandex_site_verification(token):
     _YANDEX_SITE_VERIFICATION_RUNTIME = _gsc_token(token)
 
 
+def set_pinterest_site_verification(token):
+    """Set (or clear with "") the Pinterest p:domain_verify token. Accepts the
+    bare hex token or the whole meta tag / content snippet."""
+    global _PINTEREST_SITE_VERIFICATION_RUNTIME
+    _PINTEREST_SITE_VERIFICATION_RUNTIME = _gsc_token(token)
+
+
 def google_site_verification():
     """Effective token: runtime override first, else env (module-load) value."""
     if _GOOGLE_SITE_VERIFICATION_RUNTIME is not None:
@@ -96,9 +107,15 @@ def yandex_site_verification():
     return _gsc_token(YANDEX_SITE_VERIFICATION)
 
 
+def pinterest_site_verification():
+    if _PINTEREST_SITE_VERIFICATION_RUNTIME is not None:
+        return _PINTEREST_SITE_VERIFICATION_RUNTIME
+    return _gsc_token(PINTEREST_SITE_VERIFICATION)
+
+
 def verification_metas():
-    """All ownership meta tags (Google + Bing + Yandex) as one string, "" when
-    none configured. Emitted in <head> on every public page."""
+    """All ownership meta tags (Google + Bing + Yandex + Pinterest) as one
+    string, "" when none configured. Emitted in <head> on every public page."""
     out = []
     g = google_site_verification()
     if g:
@@ -109,6 +126,9 @@ def verification_metas():
     y = yandex_site_verification()
     if y:
         out.append('<meta name="yandex-verification" content="%s">\n' % _clean(y))
+    pi = pinterest_site_verification()
+    if pi:
+        out.append('<meta name="p:domain_verify" content="%s">\n' % _clean(pi))
     return "".join(out)
 
 
@@ -842,6 +862,7 @@ def audit_sites(niches):
         "needs_work": len(rows) - passable,
         "site_url": BASE_URL,
         "google_verification": bool(google_site_verification()),
+        "pinterest_verification": bool(pinterest_site_verification()),
         "sitemap": "/sitemap.xml",
         "robots": "/robots.txt",
         "org": {"name": ORG_NAME, "url": ORG_URL},
