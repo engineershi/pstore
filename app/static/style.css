@@ -334,7 +334,7 @@ a.btn:hover { transform: translateY(-2px); box-shadow: 0 8px 18px rgba(15, 139, 
 }
 .badge.demand { background: #e3f6ea; color: #159a4b; }
 .badge.saturation { background: #fdf0d8; color: #d97706; }
-.badge.source { background: #eee9ff; color: #7c5cff; }
+.badge.source { background: #eef1fd; color: #4f67e0; }
 .niche .save-btn {
   margin-left: auto;
   background: linear-gradient(135deg, var(--accent), var(--grad-to));

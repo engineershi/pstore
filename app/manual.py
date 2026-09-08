@@ -458,7 +458,7 @@ def render_admin_manual(nav_html, totop_html):
       ctl=document.getElementById('readctl'),
       slider=document.getElementById('readr'),
       size=document.getElementById('readsize'),
-      buttons=ctl.getElementsByTagName('button');
+      buttons=Array.from(ctl.getElementsByTagName('button'));
   var maxW=Math.max(window.innerWidth-40, 640);
   var saved=null;
   try{{ saved=localStorage.getItem('pstore.manual.w'); }}catch(e){{}}

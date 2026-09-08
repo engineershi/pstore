@@ -2426,8 +2426,8 @@ for (const id of ["pw","pw2"]) $(id).addEventListener("keydown", e => {{ if (e.k
         funcs = self._granted_functions()
         role_chips = "".join(
             '<span style="display:inline-block;padding:4px 12px;border-radius:20px;'
-            'background:#fff5ee;color:#a4421a;font-size:13px;font-weight:700;'
-            'border:1px solid #ffd2b8">%s</span>' % seo._clean(r) for r in roles
+            'background:linear-gradient(135deg,#eef1fd,#f5f7fd);color:#4f67e0;font-size:13px;font-weight:700;'
+            'border:1px solid #dbe2f2">%s</span>' % seo._clean(r) for r in roles
         ) if roles else '<span style="color:var(--muted);font-size:13px">No roles assigned yet</span>'
         if funcs:
             tool_cards = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-top:10px">%s</div>' % "".join(
@@ -4241,7 +4241,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
 .stengx{display:grid;grid-template-columns:minmax(0,1fr);gap:18px}
 .stengx>.card,.eng-grid,.eng-grid>.card,.stengx .feature{min-width:0}
 .eng-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;min-width:0}
-pre.preview{white-space:pre-wrap;word-break:break-word;background:#fbf7ef;border:1px solid var(--line,#eee);border-radius:12px;padding:12px;font-size:12.5px;margin-top:8px}
+pre.preview{white-space:pre-wrap;word-break:break-word;background:#f8fafc;border:1px solid var(--line,#eee);border-radius:12px;padding:12px;font-size:12.5px;margin-top:8px}
 #traf td{vertical-align:middle}
 .badg{display:inline-block;padding:2px 10px;border-radius:999px;font-size:11.5px;font-weight:700}
 .tblflow{overflow-x:auto}
@@ -5247,7 +5247,7 @@ if (inp) inp.addEventListener("keydown", e => {{ if (e.key === "Enter" && saveBt
 .preset-btn {{ text-align:left; border:2px solid var(--border); border-radius:16px; padding:12px; cursor:pointer;
   background:#fff; transition:border-color .15s ease, transform .15s ease; }}
 .preset-btn:hover {{ transform:translateY(-2px); }}
-.preset-btn.active {{ border-color:var(--accent,#ff6b2c); background:#fff6ee; }}
+.preset-btn.active {{ border-color:var(--accent); background:#f0f8fa; }}
 .preset-btn .swatches {{ display:flex; gap:6px; margin-bottom:8px; }}
 .preset-btn .swatches i {{ width:22px; height:22px; border-radius:50%; border:1px solid rgba(0,0,0,.12); display:inline-block; }}
 .preset-btn b {{ display:block; font-size:13.5px; }}
@@ -5269,7 +5269,7 @@ if (inp) inp.addEventListener("keydown", e => {{ if (e.key === "Enter" && saveBt
 details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); font-weight:700; font-size:13px; }}
 .hint-sm {{ font-size:12px; color:var(--muted); }}
 .bigbtn {{ width:100%; padding:16px; font-size:17px; font-weight:800; border-radius:14px;
-  border:0; cursor:pointer; color:#fff; background:linear-gradient(135deg,#ff6b2c,#ff873c); }}
+  border:0; cursor:pointer; color:#fff; background:linear-gradient(135deg,var(--grad-from),var(--grad-to)); }}
 </style>
 </head><body>
 <header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
@@ -7382,13 +7382,11 @@ fresh();
             'm.textContent="✓ "+s.length+" suggestion(s) for your audience";'
             'box.innerHTML='
             '"<div class=table-wrap><table class=plain><thead><tr><th>Niche suggestion</th><th>Why</th><th>Demand</th><th>Competition</th><th></th></tr></thead><tbody>"+'
-            's.map(c=>"<tr><td><b>"+esc(c.keyword)+"</b><br>"+esc(c.count+ " product(s)")+"</td>"'
-            '+ "<td>"+esc(c.reason)+"</td>"'
-            '+ "<td class=ct>"+esc(c.demand)+"</td>"'
-            '+ "<td class=ct>"+(c.saturation==null?"—":esc(c.saturation))+"</td>"'
-            '+ "<td><button class=\"mini warm\" onclick=\"buildNiche(this,\'"'
-            '+esc(c.keyword)+'
-            '\')\">▶ Build</button></td></tr>").join("")+"</tbody></table></div>";'
+            's.map(c=>`<tr><td><b>${esc(c.keyword)}</b><br>${esc(c.count+ " product(s)")}</td>`'
+            '+`<td>${esc(c.reason)}</td>`'
+            '+`<td class=ct>${esc(c.demand)}</td>`'
+            '+`<td class=ct>${c.saturation==null?"—":esc(c.saturation)}</td>`'
+            '+`<td><button class="mini warm" onclick="buildNiche(this,\'${esc(c.keyword)}\')">▶ Build</button></td>`).join("")+"</tbody></table></div>";'
             'm.className="msg";}'
             'function esc(x){return String(x).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",\'"\':"&quot;"}[c]||c));}'
             'async function buildNiche(btn,kw){btn.disabled=true;let msg=btn.nextElementSibling;'
@@ -9419,25 +9417,25 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}</s
 .hourgap.on{background:var(--accent2,#7c5cff);border-color:var(--accent2,#7c5cff);color:#fff}
 .sec-tag{font-size:11.5px;font-weight:800;letter-spacing:.6px;color:var(--muted,#888);text-transform:uppercase;margin:2px 0 8px}
 .compose-box{border:1.5px dashed var(--line,#eee);border-radius:16px;padding:16px;margin-top:12px}
-pre.preview{white-space:pre-wrap;word-break:break-word;background:#fbf7ef;border:1px solid var(--line,#eee);border-radius:12px;padding:12px;font-size:13px;margin-top:8px}
+pre.preview{white-space:pre-wrap;word-break:break-word;background:#f8fafc;border:1px solid var(--line,#eee);border-radius:12px;padding:12px;font-size:13px;margin-top:8px}
 .netmsg{font-weight:600}
 .tmpls{display:flex;flex-wrap:wrap;gap:8px}
 .tmpls label{border:1.5px solid var(--line,#eee);border-radius:12px;padding:8px 12px;font-size:13px;cursor:pointer;display:flex;gap:7px;align-items:center;background:#fff}
 .tmpls input{width:auto;height:auto}
-.tmpls label.on{border-color:var(--accent,#ff6b2c);background:#fff5ee}
-.bigbtn{width:100%;padding:14px;font-size:16px;font-weight:800;border-radius:14px;border:0;background:linear-gradient(135deg,#ff6b2c,#ff873c);color:#fff;cursor:pointer}
+.tmpls label.on{border-color:var(--accent);background:#f0f8fa}
+.bigbtn{width:100%;padding:14px;font-size:16px;font-weight:800;border-radius:14px;border:0;background:linear-gradient(135deg,var(--grad-from),var(--grad-to));color:#fff;cursor:pointer}
 .bigbtn:disabled{opacity:.55;cursor:wait}
 fieldset{border:1.5px solid var(--line,#eee);border-radius:16px;padding:14px 16px;margin:0}
 legend{font-weight:800;font-size:13px;padding:0 8px;color:var(--accent,#ff6b2c)}
 .whenrow{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:10px}
-.bump{background:#fff0e6;border:1.5px solid #ffd2b8;color:#a4421a;border-radius:12px;padding:9px 12px;font-size:12.5px;margin-bottom:12px}
+.bump{background:#fdf3e1;border:1.5px solid #f0d9a8;color:#8a5a00;border-radius:12px;padding:9px 12px;font-size:12.5px;margin-bottom:12px}
 .tabbar{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0 2px}
 .tab{border:1.5px solid var(--line,#eee);background:#fff;border-radius:999px;padding:8px 16px;font-size:13.5px;font-weight:700;cursor:pointer;color:var(--muted,#888)}
 .tab.on{background:var(--accent,#ff6b2c);border-color:var(--accent,#ff6b2c);color:#fff}
 .ibadge{display:inline-grid;place-items:center;min-width:19px;height:19px;padding:0 5px;border-radius:999px;background:#fff;color:var(--accent,#ff6b2c);font-size:11.5px;font-weight:800;margin-left:4px;vertical-align:middle}
 .tab.on .ibadge{background:#fff;color:var(--accent,#ff6b2c)}
 .mailrow{display:flex;align-items:flex-start;gap:10px;border:1.5px solid var(--line,#eee);border-radius:12px;padding:10px 12px;font-size:13px;background:#fff;margin:5px 0;cursor:pointer}
-.mailrow.unread{border-color:#ffb98f;background:#fff6ee}
+.mailrow.unread{border-color:#d7e9ec;background:#f0f8fa}
 .mailrow .mfrom{font-weight:700;font-size:13px}
 .mailrow .msubj{color:var(--text,#2b2233);font-size:13px}
 .mailrow .msnip{color:var(--muted,#888);font-size:12px;margin-top:1px}
@@ -9446,7 +9444,7 @@ legend{font-weight:800;font-size:13px;padding:0 8px;color:var(--accent,#ff6b2c)}
 .mailrow .mdate{color:var(--muted,#888);font-size:11.5px;flex:none}
 .mailrow .mstatus{flex:none;font-size:11px}
 .ibox-head{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
-#msg-view pre{white-space:pre-wrap;word-break:break-word;background:#fbf7ef;border:1px solid var(--line,#eee);border-radius:12px;padding:12px;font-size:13px;max-height:320px;overflow:auto}
+#msg-view pre{white-space:pre-wrap;word-break:break-word;background:#f8fafc;border:1px solid var(--line,#eee);border-radius:12px;padding:12px;font-size:13px;max-height:320px;overflow:auto}
 /* min-width:0 lets flex/grid rows shrink and wrap instead of blowing the
    page out to the sum of their controls' intrinsic widths on narrow screens */
 main.studiox,.studiox section,.studiox fieldset,.studiox .row,.studiox .switch{min-width:0}
@@ -9981,7 +9979,7 @@ AI status: {"<b>configured</b> (%s · %s)" % (seo._clean(_active), seo._clean(ai
     dl.innerHTML='';
     merged.forEach(function(id){{ var o=document.createElement('option'); o.value=id; dl.appendChild(o); }});
     model.placeholder = 'pick from '+merged.length+' models';
-    say(fresh.length ? ('Loaded '+fresh.length+' live models.');
+    say(fresh.length ? 'Loaded '+fresh.length+' live models.'
                       : 'No live models returned — showing known free models.', true);
   }};
   document.getElementById('ai-use').onclick = async function(){{
