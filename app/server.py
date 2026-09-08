@@ -4416,6 +4416,8 @@ document.addEventListener("DOMContentLoaded",load);
              seo.bing_site_verification() or "(none set)"),
             ("Yandex verification meta (yandex-verification)",
              seo.yandex_site_verification() or "(none set)"),
+            ("Pinterest verification meta (p:domain_verify)",
+             seo.pinterest_site_verification() or "(none set)"),
             ("Search consoles hub", seo.BASE_URL.rstrip("/") + "/admin/seoengines"),
             ("Google console OAuth client", (webmasters.GSC_CLIENT_ID or "(PSTORE_GSC_CLIENT_ID unset)")),
             ("Bing Webmaster API key", (webmasters.BING_API_KEY or webmasters.store_get("seoeng.bing.apikey")) or "(PSTORE_BING_API_KEY unset)"),
