@@ -24,237 +24,372 @@ def _esc(s):
 
 
 # --------------------------------------------------------------------------
-# PDF build — a clean, printable companion to the on-page manual.
-# pdfgen runs in Latin-1, so we stick to plain prose + bullets (no box art).
+# PDF build — a 6x9" book-format companion to the on-page manual, drawn by
+# pdfgen: styled cover, clickable contents, diagrams, a tickable checklist
+# and an About-the-founder chapter. pdfgen runs in Latin-1 (ASCII-safe text).
 # --------------------------------------------------------------------------
+def _chapters():
+    """(num, contents-row label, blurb, drawer fn) in reading order."""
+    ACC, SAGE, TEAL, PLUM = (255, 107, 44), (120, 150, 135), (90, 140, 150), (140, 120, 150)
+    F = "Engr Salahuddin Habibu Isah"
+
+    def c1(doc, num, label, blurb):
+        doc.chapter(num, label, blurb)
+        doc.paragraph(
+            "pstore is a self-contained Amazon affiliate business in a box. You give "
+            "it one seed keyword and it builds a complete money-making machine: ranked "
+            "review pages, a sales landing page, an email opt-in with a 5-part buyer "
+            "sequence, an AI-written PDF lead magnet, social post kits, an SEM keyword "
+            "brief, an SEO audit, click analytics and an automatic data refresher. "
+            "Every Amazon link carries your affiliate tag.")
+        doc.paragraph(
+            "The business runs on a loop: a visitor lands on your niche page (from "
+            "Google, social or email), reads the ranked picks, clicks your tagged "
+            "Amazon link and buys. Along the way they can opt in to email, and the "
+            "5-part sequence turns those free visitors into repeat buyers. One niche "
+            "is nice; many niches, each with the loop running, is the game.")
+        doc.spacer(8)
+        doc.flow_chart([("MINE", ACC), ("RANK", SAGE), ("CAPTURE", TEAL), ("SELL", PLUM)], doc.y)
+        doc.spacer(6)
+        doc.pullquote("One seed keyword in. A full selling funnel out.")
+        doc.page_break()
+
+    def c2(doc, num, label, blurb):
+        doc.chapter(num, label, blurb)
+        doc.paragraph("Every niche moves through four phases. Run all four, every time - "
+                      "and the exact funnel is built right into the Workbench (/tool), "
+                      "so the app itself is your roadmap.")
+        colors = (ACC, SAGE, TEAL, PLUM)
+        doc.spacer(10)
+        n, slot = 4, doc.body_w / 4
+        cw, y = slot * 0.74, doc.y - 40
+        for i, (name, color) in enumerate(zip(("ATTRACT", "CONVERT", "DELIVER", "MULTIPLY"), colors)):
+            x = doc.margin_x + i * slot + (slot - cw) / 2
+            doc.chevron(x, y, cw, 42, color)
+            doc.text(name, x + cw / 2, y + 16, 10.5, (255, 255, 255), bold=True,
+                     align="center", cx=x + cw / 2)
+            if i < 3:
+                doc.arrow(x + cw + 4, y + 21, x + slot - 4, (160, 150, 160), width=1.6, head=5)
+        doc.spacer(34)
+        doc.paragraph("Attract - get people to the page (SEO niche pages, social posts, "
+                      "email). Convert - turn visitors into subscribers via the opt-in "
+                      "form. Deliver - send the free ebook and the 5-part email sequence. "
+                      "Multiply - use analytics to double down, and add more niches.")
+        doc.page_break()
+
+    def c3(doc, num, label, blurb):
+        doc.chapter(num, label, blurb)
+        doc.paragraph(
+            "Mine on the Marketing Workbench (/tool) via Launch marketing, or call the "
+            "mining API. Enter a broad buying seed such as 'air fryer' or 'trail "
+            "camera'. pstore runs your seed through Amazon's own keyless autosuggest "
+            "and product search, then reports a demand score (0-10), a saturation "
+            "score (0-10) and a magnet product - the best entry offer by reviews and "
+            "price.")
+        doc.bullets([
+            "Pick seeds with high demand and lower saturation first.",
+            "Saving a niche auto-generates its review page and auto-submits it to IndexNow.",
+            "One seed expands into several sub-niches from autosuggest - save them all.",
+        ])
+        doc.page_break()
+
+    def c4(doc, num, label, blurb):
+        doc.chapter(num, label, blurb)
+        doc.paragraph(
+            "Open the SEO audit (/admin/seo) and check the site health strip. Every "
+            "niche should show 'indexable'; fix any row with a red badge (title too "
+            "long, missing description, no products). Then open the Search Funnel "
+            "(/admin/sem) for each niche to get an intent brief, long-tail keywords "
+            "and people-also-ask prompts that tell you exactly what to add.")
+        doc.paragraph(
+            "Indexing is automatic: the moment a niche is saved, pstore submits the "
+            "page to IndexNow for near-instant Bing and Google discovery. Confirm the "
+            "key is live on the Keys page (/keys).")
+        doc.paragraph(
+            "To reach Google, Bing and Yandex at full speed, open the Search "
+            "Engines hub (/admin/seoengines): connect Google Search Console and "
+            "Yandex via OAuth, paste your Bing API key, then Fetch stats pulls real "
+            "clicks and impressions per engine and Submit sitemap re-pings it. Until "
+            "a console is connected, the Traffic panel shows referral-attributed page "
+            "views and clicks from your own on-site beacon.")
+        doc.paragraph(
+            "Own the site everywhere it is listed: claim your domain with Google, "
+            "Bing, Yandex and Pinterest from the Keys page (/keys) - paste each "
+            "engine's verification token (or the meta tag it gives you) and every "
+            "public page emits the matching meta tag so the claim verifies.")
+        doc.page_break()
+
+    def c5(doc, num, label, blurb):
+        doc.chapter(num, label, blurb)
+        doc.paragraph(
+            "Every niche page and the homepage already render an opt-in form that "
+            "collects first name and email. The first name is used to personalise "
+            "every email ('Hi Jane,' not 'Hi there'), which lifts open rates.")
+        doc.bullets([
+            "Emails are only sent to opted-in subscribers.",
+            "Re-subscribing reactivates a previously unsubscribed address.",
+            "An unsubscribe link and List-Unsubscribe header are added to every email.",
+        ])
+        doc.page_break()
+
+    def c6(doc, num, label, blurb):
+        doc.chapter(num, label, blurb)
+        doc.paragraph(
+            "Every niche gets a dedicated, fully editable sales landing page at "
+            "/lp/<slug>. It is the money page: it turns cold traffic (from Google, "
+            "social, QR codes or emails) into subscribers and Amazon clicks. You run "
+            "it entirely from the Landing Pages editor (/admin/cms) - no code.")
+        doc.bullets([
+            "Pick a style template in one click: sunset (warm default), clean, forest, ocean or midnight (dark). The preset re-skins the entire page instantly.",
+            "Feature toggles switch the promo banner + discount code, the countdown timer, the sticky buy button and reveal animations on or off per niche.",
+            "Every section has its own show/hide switch: hero, social proof, product spotlight, email gate, testimonials, urgency, guarantee, FAQ and more.",
+            "Generate copy rebuilds all section text from the niche in one click; Apply preset re-skins without touching your custom copy - the two never fight.",
+        ])
+        doc.paragraph(
+            "The page is persuasion-engineered (Suby's How to Sell Like Crazy + "
+            "Cialdini's Influence): live-data social proof, scarcity counters, an "
+            "honest disclosure and a reciprocity offer - a free niche PDF guide "
+            "delivered the moment a visitor opts in. Email gate on means the PDF is "
+            "unlocked by a short-lived token issued on subscribe; flip the PDF gate "
+            "off to hand out the PDF with no email wall. Landing pages are indexed "
+            "too: each /lp/<slug> appears in your sitemap with a canonical URL.")
+        doc.page_break()
+
+    def c7(doc, num, label, blurb):
+        doc.chapter(num, label, blurb)
+        doc.paragraph(
+            "Every subscriber enters a 5-email sequence built from the niche's top "
+            "pick: (1) hook and value, (2) social proof, (3) objections, (4) soft "
+            "urgency, (5) follow-up and review request. Each email carries your tagged "
+            "Amazon link.")
+        doc.paragraph(
+            "Email Studio (/admin/emails) is the one place to compose and send mail: "
+            "pick any niche, segment (hot/warm/cold/converted/inactive) or typed "
+            "address list, choose a sequence step, converted follow-up, re-engage or "
+            "a fully custom subject + body, then deliver now or schedule a slot (UTC). "
+            "A live preview shows exactly what lands in the inbox.")
+        doc.bullets([
+            "Pick recipients with the checkboxes, or type any address(es) - one per line; the recipient count updates live.",
+            "The Studio's tabs organize the whole mail lifecycle: Compose, Inbox (replies), Subscribers (search, filter, unsubscribe/resubscribe/delete), Drafts (save, reopen and edit any composition) and Sent/scheduled (review or cancel scheduled mail).",
+            "Switches control the tracked affiliate link, open-tracking pixel, PDF attachment, dedup and sequence progress.",
+            "Dry-run first to preview the send counts without emailing anyone.",
+            "Auto-send runs the 5-step sequence to every ready subscriber on your chosen UTC hours; the Email Studio page shows the last run and lets you toggle it.",
+            "Replies are captured too: the Studio's Inbox tab polls your IMAP mailbox (IMAP_HOST/USER/PASSWORD, or a forwarder hitting /api/cron/inbox) and maps each reply back to the subscriber via a tagged Reply-To address, so you can read, archive, mark read or reply from the same page.",
+        ])
+        doc.page_break()
+
+    def c8(doc, num, label, blurb):
+        doc.chapter(num, label, blurb)
+        doc.paragraph(
+            "The Ebooks page (/admin/ebooks) turns any niche into a designed PDF in "
+            "one click. Free AI providers are built in (OpenCode, Mistral, NVIDIA) so "
+            "it works with no budget; add an OpenAI key for higher polish.")
+        doc.paragraph(
+            "The Social page (/admin/social) generates a ready-to-post kit for X, "
+            "Facebook, LinkedIn, Instagram, Pinterest and Threads. Each kit has a "
+            "platform caption, hashtags and a tracked link with its own code, so every "
+            "post's clicks are counted individually in Analytics.")
+        doc.paragraph(
+            "Marketing boosts on the Workbench (/tool) mint a real, UTM-tracked "
+            "campaign per promo angle: Run persists it, folds in the SEM long-tail "
+            "phrases, warms the lead-magnet PDF and pings IndexNow; the Social page "
+            "can publish it as a live, attributed Boost post. Each boost keeps a "
+            "stable link, so its clicks aggregate over time.")
+        doc.page_break()
+
+    def c9(doc, num, label, blurb):
+        doc.chapter(num, label, blurb)
+        doc.paragraph(
+            "Instead of doing steps by hand, use Launch marketing on the Workbench "
+            "(/tool): it builds the entire funnel for a niche and prints a status "
+            "strip showing the landing page is live, IndexNow queued, ebook ready and "
+            "clicks tracking. The Workbench also provides DMs, the review pipeline, "
+            "boost campaigns, text links, Markdown and QR codes.")
+        doc.paragraph(
+            "The Data Refresh page (/admin/refresh) keeps prices and ratings accurate. "
+            "A background loop re-mines stale niches on a schedule (interval, staleness "
+            "window and per-cycle cap are configurable). Use 'Refresh now' per niche or "
+            "'Refresh all now' for a manual pass.")
+        doc.pullquote("Fresh data protects trust - and trust protects commissions.")
+        doc.page_break()
+
+    def c10(doc, num, label, blurb):
+        doc.chapter(num, label, blurb)
+        doc.paragraph(
+            "Watch Analytics and double down on the most-clicked products and best "
+            "sources. It shows page views (leads + public site) and lead-page "
+            "interactions - promo taps, countdown hits, sticky CTA clicks, PDF "
+            "downloads - so you can tune the landing page itself, not just the links. "
+            "Here is a busy month, purely illustrative:")
+        doc.spacer(8)
+        doc.bar_chart(doc.margin_x, doc.y - 105, doc.body_w, 96,
+                      [4.2, 3.1, 2.4, 1.6], ["SEO", "Social", "Email", "Direct"],
+                      (ACC, SAGE, TEAL, PLUM), title="Clicks by source")
+        doc.spacer(8)
+        doc.paragraph(
+            "Use the numbers to pick your next niche: high demand, lower saturation "
+            "first - and always let the honest referral data, never a guess, tell "
+            "you where the next post or email goes.")
+        doc.page_break()
+
+    def c11(doc, num, label, blurb):
+        doc.chapter(num, label, blurb)
+        doc.paragraph(
+            "pstore runs as a small team. From the login page a colleague requests "
+            "an account, signs up with their work email and receives a branded "
+            "confirmation email - the account stays unverified until they click that "
+            "link, which activates it and signs them straight in. Colleagues with "
+            "tool access land on the Dashboard; everyone else lands on a welcome "
+            "page until the owner grants roles.")
+        doc.bullets([
+            "Every tool belongs to one function (Idea tools, Email Studio, Social, "
+            "SEO and consoles, Content, Marketing and ROI, Analytics, Keys). A role "
+            "is a custom matrix of functions; a user can hold several roles and "
+            "their access is the union, enforced server-side on pages and their "
+            "APIs alike.",
+            "Only the owner manages users and roles (/admin/users) - create or "
+            "disable users, change roles, reset passwords. Disabling an account "
+            "kills its sessions instantly.",
+            "Team members edit their own profile on the Dashboard (display name, or "
+            "a new password with the same policy rules as signup); their session "
+            "survives a name change.",
+            "Forgot your password? The login page emails a secure, single-use reset "
+            "link (valid one hour) that never leaks whether an email has an account.",
+        ])
+        doc.page_break()
+
+    def c12(doc, num, label, blurb):
+        doc.chapter(num, label, blurb)
+        doc.paragraph(
+            "Every send carries a unique tagged Reply-To (pstore+<subscriber-id>@"
+            "yourdomain), so when a customer replies the Email Studio Inbox tab "
+            "catches it. Either it polls your IMAP mailbox (IMAP_HOST / IMAP_USER / "
+            "IMAP_PASSWORD) every 60 seconds, or any forwarder can POST /api/cron/"
+            "inbox with your EMAIL_CRON_SECRET to trigger a pull on demand.")
+        doc.bullets([
+            "Each reply is linked to its subscriber: the tag in the Reply-To wins, "
+            "with a from-address match as fallback.",
+            "Open a message to read it, then Reply right from the studio - the "
+            "answer threads (Re:) in the customer's mail client.",
+            "Mark read/unread, archive or delete any message; the Studio's tabs "
+            "cover the whole lifecycle: Compose, Inbox, Subscribers, Drafts and "
+            "Sent (with cancel for still-scheduled mail).",
+        ])
+        doc.page_break()
+
+    def c13(doc, num, label, blurb):
+        doc.chapter(num, label, blurb)
+        doc.paragraph("The short, high-leverage habits that keep every niche fresh:")
+        doc.bullets([
+            "Set the affiliate tag and SMTP first - nothing else matters until those work.",
+            "Stack traffic: SEO (compounding) + social (fast) + email (cheap) + QR and landing pages (offline).",
+            "Watch Analytics and double down on the most-clicked products and best sources.",
+            "Choose niches like a fund: high demand, lower saturation first.",
+            "Comply always: opted-in emails, FTC/Associates disclosure, direct tagged links.",
+        ])
+        doc.spacer(10)
+        doc.paragraph("The 30-minute run for a new niche - tick them off as you go "
+                      "(the boxes really are tickable in your PDF reader):",
+                      color=(150, 140, 155))
+        for i, step in enumerate([
+            "Pick a seed (high demand, lower saturation)",
+            "Mine it, review demand and saturation, save the niche",
+            "SEO audit - confirm indexable, fix any reds",
+            "SEM - note the long-tails and PAA prompts",
+            "Landing pages - pick a preset, set toggles, generate copy",
+            "Workbench - Launch marketing",
+            "Ebooks - generate the PDF",
+            "Social - publish to 1-2 platforms",
+            "Email Studio - dry-run, then send the first batch",
+            "Refresh - confirm auto-refresh is on, paste links and QR codes",
+        ]):
+            doc.checkbox("run_%d" % (i + 1), step, checked=(i < 5))
+        doc.spacer(14)
+        doc.pullquote("Run all four phases, every time, for every niche.")
+        doc.page_break()
+
+    def c14(doc, num, label, blurb):
+        doc.chapter(num, label, blurb)
+        doc.paragraph(
+            "pstore was conceived, architected and built from scratch by " + F + " - "
+            "one software engineer, one codebase, and not a single third-party "
+            "library. The whole machine you hold in your hands is hand-written "
+            "Python on the standard library: the mining engine, the search-ranked "
+            "review pages, the landing-page CMS, the email studio with its 5-part "
+            "sequence, the AI ebook builder, the social kits, the UTM boosts, the "
+            "click analytics, the auto-refresh loop, the rate-limited security layer "
+            "and this very book - drawn page by page by the app's own PDF engine.")
+        doc.two_col([
+            ("Role", "Founder and lead engineer"),
+            ("Email", "salahuddinhabibisah@gmail.com"),
+            ("Phone", "+234 803 9177 353"),
+            ("Built", "pstore, end to end"),
+        ])
+        doc.paragraph(
+            "Every feature exists because it earns its keep in the money loop: "
+            "opt-in only email, honest attribution, disclosed affiliate links, and "
+            "fresh pricing. If you run the loop well, the software quietly prints "
+            "the smallest, tidiest commissions a machine can make.")
+        doc.spacer(6)
+        doc.pullquote("Built by hand, shipped daily, kept honest by one rule: "
+                      "every Amazon link carries your tag.")
+        doc.spacer(8)
+        box_w, box_h, y = doc.body_w, 40, doc.y - 26
+        doc.rect(doc.margin_x, y, box_w, box_h, (255, 247, 240), r=12)
+        doc.rect(doc.margin_x, y, 5, box_h, (255, 107, 44), r=3)
+        doc.text("Visit the live guide", doc.margin_x + 18, y + 24, 11.5, (45, 40, 52), bold=True)
+        doc.text("pstore-gxbv.onrender.com", doc.margin_x + 18, y + 10, 10, (130, 120, 145))
+        doc.uri(doc.margin_x, y, box_w, box_h, "https://pstore-gxbv.onrender.com")
+        doc.spacer(30)
+        doc.text("Thank you for running it.", doc.margin_x, doc.y - 12, 12, (45, 40, 52), bold=True)
+        doc.page_break()
+
+    return [
+        (1, "Money machine in a box", "What pstore is, and the loop it runs", c1),
+        (2, "Run the four phases", "The mental model that drives every niche", c2),
+        (3, "Step 1 - Mine a niche", "Seeds, demand, saturation", c3),
+        (4, "Step 2 - Rank on the web", "SEO audit, SEM brief, site claims", c4),
+        (5, "Step 3 - Capture the email", "Opt-in forms that lift open rates", c5),
+        (6, "The sales landing page", "CMS page, presets and toggles", c6),
+        (7, "Step 4 - Send the sequence", "Email Studio, segments, schedules", c7),
+        (8, "Ebook, social and boosts", "Lead magnet, kits, UTM campaigns", c8),
+        (9, "Launch and keep data fresh", "One click to whole funnel", c9),
+        (10, "Read the numbers", "Analytics, page views, interactions", c10),
+        (11, "Team access and roles", "Accounts, confirmation, permissions", c11),
+        (12, "Inbox and conversations", "Replies, threads, IMAP", c12),
+        (13, "Highest-form playbook", "Habits, checklist, tick-box run", c13),
+        (14, "About the founder", "The engineer who built it from scratch", c14),
+    ]
+
+
 def build_pdf():
+    """Two passes: first records every chapter's start page, then we draw the
+    cover, a clickable Contents, and the chapters (identical rendering, so the
+    page numbers and internal links stay exact)."""
+    plan = {}
+    _probe = pdfgen.Pdf(accent=_ACCENT, bg=_BG)
+    for num, label, blurb, fn in _chapters():
+        plan[num] = _probe.current_page()
+        fn(_probe, num, label, blurb)
     doc = pdfgen.Pdf(accent=_ACCENT, bg=_BG)
     doc.cover(
         "The pstore User Guide",
         "How to run this software at its highest form: mine niches, rank on "
         "Google, capture emails, send the 5-part buyer sequence, publish on "
-        "social and keep your data fresh — step by step.",
+        "social and keep your data fresh - step by step.",
         kicker="OWNER MANUAL",
+        owner="Engr Salahuddin Habibu Isah",
+        site="Built from scratch by the founder - a free guide from pstore",
     )
-
-    doc.heading("What pstore is")
-    doc.paragraph(
-        "pstore is a self-contained Amazon affiliate business in a box. You give "
-        "it one seed keyword and it builds a complete money-making machine: ranked "
-        "review pages, a sales landing page, an email opt-in with a 5-part buyer "
-        "sequence, an AI-written PDF lead magnet, social post kits, an SEM keyword "
-        "brief, an SEO audit, click analytics and an automatic data refresher. "
-        "Every Amazon link carries your affiliate tag.")
-    doc.paragraph(
-        "The business runs on a loop: a visitor lands on your niche page (from "
-        "Google, social or email), reads the ranked picks, clicks your tagged "
-        "Amazon link and buys. Along the way they can opt in to email, and the "
-        "5-part sequence turns those free visitors into repeat buyers. One niche "
-        "is nice; many niches, each with the loop running, is the game.")
-    doc.pullquote("One seed keyword in. A full selling funnel out.")
     doc.page_break()
-
-    doc.heading("The 4 phases")
-    doc.paragraph("Every niche moves through four phases. Run all four, every time.")
-    doc.bullets([
-        "1. Attract — get people to the page (SEO niche pages, social posts, email).",
-        "2. Convert — turn visitors into subscribers via the opt-in form.",
-        "3. Deliver — send the free ebook and the 5-part email sequence.",
-        "4. Multiply — use analytics to double down, and add more niches.",
-    ])
-    doc.paragraph(
-        "These four stages are built right into the Marketing Workbench (/tool), "
-        "so the app itself is your roadmap.")
+    doc.heading("Contents")
+    doc.spacer(6)
+    for num, label, blurb, fn in _chapters():
+        start = plan[num] + 2  # the cover and this Contents page shift chapters
+        doc._toc_row("%d" % num, label, start + 1, start)
     doc.page_break()
-
-    doc.heading("Step 1 — Mine a niche")
-    doc.paragraph(
-        "Mine on the Marketing Workbench (/tool) via Launch marketing, or call the "
-        "mining API. Enter a broad buying seed such as 'air fryer' or 'trail "
-        "camera'. pstore runs your seed through Amazon's own keyless autosuggest "
-        "and product search, then reports a demand score (0-10), a saturation "
-        "score (0-10) and a magnet product — the best entry offer by reviews and "
-        "price.")
-    doc.bullets([
-        "Pick seeds with high demand and lower saturation first.",
-        "Saving a niche auto-generates its review page and auto-submits it to IndexNow.",
-        "One seed expands into several sub-niches from autosuggest — save them all.",
-    ])
-    doc.page_break()
-
-    doc.heading("Step 2 — Rank on Google (SEO)")
-    doc.paragraph(
-        "Open the SEO audit (/admin/seo) and check the site health strip. Every "
-        "niche should show 'indexable'; fix any row with a red badge (title too "
-        "long, missing description, no products). Then open the Search Funnel "
-        "(/admin/sem) for each niche to get an intent brief, long-tail keywords "
-        "and people-also-ask prompts that tell you exactly what to add.")
-    doc.paragraph(
-        "Indexing is automatic: the moment a niche is saved, pstore submits the "
-        "page to IndexNow for near-instant Bing and Google discovery. Confirm the "
-        "key is live on the Keys page (/keys).")
-    doc.paragraph(
-        "To reach Google, Bing and Yandex at full speed, open the Search "
-        "Engines hub (/admin/seoengines): connect Google Search Console and "
-        "Yandex via OAuth, paste your Bing API key, then Fetch stats pulls real "
-        "clicks and impressions per engine and Submit sitemap re-pings it. Until "
-        "a console is connected, the Traffic panel shows referral-attributed page "
-        "views and clicks from your own on-site beacon.")
-    doc.paragraph(
-        "Own the site everywhere it is listed: claim your domain with Google, "
-        "Bing, Yandex and Pinterest from the Keys page (/keys) - paste each "
-        "engine's verification token (or the meta tag it gives you) and every "
-        "public page emits the matching meta tag so the claim verifies.")
-    doc.page_break()
-
-    doc.heading("Step 3 — Capture the email")
-    doc.paragraph(
-        "Every niche page and the homepage already render an opt-in form that "
-        "collects first name and email. The first name is used to personalise "
-        "every email ('Hi Jane,' not 'Hi there'), which lifts open rates.")
-    doc.bullets([
-        "Emails are only sent to opted-in subscribers.",
-        "Re-subscribing reactivates a previously unsubscribed address.",
-        "An unsubscribe link and List-Unsubscribe header are added to every email.",
-    ])
-    doc.page_break()
-
-    doc.heading("The landing page — CMS sales page")
-    doc.paragraph(
-        "Every niche gets a dedicated, fully editable sales landing page at "
-        "/lp/<slug>. It is the money page: it turns cold traffic (from Google, "
-        "social, QR codes or emails) into subscribers and Amazon clicks. You run "
-        "it entirely from the Landing Pages editor (/admin/cms) — no code.")
-    doc.bullets([
-        "Pick a style template in one click: sunset (warm default), clean, forest, ocean or midnight (dark). The preset re-skins the entire page instantly.",
-        "Feature toggles switch the promo banner + discount code, the countdown timer, the sticky buy button and reveal animations on or off per niche.",
-        "Every section has its own show/hide switch: hero, social proof, product spotlight, email gate, testimonials, urgency, guarantee, FAQ and more.",
-        "Generate copy rebuilds all section text from the niche in one click; Apply preset re-skins without touching your custom copy — the two never fight.",
-    ])
-    doc.paragraph(
-        "The page is persuasion-engineered (Suby's How to Sell Like Crazy + "
-        "Cialdini's Influence): live-data social proof, scarcity counters, an "
-        "honest disclosure and a reciprocity offer — a free niche PDF guide "
-        "delivered the moment a visitor opts in. Email gate on means the PDF is "
-        "unlocked by a short-lived token issued on subscribe; flip the PDF gate "
-        "off to hand out the PDF with no email wall. Landing pages are indexed "
-        "too: each /lp/<slug> appears in your sitemap with a canonical URL.")
-    doc.page_break()
-
-    doc.heading("Step 4 — Send the 5-part buyer sequence")
-    doc.paragraph(
-        "Every subscriber enters a 5-email sequence built from the niche's top "
-        "pick: (1) hook and value, (2) social proof, (3) objections, (4) soft "
-        "urgency, (5) follow-up and review request. Each email carries your tagged "
-        "Amazon link.")
-    doc.paragraph(
-        "Email Studio (/admin/emails) is the one place to compose and send mail: "
-        "pick any niche, segment (hot/warm/cold/converted/inactive) or typed "
-        "address list, choose a sequence step, converted follow-up, re-engage or "
-        "a fully custom subject + body, then deliver now or schedule a slot (UTC). "
-        "A live preview shows exactly what lands in the inbox.")
-    doc.bullets([
-        "Pick recipients with the checkboxes, or type any address(es) — one per line; the recipient count updates live.",
-        "The Studio's tabs organize the whole mail lifecycle: Compose, Inbox (replies), Subscribers (search, filter, unsubscribe/resubscribe/delete), Drafts (save, reopen and edit any composition) and Sent/scheduled (review or cancel scheduled mail).",
-        "Switches control the tracked affiliate link, open-tracking pixel, PDF attachment, dedup and sequence progress.",
-        "Dry-run first to preview the send counts without emailing anyone.",
-        "Auto-send runs the 5-step sequence to every ready subscriber on your chosen UTC hours; the Email Studio page shows the last run and lets you toggle it.",
-        "Replies are captured too: the Studio's Inbox tab polls your IMAP mailbox (IMAP_HOST/USER/PASSWORD, or a forwarder hitting /api/cron/inbox) and maps each reply back to the subscriber via a tagged Reply-To address, so you can read, archive, mark read or reply from the same page.",
-    ])
-    doc.page_break()
-
-    doc.heading("Step 5-6 — Ebook lead magnet and social posts")
-    doc.paragraph(
-        "The Ebooks page (/admin/ebooks) turns any niche into a designed PDF in "
-        "one click. Free AI providers are built in (OpenCode, Mistral, NVIDIA) so "
-        "it works with no budget; add an OpenAI key for higher polish.")
-    doc.paragraph(
-        "The Social page (/admin/social) generates a ready-to-post kit for X, "
-        "Facebook, LinkedIn, Instagram, Pinterest and Threads. Each kit has a "
-        "platform caption, hashtags and a tracked link with its own code, so every "
-        "post's clicks are counted individually in Analytics.")
-    doc.paragraph(
-        "Marketing boosts on the Workbench (/tool) mint a real, UTM-tracked "
-        "campaign per promo angle: Run persists it, folds in the SEM long-tail "
-        "phrases, warms the lead-magnet PDF and pings IndexNow; the Social page "
-        "can publish it as a live, attributed Boost post. Each boost keeps a "
-        "stable link, so its clicks aggregate over time.")
-    doc.page_break()
-
-    doc.heading("Step 7-8 — Launch and keep data fresh")
-    doc.paragraph(
-        "Instead of doing steps by hand, use Launch marketing on the Workbench "
-        "(/tool): it builds the entire funnel for a niche and prints a status "
-        "strip showing the landing page is live, IndexNow queued, ebook ready and "
-        "clicks tracking. The Workbench also provides DMs, the review pipeline, "
-        "boost campaigns, text links, Markdown and QR codes.")
-    doc.paragraph(
-        "The Data Refresh page (/admin/refresh) keeps prices and ratings accurate. "
-        "A background loop re-mines stale niches on a schedule (interval, staleness "
-        "window and per-cycle cap are configurable). Use 'Refresh now' per niche or "
-        "'Refresh all now' for a manual pass.")
-    doc.pullquote("Fresh data protects trust — and trust protects commissions.")
-    doc.page_break()
-
-    doc.heading("Highest-form playbook")
-    doc.bullets([
-        "Set the affiliate tag and SMTP first — nothing else matters until those work.",
-        "Stack traffic: SEO (compounding) + social (fast) + email (cheap) + QR and landing pages (offline).",
-        "Watch Analytics and double down on the most-clicked products and best "
-        "sources - it also shows page views and lead-page interactions (promo "
-        "taps, countdown hits, sticky CTA clicks, PDF downloads) so you can tune "
-        "the landing page itself, not just the links.",
-        "Choose niches like a fund: high demand, lower saturation first.",
-        "Comply always: opted-in emails, FTC/Associates disclosure, direct tagged links.",
-    ])
-    doc.paragraph(
-        "Checklist for a new niche: pick a seed, mine it, confirm indexable in the "
-        "SEO audit, note the SEM long-tails, Launch marketing, generate the ebook, "
-        "publish one or two social posts, dry-run then send the emails, confirm "
-        "auto-refresh is on, and paste the text links and QR code anywhere relevant.")
-    doc.page_break()
-
-    doc.heading("Team access and roles")
-    doc.paragraph(
-        "pstore runs as a small team. From the login page a colleague requests "
-        "an account, signs up with their work email and receives a branded "
-        "confirmation email - the account stays unverified until they click that "
-        "link, which activates it and signs them straight in. Colleagues with "
-        "tool access land on the Dashboard; everyone else lands on a welcome "
-        "page until the owner grants roles.")
-    doc.bullets([
-        "Every tool belongs to one function (Idea tools, Email Studio, Social, "
-        "SEO and consoles, Content, Marketing and ROI, Analytics, Keys). A role "
-        "is a custom matrix of functions; a user can hold several roles and "
-        "their access is the union, enforced server-side on pages and their "
-        "APIs alike.",
-        "Only the owner manages users and roles (/admin/users) - create or "
-        "disable users, change roles, reset passwords. Disabling an account "
-        "kills its sessions instantly.",
-        "Team members edit their own profile on the Dashboard (display name, or "
-        "a new password with the same policy rules as signup); their session "
-        "survives a name change.",
-        "Forgot your password? The login page emails a secure, single-use reset "
-        "link (valid one hour) that never leaks whether an email has an account.",
-    ])
-    doc.page_break()
-
-    doc.heading("Inbox - conversations, not just broadcasts")
-    doc.paragraph(
-        "Every send carries a unique tagged Reply-To (pstore+<subscriber-id>@"
-        "yourdomain), so when a customer replies the Email Studio Inbox tab "
-        "catches it. Either it polls your IMAP mailbox (IMAP_HOST / IMAP_USER / "
-        "IMAP_PASSWORD) every 60 seconds, or any forwarder can POST /api/cron/"
-        "inbox with your EMAIL_CRON_SECRET to trigger a pull on demand.")
-    doc.bullets([
-        "Each reply is linked to its subscriber: the tag in the Reply-To wins, "
-        "with a from-address match as fallback.",
-        "Open a message to read it, then Reply right from the studio - the "
-        "answer threads (Re:) in the customer's mail client.",
-        "Mark read/unread, archive or delete any message; the Studio's tabs "
-        "cover the whole lifecycle: Compose, Inbox, Subscribers, Drafts and "
-        "Sent (with cancel for still-scheduled mail).",
-    ])
+    for num, label, blurb, fn in _chapters():
+        fn(doc, num, label, blurb)
     return doc.save()
 
 
@@ -361,7 +496,7 @@ def render_admin_manual(nav_html, totop_html):
   <a class="btn" href="#toc">Jump to contents ↧</a>
   <a class="btn ghost" href="/admin">🗺 Back to all pages</a>
 </div>
-<p class="hint" style="margin-top:10px">A styled, printable PDF companion (no links — a document can't click). The section below is fully linked. Use the controls above to widen the reading window up to full page.</p>
+<p class="hint" style="margin-top:10px">The companion PDF is now a real 6×9" book: styled pages, clickable links and a live table of contents, diagrams and a tickable 30-minute checklist — download it and tick boxes right in your PDF reader.</p>
 </section>
 
 <section class="card"><h2>🧭 Every tool &amp; feature — one click</h2>
@@ -385,6 +520,7 @@ def render_admin_manual(nav_html, totop_html):
   <a href="#checklist">11 · 30-min checklist</a>
   <a href="#team">12 · Team access &amp; roles</a>
   <a href="#inbox">13 · Inbox &amp; conversations</a>
+  <a href="#founder">14 · About the founder</a>
 </nav>
 
 <h3 id="what">1 · What pstore is</h3>
@@ -505,6 +641,14 @@ def render_admin_manual(nav_html, totop_html):
 <li>Replies you send appear in the studio's <b>Recent activity</b> alongside your campaigns.</li>
 <li><code>SMTP_REPLY_TO</code> (single address) still works as the fallback; the per-subscriber tag simply makes every reply attributable.</li>
 <li>The Studio covers the whole mail lifecycle in tabs: <b>Compose</b>, <b>Inbox</b> (replies), <b>Subscribers</b> (search, status filter, unsubscribe/resubscribe/delete), <b>Drafts</b> (save a composition, reopen and edit it later) and <b>Sent</b> (outbound history with cancel for still-scheduled mail).</li>
+</ul>
+<h3 id="founder">14 · About the founder</h3>
+<p>pstore was conceived, architected and built <b>from scratch</b> by <a href="mailto:salahuddinhabibisah@gmail.com"><b>Engr Salahuddin Habibu Isah</b></a> — one software engineer, one codebase, and not a single third-party library. The whole machine is hand-written Python on the standard library: the mining engine, the search-ranked review pages, the landing-page CMS, the email studio with its 5-part sequence, the AI ebook builder, the social kits, the UTM boosts, the click analytics, the auto-refresh loop, the security layer — and this manual's PDF, drawn page by page by the app's own book-format PDF engine.</p>
+<ul class="step-list">
+<li><b>Role</b> — Founder and lead engineer.</li>
+<li><b>Email</b> — <a href="mailto:salahuddinhabibisah@gmail.com">salahuddinhabibisah@gmail.com</a>.</li>
+<li><b>Phone</b> — +234 803 9177 353.</li>
+<li>Every feature exists because it earns its keep in the money loop: opt-in-only email, honest attribution, disclosed affiliate links, and fresh pricing. Run the loop well and the software quietly prints the smallest, tidiest commissions a machine can make.</li>
 </ul>
 </section>
 </div>
