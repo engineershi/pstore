@@ -153,23 +153,42 @@ class Pdf:
         self.circle(58, h - 112, 9, (244, 198, 180))
         self.circle(40, h - 170, 5, (228, 182, 166))
         self.chip(48, h - 254, 92, 22, self.accent, label="PSTORE", size=9)
-        y = h - 344
+        # Measured text block: the subtitle's last baseline is anchored just
+        # above the four-phase strip (126..  - the strip's top), so title and
+        # subtitle can have ANY number of lines and still never collide.
+        tsize, tadv = 30, 41
+        ssize, slead = 12, 19
+        t_w, s_w = int(self.body_w * 0.94), int(self.body_w * 0.9)
+        nT = len(_wrap(title or "", t_w, tsize))
+        nS = len(_wrap(subtitle or "", s_w, ssize))
+        sub_last = 170  # baseline of the subtitle's final line
+        top = sub_last + (nS - 1) * slead + 4 + nT * tadv + (22 if kicker else 0)
+        if top > 380:  # very long copy: step down sizes once
+            tsize, tadv, ssize, slead = 28, 37, 11, 17
+            nT = len(_wrap(title or "", t_w, tsize))
+            nS = len(_wrap(subtitle or "", s_w, ssize))
+            top = sub_last + (nS - 1) * slead + 4 + nT * tadv + (22 if kicker else 0)
+        if top > 385:  # still tall: let the strip sit a little lower instead
+            sub_last = 144
+            top = sub_last + (nS - 1) * slead + 4 + nT * tadv + (22 if kicker else 0)
+        # first title baseline sits `top`; draw downward from there
+        y = top
         if kicker:
-            self.text(_esc(kicker).upper(), 48, y, 10, (150, 96, 74), bold=True)
-            y -= 22
-        self.rect(48, y + 5, 34, 2.4, self.accent)
-        y -= 25
-        for line in _wrap(title or "", int(self.body_w * 0.94), 30):
-            self.text(line, 48, y, 30, self.ink, bold=True)
-            y -= 41
+            self.text(_esc(kicker).upper(), 48, y + 22, 10, (150, 96, 74), bold=True)
+        self.rect(48, y + 6, 34, 2.4, self.accent)
+        for i, line in enumerate(_wrap(title or "", t_w, tsize)):
+            self.text(line, 48, y, tsize, self.ink, bold=True)
+            y -= tadv
         y -= 4
-        for line in _wrap(subtitle or "", int(self.body_w * 0.9), 12):
-            self.text(line, 48, y, 12, (130, 100, 90))
-            y -= 19
-        # the four-phase strip, pinned mid-page
+        for line in _wrap(subtitle or "", s_w, ssize):
+            self.text(line, 48, y, ssize, (130, 100, 90))
+            y -= slead
+        # the four-phase strip: sits a fixed clearance below the subtitle
         cw = (self.body_w - 12) / 4
+        strip_y = sub_last - 26 if sub_last <= 152 else sub_last - 38
         for i, label in enumerate(("1 ATTRACT", "2 CONVERT", "3 DELIVER", "4 MULTIPLY")):
-            self.chip(48 + i * (cw + 4), 100, cw, 26, (120, 150, 135), label=label, size=7.5)
+            self.chip(48 + i * (cw + 4), strip_y, cw, 26, (120, 150, 135),
+                      label=label, size=7.5)
         # founder credit, pinned near the bottom
         self.hline(72, 48, w - 48, (224, 214, 222), 0.8)
         self.text("BUILT FROM SCRATCH BY", 48, 56, 8, (150, 140, 155), bold=True)

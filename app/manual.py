@@ -213,6 +213,36 @@ def _chapters():
         doc.pullquote("Fresh data protects trust - and trust protects commissions.")
         doc.page_break()
 
+    def c10_g(doc, num, label, blurb):
+        doc.chapter(num, label, blurb)
+        doc.paragraph(
+            "The whole product is one page of sections - here is the complete map, "
+            "so you always know where every screen lives and what it is for. Each "
+            "row is a real page or route in the app.")
+        rows = [
+            ("Dashboard /dashboard", "every tool at a glance"),
+            ("Workbench /tool", "mine, launch, boosts, funnel"),
+            ("Keys /keys", "affiliate tag + endpoints"),
+            ("Email Studio /admin/emails", "compose, segments, inbox"),
+            ("Landing pages /admin/cms", "presets, toggles, copy"),
+            ("Ebooks /admin/ebooks", "PDF lead magnet"),
+            ("Analytics /admin/analytics", "clicks, views, sources"),
+            ("Social /admin/social", "tracked kits, 6 platforms"),
+            ("SEM /admin/sem", "long-tails + briefs"),
+            ("SEO audit /admin/seo", "indexability strip"),
+            ("Search engines /admin/seoengines", "GSC, Yandex, Bing"),
+            ("Refresh /admin/refresh", "auto + manual re-mine"),
+            ("Users & roles /admin/users", "accounts + function matrix"),
+            ("Public pages /n, /lp, sitemap", "the ranked site"),
+            ("Inbox (Email Studio)", "replies via tagged Reply-To"),
+            ("Landing home /", "the public storefront"),
+        ]
+        doc.two_col(rows)
+        doc.spacer(6)
+        doc.pullquote("Pick a section in the nav, or type its page path straight "
+                      "into the address bar.")
+        doc.page_break()
+
     def c10(doc, num, label, blurb):
         doc.chapter(num, label, blurb)
         doc.paragraph(
@@ -354,11 +384,12 @@ def _chapters():
         (7, "Step 4 - Send the sequence", "Email Studio, segments, schedules", c7),
         (8, "Ebook, social and boosts", "Lead magnet, kits, UTM campaigns", c8),
         (9, "Launch and keep data fresh", "One click to whole funnel", c9),
-        (10, "Read the numbers", "Analytics, page views, interactions", c10),
-        (11, "Team access and roles", "Accounts, confirmation, permissions", c11),
-        (12, "Inbox and conversations", "Replies, threads, IMAP", c12),
-        (13, "Highest-form playbook", "Habits, checklist, tick-box run", c13),
-        (14, "About the founder", "The engineer who built it from scratch", c14),
+        (10, "Every tool at a glance", "The complete map of sections", c10_g),
+        (11, "Read the numbers", "Analytics, page views, interactions", c10),
+        (12, "Team access and roles", "Accounts, confirmation, permissions", c11),
+        (13, "Inbox and conversations", "Replies, threads, IMAP", c12),
+        (14, "Highest-form playbook", "Habits, checklist, tick-box run", c13),
+        (15, "About the founder", "The engineer who built it from scratch", c14),
     ]
 
 
@@ -374,9 +405,7 @@ def build_pdf():
     doc = pdfgen.Pdf(accent=_ACCENT, bg=_BG)
     doc.cover(
         "The pstore User Guide",
-        "How to run this software at its highest form: mine niches, rank on "
-        "Google, capture emails, send the 5-part buyer sequence, publish on "
-        "social and keep your data fresh - step by step.",
+        "A step-by-step book for running the software at its highest form.",
         kicker="OWNER MANUAL",
         owner="Engr Salahuddin Habibu Isah",
         site="Built from scratch by the founder - a free guide from pstore",
