@@ -477,6 +477,7 @@ _AUTOSEND_LIMIT = int((os.environ.get("AUTOSEND_LIMIT") or "0") or 0) \
     or mailer.MAX_EMAILS_PER_RUN
 _AUTOSEND_LAST_KEY = "autosend.last"  # "YYYY-MM-DD:HH" marker so a slot runs once/day
 AUTOSEND_STATE_KEY = "autosend.state"  # json: {status,sent,last_run,last_status,next_run,errors}
+_PRICEDROP_STATE_KEY = "pricedrop.state"  # json progress for the background scraper
 SOCIAL_PEAK_SLOTS = (8, 12, 19)  # high-engagement schedule hours (morning/lunch/evening)
 
 
@@ -9571,47 +9572,114 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
         store = self._price_store()
         watched = [{"asin": a, "baseline": store.baseline(a)}
                    for a in store.all()]
-        return self._send(200, {"watched": watched, "count": len(watched)})
+        state = self._price_run_state()
+        return self._send(200, {"watched": watched, "count": len(watched),
+                                "state": state, "drops": state.get("drops") or []})
+
+    def _price_run_state(self):
+        try:
+            data = json.loads(_get_setting(_PRICEDROP_STATE_KEY, "{}") or "{}") or {}
+        except Exception:
+            data = {}
+        state = {"running": bool(data.get("running")),
+                 "status": data.get("status", "idle"),
+                 "checked": int(data.get("checked", 0)),
+                 "total": int(data.get("total", 0)),
+                 "drops": data.get("drops") or [],
+                 "last_run": data.get("last_run"),
+                 "error": data.get("error", "")}
+        if not state["running"] and state["status"] != "idle":
+            state["status"] = "done"
+        return state
+
+    def _pricedrop_worker(self, rows, min_pct):
+        """Background re-scrape: polls update the persisted state so the admin
+        page can paint progress instead of waiting on a blocking HTTP call."""
+        store = self._price_store()
+        fresh = {}
+        checked = 0
+        error = ""
+        try:
+            for row in rows:
+                asin = str(row.get("asin") or "").strip().upper()
+                if not asin:
+                    continue
+                try:
+                    items, _src = amazon.search(asin, top=1)
+                    if items and items[0].get("price") is not None:
+                        fresh[asin] = items[0].get("price")
+                except Exception:
+                    pass
+                checked += 1
+                _set_setting(_PRICEDROP_STATE_KEY, json.dumps({
+                    "running": True, "status": "scanning", "checked": checked,
+                    "total": len(rows), "drops": [], "last_run": "",
+                    "error": ""}))
+        except Exception as e:
+            error = str(e)[:160]
+        try:
+            result = pricedrop.check(rows, fresh, store=store, min_drop_pct=min_pct)
+            result["checked"] = checked
+        except Exception as e:
+            result = {"drops": [], "tracked": 0, "checked": checked}
+            error = error or str(e)[:160]
+        from datetime import datetime as _dt
+        _set_setting(_PRICEDROP_STATE_KEY, json.dumps({
+            "running": False, "status": "done", "checked": checked,
+            "total": len(rows), "drops": result.get("drops") or [],
+            "last_run": _dt.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            "error": error}))
 
     def _pricedrop_run(self):
-        """Re-scrape current prices for every ranked ASIN and report real drops
-        against stored baselines. Best-effort and never raises."""
+        """Re-scrape current prices for every ranked ASIN and flag real drops
+        against stored baselines. The scrape runs in a background thread and
+        the HTTP call returns immediately — the admin page polls
+        /api/pricedrop for progress instead of blocking on a long request."""
         body = self._body()
         min_pct = body.get("min_pct") or pricedrop.DEFAULT_MIN_DROP_PCT
         try:
             min_pct = float(min_pct)
         except (TypeError, ValueError):
             min_pct = pricedrop.DEFAULT_MIN_DROP_PCT
-        store = self._price_store()
+        state = self._price_run_state()
+        if state["running"]:
+            return self._send(200, {"started": False, "running": True,
+                                    "state": state})
         rows = self._watched_products()
         if not rows:
-            return self._send(200, {"drops": [], "tracked": 0, "checked": 0,
+            return self._send(200, {"started": False, "running": False,
+                                    "drops": [], "tracked": 0, "checked": 0,
                                     "error": "no saved niches to watch"})
-        fresh = {}
-        checked = 0
-        for row in rows:
-            try:
-                items, _src = amazon.search(row["asin"], top=1)
-                if items:
-                    fresh[row["asin"]] = items[0].get("price")
-            except Exception:
-                continue
-            checked += 1
-        result = pricedrop.check(rows, fresh, store=store, min_drop_pct=min_pct)
-        result["checked"] = checked
-        return self._send(200, result)
+        _set_setting(_PRICEDROP_STATE_KEY, json.dumps({
+            "running": True, "status": "scanning", "checked": 0,
+            "total": len(rows), "drops": [], "last_run": "", "error": ""}))
+        threading.Thread(target=self._pricedrop_worker, args=(rows, min_pct),
+                         daemon=True).start()
+        return self._send(200, {"started": True, "running": True,
+                                "total": len(rows)})
 
     def _admin_pricedrop(self, q):
         js = (
             "async function runCheck(){const m=document.querySelector('#msg');const out=document.querySelector('#out');\n"
-            "m.textContent='Scanning prices\u2026';\n"
+            "m.textContent='Starting scan\u2026';\n"
             "let r,d;try{r=await fetch('/api/pricedrop/run',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});d=await r.json();}\n"
             "catch(e){m.textContent='\u2717 Could not reach the server.';return;}\n"
-            "const drops=(d.drops||[]);\n"
-            "if(!drops.length){out.innerHTML='<h2>\u2728 Deals right now</h2><p class=\"hint\">No price drops found. Checked '+(d.checked||0)+' products.</p>';}\n"
-            "else{out.innerHTML='<h2>\u2728 Deals right now ('+drops.length+')</h2><ul>'+drops.map(x=>"
-            "'<li><b>'+x.title+'</b> \u2014 was $'+x.old+', now <b style=\"color:#b12704\">$'+x.new+'</b> (save $'+x.drop+' / '+x.drop_pct+'%)</li>').join('')+'</ul>';}\n"
-            "m.textContent='\u2713 Done';}\n"
+            "if(d.error){m.textContent='\u2717 '+d.error;return;}\n"
+            "const paint=(st)=>{const drops=(st.drops||[]);\n"
+            "if(drops.length){out.innerHTML='<h2>\u2728 Deals right now ('+drops.length+')</h2><ul>'+drops.map(x=>"
+            "'<li><b>'+x.title+'</b> \u2014 was $'+x.old+', now <b>$'+x.new+'</b> (save $'+x.drop+' / '+x.drop_pct+'%)</li>').join('')+'</ul>';}\n"
+            "else{out.innerHTML='<h2>\u2728 Deals right now</h2><p class=\"hint\">No price drops found. Checked '+(st.checked||0)+' of '+(st.total||0)+' products.</p>';}};\n"
+            "let tries=0;const poll=async()=>{\n"
+            "tries++;\n"
+            "try{const q=await fetch('/api/pricedrop');const s=await q.json();const st=s.state||{};\n"
+            "paint(st);\n"
+            "if(st.error){m.textContent='\u2717 '+st.error;return;}\n"
+            "if(!st.running){m.textContent='\u2713 Done';return;}\n"
+            "m.textContent='Scanning\u2026 '+((st.checked||0))+'/'+(st.total||0)+' checked';\n"
+            "}catch(e){}\n"
+            "if(tries>600){m.textContent='Timed out waiting for the scan \u2014 refresh to see results.';return;}\n"
+            "setTimeout(poll,2000);};\n"
+            "poll();}\n"
             "async function sendDrops(){const m=document.querySelector('#msg');\n"
             "m.textContent='Checking + pushing\u2026';let r,d;"
             "try{r=await fetch('/api/pricedrop/send',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});d=await r.json();}"

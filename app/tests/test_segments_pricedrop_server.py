@@ -208,15 +208,32 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
         self.assertEqual(st, 200)
         self.assertIn(b"Price-drop", body)
 
-    def test_pricedrop_run_no_network(self):
-        """Offline: /api/pricedrop/run must not raise even with no network."""
+    def test_pricedrop_run_background_poll(self):
+        """Offline: /api/pricedrop/run must answer instantly (background
+        worker) and the GET /api/pricedrop poll must reflect completion —
+        no long-blocking HTTP request that drops the browser fetch."""
+        import time
         self._seed()
         st, ct, body = self._raw("/api/pricedrop/run", method="POST",
                                  body=b"{}", cookie=self.cookie)
-        # request always answers 200 with a result dict (best-effort)
         self.assertEqual(st, 200)
         data = json.loads(body)
-        self.assertIn("drops", data)
+        self.assertTrue(data.get("started"))
+        self.assertEqual(data.get("total"), 1)
+        # the run answers before the scrape: no drops key on the kickoff reply
+        self.assertNotIn("drops", data)
+        final = None
+        for _ in range(50):
+            st, ct, body = self._raw("/api/pricedrop", cookie=self.cookie)
+            s = json.loads(body)
+            if not (s.get("state") or {}).get("running"):
+                final = s
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(final, "background worker never finished")
+        self.assertIn("drops", final)
+        self.assertEqual(final["state"]["status"], "done")
+        self.assertGreaterEqual(final["state"]["checked"], 1)
 
     def test_reengage_cold_sends_only_cold(self):
         """Re-engagement must target only COLD leads and be deduped."""
