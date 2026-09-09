@@ -149,7 +149,25 @@ class TestContentAndAudience(unittest.TestCase):
             self.assertEqual(scheduled, 5)
             again = server._content_run(limit=6)
             self.assertEqual(again["pages_built"], 0)  # no new topics left
-            self.assertEqual(again["kits_queued"], 0)  # dedupe on scheduled kits
+            # Topic kits carry the topic slug: the engine may spend the kit cap
+            # on the next topic, but must never double-queue a topic+platform.
+            with server._lock:
+                conn = server._db()
+                dupes = conn.execute(
+                    "SELECT slug, platform, COUNT(*) c FROM social_posts "
+                    "WHERE status='scheduled' GROUP BY slug, platform "
+                    "HAVING c > 1").fetchall()
+                links = conn.execute(
+                    "SELECT link FROM social_posts WHERE status='scheduled' "
+                    "AND link LIKE '%/n/%/%?%'").fetchall()
+                conn.close()
+            self.assertEqual(dupes, [])  # no duplicate topic+platform kits
+            self.assertEqual(len(links), 10)  # capped 5 kits per run, all topical
+            for row in links:
+                _, path = row["link"].split("?utm_", 1)[0].split("/n/", 1)
+                parent, term = path.split("/")
+                self.assertEqual(parent, "keto-snacks")
+                self.assertNotEqual(term, parent)  # regression: /n/<parent>/<parent> 404
         finally:
             server._set_setting("content.only", "")
 

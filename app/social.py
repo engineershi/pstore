@@ -199,24 +199,25 @@ def topic_post_kits(term, parent_keyword, items, base_url, parent_slug=None, slu
         return []
     parent_slug = parent_slug or (re.sub(r"[^a-z0-9]+", "-", (parent_keyword or "").lower())
                                   .strip("-") or "niche")
-    slug = slug or parent_slug
+    term_slug = slug or (re.sub(r"[^a-z0-9]+", "-", (term or "").lower())
+                         .strip("-") or parent_slug)
     title = pick.get("title") or ""
     proof = _proof(pick)
     price = _price(pick)
-    label = _hashtag(term) or term or parent_slug
+    label = _hashtag(term) or term or term_slug
     kits = []
     for platform in PLATFORMS:
         content = short_code()
         # point to the long-tail page with the topic in the UTM campaign
         q = urllib.parse.urlencode({
             "utm_source": _key(platform), "utm_medium": "social",
-            "utm_campaign": slug + "-t-" + _hashtag(term) if term else slug,
+            "utm_campaign": term_slug + "-t-" + _hashtag(term) if term else term_slug,
             "utm_content": content})
-        link = "%s/n/%s/%s?%s" % ((base_url or "").rstrip("/"), parent_slug, slug, q) \
-            if term else track_link(base_url, slug, platform, content)
+        link = "%s/n/%s/%s?%s" % ((base_url or "").rstrip("/"), parent_slug, term_slug, q) \
+            if term else track_link(base_url, parent_slug, platform, content)
         kit = _COMPOSERS[platform]("%s %s" % (parent_keyword, term), title, proof,
-                                   price, link, slug)
-        kit["slug"] = slug
+                                   price, link, term_slug)
+        kit["slug"] = term_slug
         kit["keyword"] = parent_keyword
         kit["utm_content"] = content
         kit["proof"] = proof

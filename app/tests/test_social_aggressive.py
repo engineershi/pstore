@@ -122,11 +122,13 @@ class TestSocialAggressive(unittest.TestCase):
             "best keto chips", "keto snacks",
             [{"asin": "B0KETO1", "title": "Keto Chips", "reviews": 10,
               "stars": 4.6, "price": 8.99, "currency": "USD"}],
-            "https://p.example", parent_slug="keto-snacks", slug="best-keto-chips")
+            "https://p.example", parent_slug="keto-snacks")
         self.assertEqual(len(kits), len(social.PLATFORMS))
         kit = kits[0]
         self.assertTrue(kit["target"] == "topic")
-        self.assertIn("best-keto-chips", kit["link"])
+        # no `slug` given -> the term slug must be derived so the link reaches
+        # the real long-tail page, not /n/<parent>/<parent> (404)
+        self.assertIn("/n/keto-snacks/best-keto-chips", kit["link"])
         self.assertIn("utm_source=", kit["link"])
         self.assertTrue(kit["image"].endswith("/og/keto-snacks"))
         self.assertIn("best keto chips", kit.get("body", "").lower())

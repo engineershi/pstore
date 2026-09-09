@@ -700,7 +700,7 @@ def render_admin_manual(nav_html, totop_html):
 <li>Every page view and Amazon click is tagged with the visitor's <b>country</b> (beacon <code>CF-IPCountry</code>) and stored per-niche, per-ASIN.</li>
 <li><a class="tooltag" href="/admin/sem">🎯 SEM</a> briefs now include a <b>👥 Who is searching</b> block: audience region mix for the keyword, a named persona (e.g. <i>the weekend snack-shopper</i>) and the intent labels (browse/compare/buy) the search carries — generated deterministically from the geo data, no AI needed.</li>
 <li>The <a class="tooltag" href="/admin/opportunities">🪴 Grow</a> page shows the <b>audience signal</b> card: which countries dominate your traffic and clicks, and how those reads convert, so your copy, pricing and product picks can follow the money.</li>
-<li>Audience, personas and intents respect your <b>demography settings</b> (household sizes, incomes, age bands on <a class="tooltag" href="/admin/settings">⚙️ Settings</a>) — the profile answers read from the same settings you already keep.</li>
+<li>Audience, personas and intents respect your <b>demography settings</b> (household sizes, incomes, age bands on the 🛠 <a class="tooltag" href="/tool">Workbench</a> 🌍 Market demography panel) — the profile answers read from the same settings you already keep.</li>
 </ul>
 
 <h3 id="look">16 · Look &amp; feel — template &amp; style</h3>
