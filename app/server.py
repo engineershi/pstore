@@ -32,6 +32,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import amazon
+import audience
 import ai
 import cms as cms_mod
 import cms_render
@@ -52,6 +53,7 @@ import sem
 import social
 import publish
 import suggest
+import template
 import webmasters
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -316,7 +318,8 @@ ALL_FUNCTIONS = [slug for slug, _label in FUNCTIONS]
 FUNCTION_PATHS = {
     "dashboard": ("/dashboard", "/index.html", "/tool", "/admin/opportunities",
                   "/admin/priority", "/app.js", "/api/mine", "/api/search",
-                  "/api/autosuggest", "/api/niches", "/api/opportunities"),
+                  "/api/autosuggest", "/api/niches", "/api/opportunities",
+                  "/api/content"),
     "email": ("/admin/emails", "/api/mail", "/api/sequence/", "/api/subscribers"),
     "social": ("/admin/social", "/api/social"),
     "seo": ("/admin/seo", "/admin/seoengines", "/admin/sem", "/seo/snippet/",
@@ -326,9 +329,9 @@ FUNCTION_PATHS = {
                 "/api/cms", "/api/suggest", "/api/refresh", "/api/settings",
                 "/api/ai/"),
     "marketing": ("/admin/funnel", "/admin/marketing", "/admin/variants",
-                  "/admin/segments", "/admin/pricedrop", "/api/funnel",
-                  "/api/marketing", "/api/boosts", "/api/variants",
-                  "/api/segments", "/api/pricedrop", "/api/tools",
+                  "/admin/segments", "/admin/pricedrop", "/admin/template",
+                  "/api/funnel", "/api/marketing", "/api/boosts", "/api/variants",
+                  "/api/segments", "/api/pricedrop", "/api/tools", "/api/template",
                   "/api/earnings", "/api/subjects"),
     "analytics": ("/admin/analytics", "/admin/backup", "/admin/manual",
                   "/api/analytics"),
@@ -342,7 +345,7 @@ NAV_FN = {
     "cms": "content", "ebooks": "content", "refresh": "content",
     "funnel": "marketing", "marketing": "marketing", "emails": "email",
     "social": "social", "variants": "marketing", "segments": "marketing",
-    "pricedrop": "marketing", "keys": "keys", "apikeys": "keys",
+    "pricedrop": "marketing", "template": "marketing", "keys": "keys", "apikeys": "keys",
     "analytics": "analytics", "backup": "analytics", "manual": "analytics",
 }
 
@@ -360,6 +363,8 @@ BUILTIN_ROLES = [
 _SESSIONS = {}  # token -> monotonic expiry
 
 _EBOOKS = {}  # keyword -> build_ebook() dict, LRU-ish (capped below)
+_EBOOK_WARMING = set()  # keywords currently being warmed in the background
+_EBOOK_WARMING_LOCK = threading.Lock()
 _SOCIAL_WEBHOOK = os.environ.get("SOCIAL_WEBHOOK", "")  # optional real-posting hook
 _PNG_CACHE = {}  # slug -> raster og card bytes (pure-Python render, capped)
 OG_CACHE_DIR = os.environ.get("PSTORE_OG_CACHE") or None  # persistent /og/*.png cache
@@ -905,6 +910,271 @@ def _set_setting(key, value):
         pass
 
 
+# ------------------------------------------------------------ daily content engine
+def _niches_rows():
+    """All saved niches as plain dicts (SQL rows, single connection) — for
+    module-level builders that don't need a handler (content engine, tests)."""
+    with _lock:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT keyword, products, created_at FROM niches "
+            "ORDER BY id ASC").fetchall()
+        conn.close()
+    return [{"keyword": r["keyword"],
+             "products": json.loads(r["products"] or "[]"),
+             "created_at": r["created_at"] or ""} for r in rows]
+
+
+def _fire_indexnow_urls(paths):
+    """Module-level fire-and-forget IndexNow submit (mirror of the handler's
+    _fire_indexnow). Never blocks, never raises."""
+    try:
+        base = seo.BASE_URL.rstrip("/")
+        urls = [base + ("/" + p.lstrip("/")) for p in (paths or [])]
+    except Exception:
+        return
+    if urls:
+        threading.Thread(target=lambda: indexnow.submit_urls(urls), daemon=True).start()
+
+
+def _topics_for_rows(parent_slug):
+    """Slugs already built under a parent niche — the dedupe set for builders."""
+    existing = set()
+    with _lock:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT slug FROM topics WHERE parent_slug=?", (parent_slug,)).fetchall()
+        conn.close()
+    for r in rows:
+        existing.add(r["slug"])
+    return existing
+
+
+def _build_topic_pages(parent_slug, count=6):
+    """Mine new long-tail /n/<parent>/<term> pages for one niche from live
+    Amazon autosuggest (unbuilt terms only), then ping IndexNow. Returns the
+    list of new topics created. Module-level twin of the handler's
+    _generate_topics so the unattended engine and the manual button share one
+    builder."""
+    parent_keyword = ""
+    for n in _niches_rows():
+        if seo._slugify(n["keyword"]) == parent_slug:
+            parent_keyword = n["keyword"]
+            break
+    if not parent_keyword:
+        return []
+    existing = _topics_for_rows(parent_slug)
+    try:
+        ideas = amazon.autosuggest(parent_keyword, limit=12)
+    except Exception:
+        ideas = []
+    created = []
+    for idea in ideas:
+        if len(created) >= count:
+            break
+        term = (idea or "").strip().lower()
+        term_slug = seo._slugify(term)
+        if (not term or len(term) < 4 or term_slug == parent_slug
+                or term_slug in existing):
+            continue
+        with _lock:
+            conn = _db()
+            conn.execute(
+                "INSERT OR IGNORE INTO topics (parent_slug, term, slug) "
+                "VALUES (?,?,?)", (parent_slug, term, term_slug))
+            conn.commit()
+            conn.close()
+        existing.add(term_slug)
+        created.append({"term": term, "slug": term_slug,
+                        "url": "/n/%s/%s" % (parent_slug, term_slug)})
+    if created:
+        _fire_indexnow_urls([c["url"] for c in created])
+    return created
+
+
+def _content_schedule_slots(count, hours=24, now=None):
+    """Spread `count` timestamps across the next `hours`, snapped to the same
+    peak engagement slots as the manual scheduler. Module-level twin of the
+    handler's _schedule_times."""
+    if count < 1:
+        return []
+    slots = SOCIAL_PEAK_SLOTS
+    now = now or datetime.datetime.utcnow()
+    out = []
+    for i in range(count):
+        delta = float(hours) * (i + 1) / float(max(count, 1))
+        t = now + datetime.timedelta(hours=delta)
+        if t.hour not in slots:
+            best_dist = 25.0
+            for h in slots:
+                for day in (0, 1):
+                    cand = t.replace(hour=h, minute=0, second=0, microsecond=0) \
+                        + datetime.timedelta(days=day)
+                    dist = (cand - t).total_seconds() / 3600.0
+                    if 0 <= dist <= best_dist and dist <= float(delta):
+                        best_dist = dist
+                        t = cand
+        out.append(t.strftime("%Y-%m-%d %H:%M:%S"))
+    return out
+
+
+def _content_enabled():
+    flag = _get_setting("content.enabled")
+    return flag == "" or str(flag).strip().lower() in ("1", "on", "true", "yes")
+
+
+def _content_config():
+    def _int(key, default):
+        try:
+            return max(0, int(float(_get_setting(key, default))))
+        except Exception:
+            return default
+    cfg = {
+        "enabled": _content_enabled(),
+        "pages_day": _int("content.pages_day", 5),
+        "kits_day": _int("content.kits_day", 5),
+        "hours": max(1, _int("content.hours", 24)),
+        "loop_hours": max(1, _int("content.loop_hours", 24)),
+    }
+    only = (_get_setting("content.only") or "").strip()
+    cfg["only"] = [k.strip().lower() for k in only.split(",") if k.strip()]
+    return cfg
+
+
+def _content_candidates(cfg):
+    """Saved niches ordered by proof (Amazon clicks first, then newest),
+    optionally restricted to content.only. The engine spends its daily budget
+    on niches that are already pulling clicks first."""
+    niches = _niches_rows()
+    if cfg["only"]:
+        keep = {seo._slugify(k) for k in cfg["only"]}
+        niches = [n for n in niches
+                  if seo._slugify(n["keyword"]) in keep
+                  or n["keyword"].lower() in cfg["only"]]
+    order = {}
+    with _lock:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT slug, COUNT(*) n FROM clicks WHERE asin != '' AND slug != '' "
+            "GROUP BY slug").fetchall()
+        conn.close()
+    for r in rows:
+        order[r["slug"]] = int(r["n"])
+    niches.sort(key=lambda n: (order.get(seo._slugify(n["keyword"]), -1),
+                               n.get("created_at") or ""), reverse=True)
+    return niches
+
+
+def _content_queue_kits(parent_slug, keyword, kits, hours):
+    """Insert one social_posts row per kit unless an equivalent slot already
+    exists: the exact UTM copy, or a scheduled post for the same niche+platform
+    still in the future window. Idempotent — reruns add nothing, but a fresh
+    window (once scheduled posts publish) can legally queue the next batch."""
+    if not kits:
+        return 0
+    now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    slots = _content_schedule_slots(len(kits), hours=hours)
+    queued = 0
+    with _lock:
+        conn = _db()
+        for kit, at in zip(kits, slots):
+            rows = conn.execute(
+                "SELECT utm_content, status, COALESCE(scheduled_at,'') sched "
+                "FROM social_posts WHERE slug=? AND platform=? "
+                "AND status IN ('scheduled','published')",
+                (kit.get("slug") or parent_slug, kit.get("platform") or "x")).fetchall()
+            if kit.get("utm_content") in {r["utm_content"] for r in rows}:
+                continue
+            if any(r["status"] == "scheduled"
+                   and (not r["sched"] or r["sched"] >= now) for r in rows):
+                continue
+            conn.execute(
+                "INSERT INTO social_posts "
+                "(slug, keyword, platform, name, body, link, utm_content, status, scheduled_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (kit.get("slug") or parent_slug, keyword, kit.get("platform") or "x",
+                 kit.get("name") or "", kit.get("body") or "", kit.get("link") or "",
+                 kit.get("utm_content") or "", "scheduled", at))
+            queued += 1
+        conn.commit()
+        conn.close()
+    return queued
+
+
+def _content_run(now=None, limit=None):
+    """One content-engine cycle: build new long-tail pages and queue not-yet-
+    scheduled social kits across saved niches, up to the daily caps, leaders
+    first. Idempotent — pages already built and kits already scheduled/
+    published are skipped, so volume tapers to zero once a niche is fully
+    worked. Returns the run summary (also stored in content.last_run)."""
+    cfg = _content_config()
+    summary = {"on": cfg["enabled"], "pages_built": 0, "kits_queued": 0,
+               "niches": 0, "error": ""}
+    if not cfg["enabled"]:
+        summary["at"] = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        _set_setting("content.last_run", json.dumps(summary))
+        return summary
+    try:
+        candidates = _content_candidates(cfg)
+        pages_left = limit if limit is not None else cfg["pages_day"]
+        kits_left = cfg["kits_day"]
+        for n in candidates:
+            if pages_left <= 0 and kits_left <= 0:
+                break
+            slug = seo._slugify(n["keyword"])
+            summary["niches"] += 1
+            if pages_left > 0:
+                try:
+                    built = _build_topic_pages(slug, pages_left)
+                except Exception:
+                    built = []
+                summary["pages_built"] += len(built)
+                pages_left -= len(built)
+            if kits_left > 0 and n["products"]:
+                try:
+                    for ts in sorted(_topics_for_rows(slug)):
+                        if kits_left <= 0:
+                            break
+                        tkits = social.topic_post_kits(
+                            ts, n["keyword"], n["products"], seo.BASE_URL,
+                            parent_slug=slug)
+                        q = _content_queue_kits(slug, n["keyword"],
+                                                tkits[:kits_left], cfg["hours"])
+                        kits_left -= q
+                        summary["kits_queued"] += q
+                    if kits_left > 0:
+                        kits = social.post_kits(n["keyword"], n["products"],
+                                                seo.BASE_URL, slug=slug)
+                        q = _content_queue_kits(slug, n["keyword"],
+                                                kits[:kits_left], cfg["hours"])
+                        kits_left -= q
+                        summary["kits_queued"] += q
+                except Exception as exc:
+                    summary["error"] = "%s: %s" % (n["keyword"], exc)
+        summary["at"] = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        _set_setting("content.last_run", json.dumps(summary))
+    except Exception as exc:
+        summary["error"] = str(exc)
+        _set_setting("content.last_run", json.dumps(summary))
+    return summary
+
+
+def _content_loop():
+    """Unattended engine daemon: runs a cycle on the configured interval
+    (minimum 1h), opted out entirely by content.enabled=0."""
+    while True:
+        try:
+            if _content_enabled():
+                _content_run()
+        except Exception:
+            pass
+        try:
+            wait = max(int(float(_get_setting("content.loop_hours") or 24) * 3600), 3600)
+        except Exception:
+            wait = 24 * 3600
+        time.sleep(wait)
+
+
 # webmasters keeps connector tokens + synced snapshots in the settings table.
 webmasters._STORE_GET = _get_setting
 webmasters._STORE_SET = _set_setting
@@ -1205,6 +1475,16 @@ def _db():
         pass
     try:
         conn.execute("ALTER TABLE sent_emails ADD COLUMN subject_variant INTEGER DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE clicks ADD COLUMN country TEXT DEFAULT ''")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE events ADD COLUMN country TEXT DEFAULT ''")
         conn.commit()
     except Exception:
         pass
@@ -2869,6 +3149,7 @@ for (const id of ["me-name","me-pw","me-pw2"])
               ("/admin/variants", "⚗️ A/B", "variants"),
               ("/admin/segments", "🎚 Lead segments", "segments"),
               ("/admin/pricedrop", "🏷 Price drops", "pricedrop"),
+              ("/admin/template", "🎨 Template & style", "template"),
               ("/keys", "🔑 Keys", "keys"),
               ("/admin/apikeys", "🔌 API Keys", "apikeys")]),
             ("Analyze",
@@ -2944,6 +3225,7 @@ for (const id of ["me-name","me-pw","me-pw2"])
             ("/admin/variants", "⚗️ A/B headline tests", "per-niche split test"),
             ("/admin/segments", "🎚 Lead lifecycle segments", "hot / warm / cold"),
             ("/admin/pricedrop", "🏷 Price-drop deal engine", "scarcity pushes"),
+            ("/admin/template", "🎨 Template & style", "onepager look + banner"),
             ("/tool", "🛠 One-click marketing suite", "launch everything"),
             ("/keys", "🔑 Keys &amp; endpoints", "admin"),
             ("/admin/apikeys", "🔌 API keys page", "PA-API + social")])
@@ -3218,6 +3500,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._admin_segments()
             if path == "/admin/pricedrop":
                 return self._admin_pricedrop(q)
+            if path == "/admin/template":
+                return self._admin_template(q)
             if path == "/api/segments":
                 return self._segments_api()
             if path == "/api/pricedrop":
@@ -3487,10 +3771,14 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._ai_config()
             if parsed.path == "/api/opportunities/expand":
                 return self._opportunities_expand()
+            if parsed.path == "/api/content":
+                return self._content_api()
             if parsed.path == "/api/topics/generate":
                 return self._topics_generate()
             if parsed.path == "/api/sem/build-topic":
                 return self._sem_build_topic_api()
+            if parsed.path == "/api/template":
+                return self._template_api()
             if parsed.path == "/api/suggest":
                 return self._suggest_api()
             if parsed.path == "/api/suggest/build":
@@ -3769,14 +4057,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
 
     # ------------------------------------------------------------------ SEO
     def _all_niches(self):
-        with _lock:
-            conn = _db()
-            rows = conn.execute(
-                "SELECT keyword, products, created_at FROM niches").fetchall()
-            conn.close()
-        return [{"keyword": r["keyword"], "products": json.loads(r["products"] or "[]"),
-                 "created_at": r["created_at"] or ""}
-                for r in rows]
+        """All saved niches (see module-level _niches_rows)."""
+        return _niches_rows()
 
     def _top_clicked_niches(self, limit=10):
         """Aggregate Amazon-click traffic by niche (joining clicks.slug to the
@@ -3823,44 +4105,9 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
 
     def _generate_topics(self, parent_slug, count=6):
         """Create new long-tail /n/<parent>/<term> pages for a niche from live
-        Amazon autosuggest terms not yet built, and ping IndexNow. Returns the
-        list of new topics created (dicts)."""
-        parent_keyword = ""
-        niche = None
-        for n in self._all_niches():
-            if seo._slugify(n["keyword"]) == parent_slug:
-                parent_keyword = n["keyword"]
-                niche = n
-                break
-        if not parent_keyword:
-            return []
-        existing = {t["slug"] for t in self._topics_for(parent_slug)}
-        try:
-            ideas = amazon.autosuggest(parent_keyword, limit=12)
-        except Exception:
-            ideas = []
-        created = []
-        for idea in ideas:
-            if len(created) >= count:
-                break
-            term = (idea or "").strip().lower()
-            term_slug = seo._slugify(term)
-            if (not term or len(term) < 4 or term_slug == parent_slug
-                    or term_slug in existing):
-                continue
-            with _lock:
-                conn = _db()
-                conn.execute(
-                    "INSERT OR IGNORE INTO topics (parent_slug, term, slug) "
-                    "VALUES (?,?,?)", (parent_slug, term, term_slug))
-                conn.commit()
-                conn.close()
-            existing.add(term_slug)
-            created.append({"term": term, "slug": term_slug,
-                            "url": "/n/%s/%s" % (parent_slug, term_slug)})
-        if created and niche is not None:
-            self._fire_indexnow([c["url"] for c in created])
-        return created
+        Amazon autosuggest terms not yet built, and ping IndexNow (module-level
+        `_build_topic_pages`). Returns the list of new topics created."""
+        return _build_topic_pages(parent_slug, count)
 
     def _opportunities_data(self):
         """Revenue-loop payload (winners + note), shared by page + API. Serves
@@ -4204,7 +4451,9 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 cached = _render_cache_get(key) if amazon.CACHE_TTL > 0 else None
                 if cached is not None:
                     return self._send_cached(cached, "text/html; charset=utf-8")
-                res = seo.render_topic(term, niche["keyword"], niche, parent_slug)
+                tpl_pack = template.for_page(niche["keyword"], parent_slug)
+                res = seo.render_topic(term, niche["keyword"], niche, parent_slug,
+                                       style_pack=tpl_pack)
                 if amazon.CACHE_TTL > 0:
                     _render_cache_put(key, res, RENDER_CACHE_DEFAULT_TTL)
                     return self._send_cached(res, "text/html; charset=utf-8")
@@ -4233,7 +4482,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                         return self._send_cached(cached, "text/html; charset=utf-8", ttl,
                                                  edge=cacheable)
                     res = seo.render_niche(n["keyword"], n, saved_niches=all_niches,
-                                           ab_headline=headline, ab_variant=vno)
+                                           ab_headline=headline, ab_variant=vno,
+                                           style_pack=template.for_page(n["keyword"], slug))
                     if aware:
                         _render_cache_put(cache_key, res, ttl)
                         return self._send_cached(res, "text/html; charset=utf-8", ttl,
@@ -5259,7 +5509,9 @@ if (inp) inp.addEventListener("keydown", e => {{ if (e.key === "Enter" && saveBt
                 break
         if not keyword or not items:
             return self._send(404, {"error": "no saved niche matches that keyword"})
-        cached = self._ebook_for(keyword) is not None
+        cached = keyword in _EBOOKS
+        if not cached:
+            self._warm_ebook_async(keyword)
         try:
             slug = seo._slugify(keyword)
         except Exception:
@@ -5268,7 +5520,8 @@ if (inp) inp.addEventListener("keydown", e => {{ if (e.key === "Enter" && saveBt
         payload = self._workbench_payload(keyword, items)
         payload["launched"] = {
             "keyword": keyword, "landing": True,
-            "ebook_cached": cached, "indexnow_queued": True,
+            "ebook_cached": cached, "ebook_warming": not cached,
+            "indexnow_queued": True,
             "emails_ready": payload["stats"]["subscribers_ready"],
             "clicks": payload["stats"]["clicks"],
         }
@@ -5408,7 +5661,9 @@ if (inp) inp.addEventListener("keydown", e => {{ if (e.key === "Enter" && saveBt
             conn.commit()
             conn.close()
         try:
-            dry = self._ebook_for(keyword) is not None
+            dry = keyword in _EBOOKS
+            if not dry:
+                self._warm_ebook_async(keyword)
         except Exception:
             dry = False
         self._fire_indexnow(["/lp/" + slug])
@@ -8165,7 +8420,8 @@ fresh();
         entries = [seo._slugify(n["keyword"]) for n in self._all_niches()]
         return sem.brief(keyword, niche, seo.BASE_URL,
                          audit_row=audit_row, indexnow_key=indexnow.key(),
-                         sitemap_entries=entries)
+                         sitemap_entries=entries,
+                         audience_info=audience.for_niche(keyword, seo._slugify(keyword)))
 
     def _sem_api(self, q):
         keyword = (q.get("keyword") or [""])[0].strip()
@@ -8335,6 +8591,34 @@ async function soc_save(){{
         v = _get_setting(skey or ("social.key." + key))
         return (v[:4] + "••••") if v else ""
 
+    def _content_api(self):
+        """Daily content engine API (POST /api/content). `action` in the body:
+        status | run | save. The Grow page card wraps this; the unattended
+        _content_loop drives the same runner on an interval."""
+        body = self._body()
+        action = str(body.get("action") or "").strip().lower()
+        if action == "run":
+            return self._send(200, _content_run())
+        if action == "save":
+            for key, short in (("content.enabled", "enabled"),
+                               ("content.pages_day", "pages_day"),
+                               ("content.kits_day", "kits_day"),
+                               ("content.hours", "hours"),
+                               ("content.loop_hours", "loop_hours"),
+                               ("content.only", "only")):
+                if short in body:
+                    val = body.get(short)
+                    _set_setting(key, "" if val is None else str(val))
+            return self._send(200, _content_config())
+        cfg = _content_config()
+        last = {}
+        try:
+            last = json.loads(_get_setting("content.last_run") or "{}") or {}
+        except Exception:
+            last = {}
+        return self._send(200, {"config": cfg, "last_run": last,
+                                "candidates": [n["keyword"] for n in _content_candidates(cfg)]})
+
     def _admin_opportunities(self, q):
         """Grow page: proven niches (real clicks) + one-click expansion that
         auto-builds new pages for their related, not-yet-built search terms."""
@@ -8400,6 +8684,55 @@ async function soc_save(){{
             '<div class="cols">%s</div>'
             '<p id="sout" class="msg"></p></section>'
             % (seo._clean(_seednote), _sug_cards))
+        try:
+            ecfg = _content_config()
+            elast = json.loads(_get_setting("content.last_run") or "{}") or {}
+        except Exception:
+            ecfg, elast = _content_config(), {}
+        e_on = "on" if ecfg["enabled"] else "off"
+        if elast:
+            elast_txt = elast.get("at") or "unknown"
+            if elast.get("error"):
+                elast_txt += " (" + elast["error"] + ")"
+        else:
+            elast_txt = "never — hit “Run now” to warm it"
+        engine_html = (
+            '<section class="card"><h2>🔄 Daily content engine</h2>'
+            '<p class="hint">Unattended loop: builds fresh long-tail pages and queues '
+            'social kits up to the daily caps — leaders first, idempotent (reruns skip '
+            'anything already built or scheduled). State <b>%s</b> · %d pages/day · '
+            '%d kits/day · every %dh. <span class="who">Last run: %s</span></p>'
+            '<form class="row" id="cform">'
+            '<label>Pages/day <input name="pages_day" type="number" min="0" max="60" value="%d"></label>'
+            '<label>Kits/day <input name="kits_day" type="number" min="0" max="60" value="%d"></label>'
+            '<label>Every (h) <input name="loop_hours" type="number" min="1" max="168" value="%d"></label>'
+            '<label>Niche filter <input name="only" value="%s" placeholder="comma list = all"></label>'
+            '<label class="row"><input type="checkbox" name="enabled" id="con" %s> engine on</label>'
+            '<button type="button" class="btn" data-content="save">Save</button>'
+            '<button type="button" class="btn warm" data-content="run">Run now</button>'
+            '</form><p id="cmsg" class="msg"></p></section>'
+            % (e_on, ecfg["pages_day"], ecfg["kits_day"], ecfg["loop_hours"], elast_txt,
+               ecfg["pages_day"], ecfg["kits_day"], ecfg["loop_hours"],
+               seo._clean(",".join(ecfg["only"])), 'checked' if ecfg["enabled"] else ''))
+        try:
+            _ap = audience.profile()
+        except Exception:
+            _ap = {}
+        achips = "".join(
+            '<span class="badge source">%s · %dV/%dC</span>' % (seo._clean(r["name"]),
+                                       r["views"], r["clicks"])
+            for r in (_ap.get("regions") or [])[:6]) or \
+            '<span class="badge hint">no on-site visits recorded yet</span>'
+        persona_txt = " · ".join([w for w in (_ap.get("region"), _ap.get("interest"),
+                                             _ap.get("behavior")) if w]) or \
+            "any region / interest / behavior"
+        audience_html = (
+            '<section class="card"><h2>🌍 Audience signal</h2>'
+            '<p class="hint">Edited persona (Market → demography) plus real 28-day '
+            'visitor geography recorded by the on-site beacon.</p>'
+            '<div class="sub"><h3>Persona</h3><p class="who">%s</p></div>'
+            '<div class="sub"><h3>Actual visitors</h3><p>%s</p></div></section>'
+            % (seo._clean(persona_txt), achips))
         body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Grow — pstore</title><link rel="stylesheet" href="/style.css">
@@ -8418,6 +8751,8 @@ async function soc_save(){{
 <p id="out" class="msg"></p>
 </section>
 {suggest_html}
+{engine_html}
+{audience_html}
 </main>
 <footer><p>New pages are created from live Amazon autosuggest terms around a proven niche — demand-driven, not guessed. Long-tail pages layer even more indexable URLs under each winner.</p></footer>
 <script>
@@ -8457,6 +8792,149 @@ document.addEventListener("click", async (e)=>{{
       sb.disabled = false; sb.textContent = old; ph.textContent = "failed"; ph.className = "pill err";
     }}
   }}
+}});
+document.addEventListener("click", async (e)=>{{
+  const b = e.target.closest("[data-content]");
+  if (!b) return;
+  const f = document.getElementById("cform");
+  const payload = {{action: b.dataset.content}};
+  if (b.dataset.content === "save") {{
+    ["pages_day","kits_day","loop_hours","only"].forEach(function(n){{
+      const el = f.querySelector('[name="' + n + '"]');
+      if (el) payload[n] = el.value;
+    }});
+    payload.enabled = document.getElementById("con").checked ? "1" : "0";
+  }}
+  const r = await fetch("/api/content", {{method:"POST",
+    headers:{{"Content-Type":"application/json"}}, body: JSON.stringify(payload)}});
+  const d = await r.json().catch(function(){{return {{ok:false}};}});
+  const m = $("cmsg");
+  if (b.dataset.content === "run") {{
+    m.textContent = "Ran: " + d.pages_built + " page(s), " + d.kits_queued +
+      " kit(s)" + (d.error ? " — " + d.error : "");
+  }} else {{
+    m.textContent = "Saved — engine " + (d.enabled ? "on" : "off");
+  }}
+}});
+</script>
+</body></html>"""
+        return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
+
+    def _template_api(self):
+        """Template & style API (POST /api/template). action: status | save.
+        The admin page wraps this; render applies template.for_page()."""
+        body = self._body()
+        fields = ("preset", "mode", "targets", "css", "banner", "banner_text",
+                  "banner_link", "accent", "font", "radius")
+        action = str(body.get("action") or "").strip().lower()
+        if action == "save":
+            kwargs = {k: body.get(k) for k in fields if k in body}
+            cfg = template.save(**kwargs) if kwargs else template.config()
+        else:
+            cfg = template.config()
+        all_kw = [n["keyword"] for n in self._all_niches()]
+        hits = template.target_hits(all_kw)
+        return self._send(200, {"config": cfg, "applies": len(hits),
+                                "total": len(all_kw),
+                                "targets": hits[:12],
+                                "preview": template.for_page(all_kw[0] if all_kw else "", "") if all_kw else {},
+                                "presets": sorted(template.PRESETS),
+                                "fonts": sorted(template.FONTS)})
+
+    def _admin_template(self, q):
+        """Template & style: pick a preset look, add advanced CSS/accent/font,
+        and toggle the onepager banner — applied to all niches or targeted at
+        specific keywords/slugs."""
+        try:
+            cfg = template.config()
+            all_kw = [n["keyword"] for n in self._all_niches()]
+            hits = template.target_hits(all_kw)
+        except Exception:
+            cfg, all_kw, hits = {}, [], []
+        if not cfg:
+            cfg = {}
+        preset_opts = "".join(
+            '<option value="%s"%s>%s</option>'
+            % (seo._clean(p), ' selected' if p == cfg.get("preset") else "",
+               seo._clean(p).title())
+            for p in sorted(template.PRESETS))
+        mode_opts = "".join(
+            '<option value="%s"%s>%s onepagers</option>'
+            % (seo._clean(m), ' selected' if m == (cfg.get("mode") or "all") else "",
+               {"all": "All", "only": "Only these", "except": "All except"}.get(m, m.title()))
+            for m in ("all", "only", "except"))
+        font_opts = "".join(
+            '<option value="%s"%s>%s</option>'
+            % (seo._clean(f), ' selected' if f == cfg.get("font") else "",
+               seo._clean(f).title())
+            for f in ["", "system", "serif", "rounded", "sans", "mono"])
+        hit_chips = "".join('<span class="badge hint">%s</span>' % seo._clean(k)
+                            for k in hits[:10]) or \
+            '<span class="badge hint">none selected</span>'
+        prev_slug = seo._slugify(hits[0]) if hits else ""
+        body = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Template & style — pstore</title><link rel="stylesheet" href="/style.css">
+<meta name="robots" content="noindex,nofollow">
+<style>.tpl-row{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:12px 0}}
+textarea{{width:100%;min-height:140px;padding:10px;border:1px solid var(--border);border-radius:10px;background:var(--bg);color:var(--text);font-family:ui-monospace,Menlo,monospace;font-size:13px}}</style>
+</head><body>
+<header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
+<div class="hero"><h1>Template &amp; <span>style.</span></h1>
+<p class="tagline">One preset, advanced CSS and a global onepager feature — applied across every /n/ niche page, or aimed at the exact niches you choose.</p></div>
+{self._admin_nav('template')}
+</header>
+<main>
+<section class="card"><h2>🎨 Template settings</h2>
+<p class="hint">Pick a preset look for your one-pager review pages (each is a small set of theme colors), then refine below. Base = the current look, untouched.</p>
+<form id="tplform" class="col">
+  <label>Preset <select name="preset">{preset_opts}</select></label>
+  <div class="tpl-row">
+    <label>Apply mode <select name="mode">{mode_opts}</select></label>
+    <label>Font <select name="font">{font_opts}</select></label>
+    <label>Accent color <input name="accent" value="{seo._clean(cfg.get('accent') or '')}" placeholder="e.g. #0f8b9d"></label>
+    <label>Card radius <input name="radius" value="{seo._clean(cfg.get('radius') or '')}" placeholder="e.g. 20px"></label>
+  </div>
+  <label>Target niches or keywords <textarea name="targets" placeholder="one per line or comma separated, e.g. keto snacks, back massager for pain relief deep tissue">{seo._clean(", ".join(cfg.get('targets') or []))}</textarea></label>
+  <p class="hint">Leave empty with “All” = every one-pager. With “Only these” / “All except” you control exactly which keywords or slug names get the treatment.</p>
+  <hr>
+  <h3>Advanced style (custom CSS)</h3>
+  <textarea name="css" placeholder="p.lede {{ font-size: 19px; }}">{{seo._clean(cfg.get('css') or '')}}</textarea>
+  <h3>Page feature — announcement banner</h3>
+  <label class="row switch"><input type="checkbox" name="banner" id="tplbanner"{' checked' if cfg.get('banner') else ''}> Show a banner at the top of every targeted onepager</label>
+  <label>Banner text <input name="banner_text" value="{seo._clean(cfg.get('banner_text') or '')}" placeholder="Today's top pick, ranked live from Amazon data."></label>
+  <label>Banner link (optional) <input name="banner_link" value="{seo._clean(cfg.get('banner_link') or '')}" placeholder="/lp/keto-snacks or https://…"></label>
+  <p class="hint">Applies to <b>{len(hits)} of {len(all_kw)}</b> saved niches: {hit_chips}</p>
+  <p><button type="button" class="btn" data-tpl="save">💾 Save template</button>
+  <button type="button" class="btn ghost" data-tpl="preview" data-slug="{seo._clean(prev_slug)}">👁 Preview first niche</button></p>
+  <p id="tmsg" class="msg"></p>
+</form></section>
+</main>
+<script>
+function $(id){{return document.getElementById(id);}}
+function readForm(){{
+  const px = {{}};
+  ["preset","mode","targets","css","banner_text","banner_link","accent","font","radius"].forEach(function(n){{
+    const el = $("tplform").querySelector('[name="' + n + '"]');
+    if (el) px[n] = el.value;
+  }});
+  px.banner = $("tplbanner").checked;
+  return px;
+}}
+document.addEventListener("click", async function(e){{
+  const b = e.target.closest("[data-tpl]");
+  if (!b) return;
+  const m = $("tmsg");
+  if (b.dataset.tpl === "preview") {{
+    const slug = b.dataset.slug;
+    if (!slug) {{ const m = $("tmsg"); m.textContent = "Nothing targeted yet — save a template first."; return; }}
+    window.open("/n/" + slug, "_blank");
+    return;
+  }}
+  const r = await fetch("/api/template", {{method:"POST",
+    headers:{{"Content-Type":"application/json"}}, body: JSON.stringify({{action:"save", ...readForm()}})}});
+  const d = await r.json().catch(function(){{return {{ok:false}};}});
+  m.textContent = d && d.config ? ("Saved — applies to " + d.applies + " of " + d.total + " niches") : "Save failed";
 }});
 </script>
 </body></html>"""
@@ -8528,6 +9006,14 @@ document.addEventListener("click", async (e)=>{{
 
         lt = info.get("longtail") or []
         intent = info.get("intent") or {}
+        who = info.get("who") or {}
+        who_chips = "".join(
+            '<span class="badge source">%s · %dV/%dC</span>' % (seo._clean(r.get("name") or r.get("code")),
+                                        r.get("views") or 0, r.get("clicks") or 0)
+            for r in (who.get("regions") or [])[:5]) or \
+            '<span class="badge hint">no on-site visits yet</span>'
+        persona = " · ".join([w for w in (who.get("region"), who.get("interest"),
+                                          who.get("behavior")) if w]) or "any region / interest / behavior"
         paa = info.get("paa") or []
         perf = info.get("performance") or []
         page = info.get("page") or {}
@@ -8610,6 +9096,11 @@ document.addEventListener("click", async (e)=>{{
 <div class="sub"><h3>H1 target</h3><p class="key">{seo._clean(intent.get('h1_target',''))}</p></div>
 <div class="sub"><h3>Meta target</h3><p class="key">{seo._clean(intent.get('meta_target',''))}</p></div>
 <div class="sub"><h3>Quick wins</h3><ul>{fixes_html}</ul></div></section>
+<section class="card"><h2>👥 Who is searching</h2>
+<p class="hint">Your edited target persona plus real on-site geography from the beacon (CF-IPCountry) over the last 28 days — honest signal about who the niche already attracts.</p>
+<div class="sub"><h3>Search intent</h3><p class="who">{seo._clean(who.get('intent') or 'in research')}</p></div>
+<div class="sub"><h3>Target persona</h3><p class="who">{seo._clean(persona)}</p></div>
+<div class="sub"><h3>Actual visitors</h3><p>{who_chips}</p></div></section>
 <section class="card"><h2>🗂 Long-tail expansion</h2>
 <p class="hint">Related searches (from Amazon's autosuggest) the page should ideally cover — view each as its own crawlable URL.</p>
 {lt_html}</section>
@@ -8639,13 +9130,14 @@ document.addEventListener("click", async (e)=>{{
 
 
 # ------------------------------------------------------------------ email suite
-    def _record_click(self, slug, source="page", referrer="", asin="", content=""):
+    def _record_click(self, slug, source="page", referrer="", asin="", content="", country=""):
         ip = security.ip_token(self._client_ip())
         with _lock:
             conn = _db()
             conn.execute(
-                "INSERT INTO clicks (slug, source, ip, referrer, asin, content) VALUES (?,?,?,?,?,?)",
-                (slug, source, ip, referrer, asin, content))
+                "INSERT INTO clicks (slug, source, ip, referrer, asin, content, country) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (slug, source, ip, referrer, asin, content, str(country or "")[:8]))
             conn.commit()
             conn.close()
 
@@ -8761,7 +9253,8 @@ document.addEventListener("click", async (e)=>{{
         referrer = str(body.get("referrer") or (q.get("referrer") or [""])[0]).strip()[:250]
         asin = str(body.get("asin") or (q.get("asin") or [""])[0]).strip().upper()[:40]
         content = str(body.get("content") or (q.get("content") or [""])[0]).strip()[:40]
-        self._record_click(slug, source, referrer, asin, content)
+        country = str(self.headers.get("CF-IPCountry") or "").strip()[:8]
+        self._record_click(slug, source, referrer, asin, content, country)
         return self._send(200, {"ok": True})
 
     def _page_view(self):
@@ -8782,6 +9275,7 @@ document.addEventListener("click", async (e)=>{{
             "keyword": (body.get("keyword") or (q.get("keyword") or [""])[0]).strip()[:120],
             "source": source or "organic",
             "referrer": str(body.get("referrer") or (q.get("referrer") or [""])[0]).strip()[:200],
+            "country": str(self.headers.get("CF-IPCountry") or "").strip()[:8],
         }
         if entry["slug"] in ("page", "") and not entry["keyword"]:
             entry["slug"] = entry["page"].strip("/").split("?")[0][:120] or "page"
@@ -8792,14 +9286,15 @@ document.addEventListener("click", async (e)=>{{
         e = {k: (v or "").strip()[:k_limit] for k, (v, k_limit) in {
             "slug": (e.get("slug"), 120), "page": (e.get("page"), 160),
             "name": (e.get("name"), 40), "keyword": (e.get("keyword"), 120),
-            "source": (e.get("source"), 40), "referrer": (e.get("referrer"), 200)}.items()}
+            "source": (e.get("source"), 40), "referrer": (e.get("referrer"), 200),
+            "country": (e.get("country"), 8)}.items()}
         with _lock:
             conn = _db()
             conn.execute(
-                "INSERT INTO events (slug, page, name, keyword, source, referrer) "
-                "VALUES (?,?,?,?,?,?)",
+                "INSERT INTO events (slug, page, name, keyword, source, referrer, country) "
+                "VALUES (?,?,?,?,?,?,?)",
                 (e["slug"], e["page"], e["name"] or "view",
-                 e["keyword"], e["source"], e["referrer"] or ""))
+                 e["keyword"], e["source"], e["referrer"] or "", e["country"]))
             conn.commit()
             conn.close()
 
@@ -10301,6 +10796,29 @@ $("bigbtn").addEventListener("click",sendIt);});
         page = page.replace("__NAV__", nav).replace("__TOTOP__", _TOTOP)
         return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
 
+    def _warm_ebook_async(self, keyword):
+        """Warm the lead-magnet ebook off the request path. The AI provider can
+        take tens of seconds, and this server is a single tiny worker — a sync
+        build here would pin the CPU and make every other request time out."""
+        keyword = (keyword or "").strip()
+        if not keyword or keyword in _EBOOKS:
+            return
+        with _EBOOK_WARMING_LOCK:
+            if keyword in _EBOOK_WARMING:
+                return
+            _EBOOK_WARMING.add(keyword)
+
+        def _do():
+            try:
+                self._ebook_for(keyword)
+            except Exception:
+                pass
+            finally:
+                with _EBOOK_WARMING_LOCK:
+                    _EBOOK_WARMING.discard(keyword)
+
+        threading.Thread(target=_do, daemon=True).start()
+
     def _ebook_for(self, keyword):
         keyword = (keyword or "").strip()
         if not keyword:
@@ -11404,6 +11922,9 @@ def main():
         threading.Thread(target=_auto_refresh_loop, daemon=True).start()
         print("niche auto-refresh: every %ds, stale after %dm, %d/cycle"
               % (_REFRESH_INTERVAL_SEC, _REFRESH_STALE_MIN, _REFRESH_MAX_PER_CYCLE))
+    threading.Thread(target=_content_loop, name="content-engine", daemon=True).start()
+    print("daily content engine: running every %dh (pages+kits, leaders first)"
+          % max(1, int(float(_get_setting("content.loop_hours") or 24) or 24)))
     threading.Thread(target=_social_flush_loop, daemon=True).start()
     print("social scheduler: auto-flush every 60s (due scheduled posts)")
     threading.Thread(target=_outbox_loop, daemon=True).start()

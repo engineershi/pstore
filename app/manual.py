@@ -558,7 +558,10 @@ def render_admin_manual(nav_html, totop_html):
   <a href="#checklist">11 · 30-min checklist</a>
   <a href="#team">12 · Team access &amp; roles</a>
   <a href="#inbox">13 · Inbox &amp; conversations</a>
-  <a href="#founder">14 · About the founder</a>
+  <a href="#engine">14 · Daily content engine</a>
+  <a href="#audience">15 · Audience &amp; geo</a>
+  <a href="#look">16 · Look &amp; feel</a>
+  <a href="#founder">17 · About the founder</a>
 </nav>
 
 <h3 id="what">1 · What pstore is</h3>
@@ -681,7 +684,36 @@ def render_admin_manual(nav_html, totop_html):
 <li><code>SMTP_REPLY_TO</code> (single address) still works as the fallback; the per-subscriber tag simply makes every reply attributable.</li>
 <li>The Studio covers the whole mail lifecycle in tabs: <b>Compose</b>, <b>Inbox</b> (replies), <b>Subscribers</b> (search, status filter, unsubscribe/resubscribe/delete), <b>Drafts</b> (save a composition, reopen and edit it later) and <b>Sent</b> (outbound history with cancel for still-scheduled mail).</li>
 </ul>
-<h3 id="founder">14 · About the founder</h3>
+<h3 id="engine">14 · The daily content engine</h3>
+<p>The <a class="tooltag" href="/admin/opportunities">🪴 Grow</a> page now runs a <b>daily content engine</b> that builds long-tail topic pages and queues social kits <b>unattended</b> — so the site keeps compounding even on days you don't touch it.</p>
+<ul class="step-list">
+<li><b>Page building</b>: each loop visit picks the niche with the most click heat and builds the next long-tail topic page (<code>/n/&lt;parent&gt;/&lt;term&gt;</code>) until that niche's keyword bank is exhausted, then moves to the next strongest niche. Fresh pages are pinged to IndexNow as they're published.</li>
+<li><b>Kit scheduling</b>: ranked social posts are queued across the social calendar at real peak slots — each tagged with its own UTM so clicks attribute to the post that earned them. A kit is skipped only when its exact link is already pending/published on that platform, so nothing is double-posted.</li>
+<li><b>Safety caps</b>: the engine obeys hard limits every day (<i>pages per day</i>, <i>kits per day</i>) and only runs within its <i>hours</i> window — you control all of them on the engine card, plus an optional <b>only these niches</b> filter.</li>
+<li>The card shows the live ticker: pages built, kits queued, last run, next run. <b>Save</b> applies the caps, <b>Run now</b> fires an immediate pass.</li>
+<li>Everything is idempotent and cheap: no network, no double posts, nothing to clean up — turn it on and let it feed the machine.</li>
+</ul>
+
+<h3 id="audience">15 · Audience &amp; geo</h3>
+<p>The courier beacon now records <b>where every click comes from</b>, and the SEM briefs tell you exactly who is searching — so you optimise for the actual buyer, not the keyword alone.</p>
+<ul class="step-list">
+<li>Every page view and Amazon click is tagged with the visitor's <b>country</b> (beacon <code>CF-IPCountry</code>) and stored per-niche, per-ASIN.</li>
+<li><a class="tooltag" href="/admin/sem">🎯 SEM</a> briefs now include a <b>👥 Who is searching</b> block: audience region mix for the keyword, a named persona (e.g. <i>the weekend snack-shopper</i>) and the intent labels (browse/compare/buy) the search carries — generated deterministically from the geo data, no AI needed.</li>
+<li>The <a class="tooltag" href="/admin/opportunities">🪴 Grow</a> page shows the <b>audience signal</b> card: which countries dominate your traffic and clicks, and how those reads convert, so your copy, pricing and product picks can follow the money.</li>
+<li>Audience, personas and intents respect your <b>demography settings</b> (household sizes, incomes, age bands on <a class="tooltag" href="/admin/settings">⚙️ Settings</a>) — the profile answers read from the same settings you already keep.</li>
+</ul>
+
+<h3 id="look">16 · Look &amp; feel — template &amp; style</h3>
+<p>Give every one-pager a house style without touching a single template. The <a class="tooltag" href="/admin/template">🎨 Template &amp; style</a> page is the site-wide styling console.</p>
+<ul class="step-list">
+<li><b>Preset looks</b>: Ocean, Forest, Coral, Violet, Mono — or keep the classic Base. Each recolors the accent, gradients, rings and accent-2 across all <code>/n/</code> pages at once.</li>
+<li><b>Advanced style</b>: paste your own CSS, override the accent color, switch the font stack, or set a card radius — the page applies your overrides on top of the preset and renders it instantly on the <b>👁 Preview first niche</b> button.</li>
+<li><b>Announcement banner</b>: switch on the page feature and every targeted onepager shows a slim, on-brand banner at the very top (gradient using your accent, with an optional link) — perfect for a promo, a launch or a shipping note.</li>
+<li><b>Targeting</b>: apply the look to <b>All</b> niches, <b>Only these</b>, or <b>All except</b> — listing niches or keywords (e.g. <i>keto snacks, back massager for pain relief deep tissue</i>) for surgical control. The card tells you how many of your saved niches the current settings hit.</li>
+<li>Untouched niches keep rendering byte-identical — styling only ever appears on pages you explicitly target.</li>
+</ul>
+
+<h3 id="founder">17 · About the founder</h3>
 <p>pstore was conceived, architected and built <b>from scratch</b> by <a href="mailto:salahuddinhabibisah@gmail.com"><b>Engr Salahuddin Habibu Isah</b></a> — one software engineer, one codebase, and not a single third-party library. The whole machine is hand-written Python on the standard library: the mining engine, the search-ranked review pages, the landing-page CMS, the email studio with its 5-part sequence, the AI ebook builder, the social kits, the UTM boosts, the click analytics, the auto-refresh loop, the security layer — and this manual's PDF, drawn page by page by the app's own book-format PDF engine.</p>
 <ul class="step-list">
 <li><b>Role</b> — Founder and lead engineer.</li>

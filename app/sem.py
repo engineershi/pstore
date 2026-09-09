@@ -181,7 +181,8 @@ def page_status(keyword, base_url, indexnow_key=None, sitemap_entries=None):
     }
 
 
-def brief(keyword, niche, base_url, audit_row=None, indexnow_key=None, sitemap_entries=None):
+def brief(keyword, niche, base_url, audit_row=None, indexnow_key=None,
+          sitemap_entries=None, audience_info=None):
     """Assemble the full SEM payload for one niche."""
     return {
         "keyword": keyword,
@@ -191,4 +192,5 @@ def brief(keyword, niche, base_url, audit_row=None, indexnow_key=None, sitemap_e
         "paa": people_also_ask(keyword, niche),
         "performance": performance_checklist(keyword, niche),
         "page": page_status(keyword, base_url, indexnow_key, sitemap_entries),
+        "who": audience_info or {},
     }

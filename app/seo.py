@@ -530,7 +530,8 @@ def _variant_key(n):
     return hashlib.md5(stub.encode("utf-8")).hexdigest()[:8]
 
 
-def render_niche(keyword, niche, saved_niches=None, ab_headline=None, ab_variant=0):
+def render_niche(keyword, niche, saved_niches=None, ab_headline=None, ab_variant=0,
+                 style_pack=None):
     """Crawlable niche page in the answer-first review layout: breadcrumbs,
     byline, human intro, ranked picks with honest pros/cons, comparison table,
     methodology + trust, FAQ, related niches."""
@@ -558,9 +559,12 @@ def render_niche(keyword, niche, saved_niches=None, ab_headline=None, ab_variant
                  noindex=not bool(items))
     headline = ab_headline or ("Best %s: ranked picks" % keyword)
     ab_attr = (' data-variant="%s"' % ab_variant) if ab_variant else ""
+    banner_slot = (style_pack or {}).get("banner") or ""
+    style_slot = (style_pack or {}).get("css") or ""
     body = f"""
 <header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
 <nav><a href="/">🏠 Home</a><a href="/about">About</a><a href="/disclosure">Disclosure</a><a href="/lp/{_clean(_slugify(keyword))}">One-pager →</a></nav></header>
+{banner_slot}{style_slot}
 <main data-niche="{_clean(_slugify(keyword))}" data-source="niche" data-keyword="{_clean(keyword)}"{ab_attr}>
 <div class="card">
   {editorial.breadcrumbs_html(keyword)}
@@ -617,7 +621,7 @@ def score_order(items):
     return [it for it, _s in editorial.score_items(items)]
 
 
-def render_topic(term, parent_keyword, niche, parent_slug):
+def render_topic(term, parent_keyword, niche, parent_slug, style_pack=None):
     """Long-tail page (/n/<parent>/<term>): reframes the parent niche's ranked
     picks around a related autosuggest term so Google sees a distinct intent.
     Shares the niche's product data (still relevant), URL-canonical for the term,
@@ -645,9 +649,12 @@ def render_topic(term, parent_keyword, niche, parent_slug):
     ranked = "".join(editorial.pick_html(term or parent_keyword, it, idx, items)
                      for idx, it in enumerate(score_order(items)))
     hub = "/n/%s" % _slugify(parent_keyword)
+    banner_slot = (style_pack or {}).get("banner") or ""
+    style_slot = (style_pack or {}).get("css") or ""
     body = f"""
 <header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
 <nav><a href="/">🏠 Home</a><a href="{_clean(hub)}">{_clean(parent_keyword.title())}: hub →</a><a href="/disclosure">Disclosure</a></nav></header>
+{banner_slot}{style_slot}
 <main data-niche="{_clean(term_slug)}" data-source="topic" data-keyword="{_clean(term or parent_keyword)}">
 <div class="card">
   {editorial.breadcrumbs_html(term or parent_keyword)}
