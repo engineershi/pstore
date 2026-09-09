@@ -989,6 +989,14 @@ def _build_topic_pages(parent_slug, count=6):
                         "url": "/n/%s/%s" % (parent_slug, term_slug)})
     if created:
         _fire_indexnow_urls([c["url"] for c in created])
+        try:
+            base = (seo.BASE_URL or "").rstrip("/")
+            if base:
+                for c in created:
+                    webmasters.inspect_new(base + c["url"])
+                webmasters.gsc_submit_sitemap_daily()
+        except Exception:
+            pass
     return created
 
 
@@ -3373,10 +3381,32 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         try:
             if not acquired:
                 return self._send(503, {"error": "busy, retry shortly"})
+            self._apply_paid_session()
             return self._dispatch_get()
         finally:
+            amazon.clear_session_tag()
             if acquired:
                 security.CONCURRENCY.release()
+
+    def _apply_paid_session(self):
+        """When the visitor arrives with a paid-campaign URL (utm_source on a
+        paid network, utm_campaign, or a tracker click-id), swap the affiliate
+        tag on every rendered link to the campaign tag so paid traffic is
+        credited separately from organic. No-op unless a paid tag is set."""
+        tag = _get_setting("paid.tag", os.environ.get("PSTORE_PAID_TAG", ""))
+        if not tag:
+            return
+        qs = urllib.parse.urlsplit(self.path).query
+        q = urllib.parse.parse_qs(qs)
+        if not q:
+            return
+        utm_source = (q.get("utm_source") or [""])[0].lower()
+        utm_campaign = (q.get("utm_campaign") or [""])[0].strip()
+        clickid = any((q.get(k) or [""])[0] for k in ("gclid", "fbclid", "ttclid", "twclid", "msclkid"))
+        paid_sources = ("paid", "ads", "adwords", "facebook", "fb", "instagram", "ig",
+                        "tiktok", "tt", "youtube", "yt", "pinterest", "pin", "bing", "google")
+        if utm_campaign or clickid or utm_source in paid_sources:
+            amazon.set_session_tag(tag)
 
     def _dispatch_get(self):
         parsed = urllib.parse.urlsplit(self.path)
@@ -3984,13 +4014,22 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
 
     def _push_indexnow(self, keyword):
         """Fire-and-forget IndexNow submit so a brand-new /n/ page is crawled
-        in minutes instead of waiting for a sitemap re-crawl. Never blocks the
-        save response and never raises."""
+        in minutes instead of waiting for a sitemap re-crawl. When Google is
+        connected, the same page is sent a URL-inspection crawl request and the
+        sitemap is submitted once per day. Never blocks and never raises."""
         try:
             slug = seo._slugify(keyword)
         except Exception:
             slug = "niche"
-        self._fire_indexnow(["/n/" + slug])
+        url = "/n/" + slug
+        self._fire_indexnow([url])
+        try:
+            base = (seo.BASE_URL or "").rstrip("/")
+            if base:
+                webmasters.inspect_new(base + url)
+                webmasters.gsc_submit_sitemap_daily()
+        except Exception:
+            pass
 
     def _list_niches(self):
         with _lock:
@@ -4688,7 +4727,11 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 snaps[e] = s
         return self._send(200, {"engines": engines, "traffic": traffic,
                                 "snapshots": snaps, "host": webmasters.host_of(),
-                                "sitemap": webmasters.site_url() + "/sitemap.xml"})
+                                "sitemap": webmasters.site_url() + "/sitemap.xml",
+                                "paid_tag": bool(_get_setting(
+                                    "paid.tag", os.environ.get("PSTORE_PAID_TAG", ""))),
+                                "gsc_crawl_enabled": _get_setting("seoeng.gsc.enabled", "1") != "0",
+                                "gsc_inspect_budget": webmasters._inspect_budget()})
 
     def _seoengines_post(self):
         body = self._body()
@@ -4713,6 +4756,22 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         if action == "bingkey":
             webmasters.store_set("seoeng.bing.apikey",
                                  (body.get("key") or "").strip())
+            return self._send(200, {"ok": True, "message": "bing key saved"})
+        if action == "crawl":
+            """Crawl-request a batch of URLs in Google + submit the sitemap.
+            Wired to the Grow expand buttons so every new page is pushed past
+            the fresh-site discovery wait. Daily URL-inspection quota applies."""
+            urls = [str(u) for u in (body.get("urls") or []) if str(u).startswith("http")]
+            if not urls:
+                return self._send(200, {"ok": False, "error": "no urls"})
+            return self._send(200, {"ok": True,
+                                    "crawl": webmasters.gsc_crawl(urls)})
+        if action == "paidset":
+            _set_setting("paid.tag", (body.get("tag") or "").strip())
+            return self._send(200, {"ok": True})
+        if action == "gscenable":
+            _set_setting("seoeng.gsc.enabled",
+                         "1" if (body.get("enabled") is not False) else "0")
             return self._send(200, {"ok": True})
         if action == "verify" and engine in ("google", "bing", "yandex", "pinterest"):
             token = (body.get("token") or "").strip()

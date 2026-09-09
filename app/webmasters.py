@@ -99,7 +99,9 @@ YANDEX_CLIENT_SECRET = os.environ.get("PSTORE_YANDEX_CLIENT_SECRET", "")
 GSC_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GSC_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GSC_API = "https://searchconsole.googleapis.com"
-GSC_SCOPE = "https://www.googleapis.com/auth/webmasters.readonly"
+GSC_SCOPE = "https://www.googleapis.com/auth/webmasters"
+GSC_INSPECT_DAY_LIMIT = 200  # Google's URL Inspection API quota
+GSC_INSPECT_DAY_MARGIN = 10  # stay under the hard cap
 BING_API = "https://ssl.bing.com/webmaster/api.svc/json"
 YANDEX_OAUTH = "https://oauth.yandex.ru"
 YANDEX_API = "https://api.webmaster.yandex.net/v3"
@@ -289,7 +291,103 @@ def gsc_sitemap_status(site=None):
     return True, out
 
 
-# ------------------------------------------------------------------ Bing
+def url_inspect(url, site=None):
+    """Request Google re-crawl one URL via the URL Inspection API (the closest
+    thing to an instant index push). Needs the write scope, so the consent
+    flow must have granted webmasters (see GSC_SCOPE)."""
+    site = site or gsc_site_id()
+    body = {"inspectionUrl": (url or "").strip(), "siteUrl": site}
+    status, data = _gsc("/webmasters/v3/urlInspection/index/inspect",
+                        "POST", body)
+    return status, data
+
+
+_GSC_DAY_KEY = "seoeng.gsc.inspect"
+
+
+def _inspect_budget(days=1):
+    """URLs still available today under the day quota. Persisted via the
+    settings store so every process/slot shares the same daily budget."""
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    raw = store_get(_GSC_DAY_KEY, "")
+    try:
+        used = json.loads(raw) or {}
+    except Exception:
+        used = {}
+    if used.get("date") != today:
+        used = {"date": today, "used": 0}
+        store_set(_GSC_DAY_KEY, json.dumps(used))
+        return GSC_INSPECT_DAY_LIMIT - GSC_INSPECT_DAY_MARGIN
+    return max(0, GSC_INSPECT_DAY_LIMIT - GSC_INSPECT_DAY_MARGIN - int(used.get("used", 0)))
+
+
+def _consume_inspect(n):
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    raw = store_get(_GSC_DAY_KEY, "")
+    try:
+        used = json.loads(raw) or {}
+    except Exception:
+        used = {}
+    if used.get("date") != today:
+        used = {"date": today, "used": 0}
+    used["used"] = int(used.get("used", 0)) + max(0, int(n))
+    store_set(_GSC_DAY_KEY, json.dumps(used))
+
+
+def gsc_submit_sitemap_daily(site=None):
+    """Submit /sitemap.xml to Google at most once per day (GSC is slow to
+    register changes anyway; IndexNow + URL inspection cover new URLs)."""
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    if store_get("seoeng.gsc.sitemap", "") == today:
+        return False
+    if not _gsc_bearer():
+        return False
+    ok, _ = gsc_submit_sitemap(site=site)
+    if ok:
+        store_set("seoeng.gsc.sitemap", today)
+    return ok
+
+
+def inspect_new(url, site=None):
+    """Budget-aware single-URL inspect: a no-op (returns None) when Google is
+    unconnected, GSC crawls are disabled, or the daily quota is spent. Returns
+    True only when the inspection request was actually issued."""
+    if store_get("seoeng.gsc.enabled", "1") != "1":
+        return None
+    if _inspect_budget() <= 0:
+        return None
+    try:
+        if not _gsc_bearer():
+            return None
+        _gsc("/webmasters/v3/urlInspection/index/inspect", "POST",
+             {"inspectionUrl": (url or "").strip(),
+              "siteUrl": site or gsc_site_id()})
+        _consume_inspect(1)
+    except Exception:
+        return None
+    return True
+
+
+def gsc_crawl(urls, site=None, cap=None):
+    """Best-effort Google re-crawl for a batch of URLs: submits the sitemap
+    once, then requests inspection for each new URL, capped by the daily quota.
+    Returns {ok, submitted, inspected, skipped, total}. Never raises."""
+    urls = [u for u in (urls or []) if isinstance(u, str) and u.startswith("http")]
+    if not urls:
+        return {"ok": False, "submitted": False, "inspected": 0,
+                "skipped": len(urls or []), "total": 0}
+    out = {"ok": False, "submitted": False, "inspected": 0, "skipped": 0,
+           "total": len(urls)}
+    submitted_ok, _ = gsc_submit_sitemap(site=site)
+    out["submitted"] = submitted_ok
+    for u in urls:
+        if cap is not None and out["inspected"] >= cap:
+            break
+        if inspect_new(u, site=site):
+            out["inspected"] += 1
+    out["skipped"] = max(0, len(urls) - out["inspected"])
+    out["ok"] = out["inspected"] > 0 or out["submitted"]
+    return out
 def bing_add_site(key, url):
     return _req("POST", BING_API + "/AddSite", _hdr(WebmasterAPI=key),
                 {"siteUrl": url})

@@ -61,6 +61,8 @@ class FakeWm:
             return 200, {"rows": [
                 {"keys": ["/n/keto", "/"], "clicks": 5, "impressions": 100,
                  "ctr": 0.05, "position": 3.5}]}
+        if "urlInspection/index/inspect" in url:
+            return 200, {"inspectionResult": {"inspectionResultLink": "x"}}
         if "sitemaps/" in url and method == "PUT":
             return 204, {}
         if "/sitemaps" in url:
@@ -114,7 +116,9 @@ class TestWebmastersClients(unittest.TestCase):
         self.assertIn("client_id=cid-test", url)
         self.assertIn("response_type=code", url)
         self.assertIn("scope=", url)
-        self.assertIn("webmasters.readonly", url)
+        # write scope: Search Analytics reads + sitemap submit + URL inspection
+        self.assertIn("webmasters", url)
+        self.assertNotIn("readonly", url)
         self.assertIn("redirect_uri=", url)
         self.assertIn("%2Fadmin%2Foauth%2Fseoengines%2Fcb%2Fgsc", url)
         self.assertIn("state=st-tok", url)
@@ -141,6 +145,7 @@ class TestWebmastersClients(unittest.TestCase):
         self.assertEqual(webmasters.gsc_refresh(), "gsc-at")
 
     def test_gsc_performance(self):
+        self.wm.store["seoeng.gsc.token"] = json.dumps(GSC_TOK)
         ok, data = webmasters.gsc_performance(28)
         self.assertTrue(ok)
         self.assertEqual(data["rows"][0]["page"], "/n/keto")
@@ -156,6 +161,7 @@ class TestWebmastersClients(unittest.TestCase):
 
     def test_gsc_submit_sitemap(self):
         self.wm.store["seoeng.gsc.token"] = json.dumps(GSC_TOK)
+        self.wm.calls.clear()
         ok, msg = webmasters.gsc_submit_sitemap()
         self.assertTrue(ok)
         put = [c for c in self.wm.calls if c[0] == "PUT" and "sitemaps/" in c[1]]
@@ -163,6 +169,48 @@ class TestWebmastersClients(unittest.TestCase):
         # feed path is host-less (just "sitemap.xml"); host only in site id
         self.assertTrue(put[0][1].endswith("/sitemaps/sitemap.xml"))
         self.assertIn("sc-domain:pstore-gxbv.onrender.com", put[0][1])
+
+    def test_gsc_crawl_budget_and_inspect(self):
+        # inspector needs a connected bearer token
+        self.wm.store["seoeng.gsc.token"] = json.dumps(GSC_TOK)
+        self.wm.store.pop("seoeng.gsc.inspect", None)
+        self.wm.store.pop("seoeng.gsc.sitemap", None)
+        self.wm.calls.clear()
+        urls = ["https://pstore-gxbv.onrender.com/n/keto-snacks/low-carb",
+                "https://pstore-gxbv.onrender.com/n/keto-snacks/healthy"]
+        out = webmasters.gsc_crawl(urls)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["inspected"], 2)
+        self.assertEqual(out["total"], 2)
+        inspect = [c for c in self.wm.calls if "urlInspection/index/inspect" in c[1]]
+        self.assertEqual(len(inspect), 2)
+        # budget consumed by the two inspections
+        self.assertEqual(webmasters._inspect_budget(),
+                         webmasters.GSC_INSPECT_DAY_LIMIT -
+                         webmasters.GSC_INSPECT_DAY_MARGIN - 2)
+        # re-run same day: sitemap re-submitted + inspections counted again
+        calls_before = len(self.wm.calls)
+        webmasters.gsc_crawl(urls)
+        self.assertEqual(len(self.wm.calls), calls_before + 3)
+
+    def test_gsc_crawl_disabled(self):
+        self.wm.store["seoeng.gsc.token"] = json.dumps(GSC_TOK)
+        self.wm.store["seoeng.gsc.enabled"] = "0"
+        self.wm.store.pop("seoeng.gsc.inspect", None)
+        out = webmasters.gsc_crawl(["https://pstore-gxbv.onrender.com/n/x"])
+        self.assertEqual(out["inspected"], 0)
+        self.assertTrue(out["submitted"])  # sitemap submit stays on
+        self.wm.store["seoeng.gsc.enabled"] = "1"
+
+    def test_gsc_inspect_skips_when_unconnected(self):
+        tok = self.wm.store.get("seoeng.gsc.token")
+        self.wm.store.pop("seoeng.gsc.token", None)
+        self.wm.store.pop("seoeng.gsc.inspect", None)
+        try:
+            self.assertIsNone(webmasters.inspect_new("https://x/y"))
+        finally:
+            if tok:
+                self.wm.store["seoeng.gsc.token"] = tok
 
     def test_gsc_sitemap_status(self):
         self.wm.store["seoeng.gsc.token"] = json.dumps(GSC_TOK)
@@ -454,6 +502,36 @@ class TestSeoengineServer(unittest.TestCase):
         self.assertEqual(st, 200)
         self.assertEqual(d.get("ok"), True)
         self.assertEqual(d.get("message"), "submitted")
+
+    def test_crawl_post_and_paid_set(self):
+        self.server._set_setting("seoeng.gsc.token", json.dumps(GSC_TOK))
+        st, _, body = self._raw(
+            "POST", "/api/seoengines", cookie=self.cookie,
+            body=json.dumps({"action": "crawl",
+                             "urls": ["https://pstore-gxbv.onrender.com/n/x"]}),
+            ctype="application/json")
+        d = json.loads(body)
+        self.assertEqual(st, 200)
+        self.assertEqual(d["crawl"]["inspected"], 1)
+        # paid campaign tag
+        st, _, body = self._raw(
+            "POST", "/api/seoengines", cookie=self.cookie,
+            body=json.dumps({"action": "paidset", "tag": "PAIDTAG-20"}),
+            ctype="application/json")
+        self.assertTrue(json.loads(body)["ok"])
+        self.assertEqual(self.server._get_setting("paid.tag"), "PAIDTAG-20")
+        # gsc crawl enable toggle
+        st, _, body = self._raw(
+            "POST", "/api/seoengines", cookie=self.cookie,
+            body=json.dumps({"action": "gscenable", "enabled": False}),
+            ctype="application/json")
+        self.assertTrue(json.loads(body)["ok"])
+        self.assertEqual(self.server._get_setting("seoeng.gsc.enabled"), "0")
+        self.server._set_setting("paid.tag", "")
+        st, _, body = self._raw("GET", "/api/seoengines", cookie=self.cookie)
+        self.assertIn("gsc_crawl_enabled", json.loads(body))
+        self.assertIn("paid_tag", json.loads(body))
+        self.assertIn("gsc_inspect_budget", json.loads(body))
 
     def test_connect_without_client_gives_url(self):
         # env has a fake client id in this harness, so the hub can build URLs;

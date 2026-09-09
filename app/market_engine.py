@@ -22,7 +22,8 @@ import amazon
 
 
 def clean_tag():
-    return (amazon.AFFILIATE_TAG or "").strip() or "YOURTAG-20"
+    paid = amazon._active_tag()
+    return (paid or amazon.AFFILIATE_TAG or "").strip() or "YOURTAG-20"
 
 
 def _best_items(items, n=3):

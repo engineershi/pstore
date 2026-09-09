@@ -427,12 +427,34 @@ def _parse_count(raw):
 # The money-maker: no API needed. Build a tagged product URL from an ASIN.
 _TAG_URL = "/dp/%s?tag=%s"
 _pass_through_re = re.compile(r'[;/?&:]')
+_SESSION_TAG = threading.local()  # per-request paid-tag override (server.py)
 
 
-def affiliate_url(asin):
-    if not AFFILIATE_TAG:
+def _active_tag(tag=None):
+    if tag:
+        return tag
+    paid = getattr(_SESSION_TAG, "tag", "") or ""
+    return paid or AFFILIATE_TAG
+
+
+def set_session_tag(tag):
+    """Per-request affiliate-tag override. Paid landing sessions route clicks
+    through a campaign-specific tag without touching AFFILIATE_TAG."""
+    _SESSION_TAG.tag = tag or ""
+
+
+def clear_session_tag():
+    try:
+        _SESSION_TAG.tag = ""
+    except Exception:
+        pass
+
+
+def affiliate_url(asin, tag=None):
+    active = _active_tag(tag)
+    if not active:
         return "https://%s/dp/%s" % (marketplace_info()["host"], asin)
-    tag = _pass_through_re.sub("-", AFFILIATE_TAG)
+    tag = _pass_through_re.sub("-", active)
     return "https://%s/dp/%s?tag=%s" % (marketplace_info()["host"], asin, tag)
 
 
