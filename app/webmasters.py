@@ -123,8 +123,11 @@ def site_url():
 
 
 def gsc_site_id(host=None):
-    """GSC resource id for the property: sc-domain:<host>."""
-    return "sc-domain:%s" % (host or host_of())
+    """GSC resource id for the property. We use the URL-prefix form
+    (https://host/) which can be verified on a Render *.onrender.com
+    subdomain; a domain property (sc-domain:host) needs DNS control we
+    do not have there."""
+    return "https://%s/" % (host or host_of())
 
 
 def engines_status():

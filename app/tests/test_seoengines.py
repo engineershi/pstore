@@ -168,7 +168,7 @@ class TestWebmastersClients(unittest.TestCase):
         self.assertEqual(len(put), 1)
         # feed path is host-less (just "sitemap.xml"); host only in site id
         self.assertTrue(put[0][1].endswith("/sitemaps/sitemap.xml"))
-        self.assertIn("sc-domain:pstore-gxbv.onrender.com", put[0][1])
+        self.assertIn("https:%2F%2Fpstore-gxbv.onrender.com%2F", put[0][1])
 
     def test_gsc_crawl_budget_and_inspect(self):
         # inspector needs a connected bearer token
@@ -275,7 +275,7 @@ class TestWebmastersClients(unittest.TestCase):
         self.wm.store["seoeng.yandex.token"] = json.dumps(YANDEX_TOK)
         st = {r["engine"]: r for r in webmasters.engines_status()}
         self.assertEqual(st["gsc"]["state"], "ready")
-        self.assertEqual(st["gsc"]["site"], "sc-domain:pstore-gxbv.onrender.com")
+        self.assertEqual(st["gsc"]["site"], "https://pstore-gxbv.onrender.com/")
         self.assertEqual(st["bing"]["state"], "ready")
         self.assertEqual(st["yandex"]["state"], "ready")
 
