@@ -305,6 +305,71 @@ def url_inspect(url, site=None):
     return status, data
 
 
+def gsc_user_sites():
+    """Every Search Console property this token can see (mirrors Bing's
+    GetUserSites / test-connection). Doubles as the cheapest token-liveliness
+    check: a stale or revoked refresh token surfaces here as not-connected.
+    Returns (ok, {"sites": [...], "registered": bool})."""
+    site = gsc_site_id().rstrip("/")
+    if not _gsc_bearer():
+        return False, {"error": "google not connected", "sites": [],
+                       "registered": False}
+    status, data = _gsc("/webmasters/v3/sites")
+    if status != 200 or not isinstance(data, dict):
+        return False, {"error": str(data)[:200], "sites": [],
+                       "registered": False}
+    sites = {str(s.get("siteUrl") or "").rstrip("/")
+             for s in data.get("siteEntry") or []}
+    return True, {"sites": sorted(sites), "registered": site in sites}
+
+
+def gsc_add_site():
+    """Register this site's URL-prefix property in Search Console (PUT the
+    property into the user's list — the GSC analog of Bing's AddSite). Then
+    submits /sitemap.xml so it is tracked from the start. Returns (ok, msg)."""
+    site = gsc_site_id()
+    if not _gsc_bearer():
+        return False, "google not connected"
+    status, data = _gsc(
+        "/webmasters/v3/sites/%s" % urllib.parse.quote(site, safe=":"),
+        "PUT", body={})
+    if status not in (200, 204):
+        return False, str(data)[:200]
+    gsc_submit_sitemap()
+    return True, "site registered in Search Console"
+
+
+def gsc_submit_url(page=None, site=None):
+    """Inspect one page via the URL Inspection API (the Bing SubmitUrl analog)
+    and report the index verdict. `page` is a path; the site root is inspected
+    when omitted. Consumes the shared daily inspect budget. Returns
+    (ok, {"url", "coverage_state", "indexed", "last_crawl", "verdict",
+          "robots_txt_state", "error": ...})."""
+    site = site or gsc_site_id()
+    target = (site_url().rstrip("/") + "/" + page.lstrip("/")) if page \
+        else site_url().rstrip("/") + "/"
+    if not _gsc_bearer():
+        return False, {"error": "google not connected"}
+    if _inspect_budget() <= 0:
+        return False, {"error": "daily URL-inspection budget spent "
+                               "(%d/day)" % GSC_INSPECT_DAY_LIMIT}
+    status, data = _gsc("/webmasters/v3/urlInspection/index/inspect", "POST",
+                        {"inspectionUrl": target, "siteUrl": site})
+    _consume_inspect(1)
+    if status != 200:
+        return False, {"error": str(data)[:200]}
+    ir = (data or {}).get("inspectionResult") or {}
+    idx = ir.get("indexStatusResult") or {}
+    return True, {
+        "url": target,
+        "coverage_state": idx.get("coverageState") or "",
+        "indexed": bool(idx.get("indexingState") == "INDEXING_ALLOWED"),
+        "last_crawl": idx.get("lastCrawlTime") or "",
+        "verdict": idx.get("verdict") or "",
+        "robots_txt_state": idx.get("robotsTxtState") or "",
+    }
+
+
 _GSC_DAY_KEY = "seoeng.gsc.inspect"
 
 
@@ -555,6 +620,69 @@ def yandex_summary(days=28):
               "ctr": round(clicks / max(shows, 1) * 100, 1),
               "position": round(pos, 1), "days": days}
     return True, {"rows": [], "totals": totals}
+
+
+def yandex_user_hosts():
+    """Every host this OAuth token controls (mirrors Bing's GetUserSites /
+    test-connection). Returns (ok, {"user", "hosts": [...], "registered"})."""
+    uid, err = yandex_user_id()
+    if err:
+        return False, {"error": err, "user": "", "hosts": [],
+                       "registered": False}
+    hosts, err = yandex_hosts(uid)
+    if err:
+        return False, {"error": err, "user": uid, "hosts": [],
+                       "registered": False}
+    names = [h.get("host_name", "") for h in hosts]
+    normalized = {str(h).lower().strip("/") for h in names}
+    return True, {"user": uid, "hosts": names,
+                  "registered": host_of() in normalized}
+
+
+def yandex_add_host():
+    """Register this host in Yandex Webmaster (POST the host into the user's
+    list — the Yandex analog of Bing's AddSite). Returns
+    (ok, {"host", "verified", "message"})."""
+    bearer = yandex_bearer()
+    if not bearer:
+        return False, {"error": "yandex not connected"}
+    uid, err = yandex_user_id()
+    if err:
+        return False, {"error": err}
+    host = host_of()
+    status, data = _req("POST", YANDEX_API + "/user/%s/hosts/" % uid,
+                        {"Authorization": "OAuth " + bearer,
+                         "Content-Type": "application/json"},
+                        {"host_name": host})
+    if status != 200 or not isinstance(data, dict):
+        return False, {"error": str(data)[:200]}
+    verified = bool(data.get("verified") or data.get("verified_date"))
+    return True, {"host": data.get("host_name") or host,
+                  "verified": verified,
+                  "message": ("host added and verified ✓" if verified else
+                              "host added — verify ownership in Yandex to "
+                              "unlock indexing data")}
+
+
+def yandex_submit_url(page=None):
+    """Force Yandex to re-crawl one page (POST indexing/{url} — the SubmitUrl
+    analog). `page` is a path; the root is crawled when omitted. The host must
+    already be registered + verified in Yandex. Returns (ok, {"url"})."""
+    bearer = yandex_bearer()
+    if not bearer:
+        return False, {"error": "yandex not connected"}
+    uid, hid, err = yandex_pick_host()
+    if err:
+        return False, {"error": err}
+    target = site_url().rstrip("/") + (("/" + page.lstrip("/")) if page else "")
+    status, data = _req(
+        "POST", YANDEX_API + "/user/%s/hosts/%s/indexing/%s"
+        % (uid, hid, urllib.parse.quote(target, safe=":/-")),
+        {"Authorization": "OAuth " + bearer,
+         "Content-Type": "application/json"}, {})
+    if status in (200, 201):
+        return True, {"url": target}
+    return False, {"url": target, "error": str(data)[:200]}
 
 
 # ------------------------------------------------------------------ sync / persist

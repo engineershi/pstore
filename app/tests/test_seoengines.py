@@ -61,8 +61,30 @@ class FakeWm:
             return 200, {"rows": [
                 {"keys": ["/n/keto", "/"], "clicks": 5, "impressions": 100,
                  "ctr": 0.05, "position": 3.5}]}
+        if "sitemaps/" in url and method == "PUT":
+            return 204, {}
+        if "/sitemaps" in url:
+            return 200, {"sitemap": [
+                {"path": "https://x/sitemap.xml",
+                 "contents": [{"submitted": "2020-01-01",
+                               "lastDownloaded": "2020-01-02"}],
+                 "isPending": False}]}
+        if "/webmasters/v3/sites" in url and method == "PUT":
+            return 204, {}
+        if "/webmasters/v3/sites" in url and "urlInspection" not in url:
+            return 200, {"siteEntry": [
+                {"siteUrl": "https://pstore-gxbv.onrender.com/",
+                 "permissionLevel": "full"},
+                {"siteUrl": "sc-domain:example.com"}]}
         if "urlInspection/index/inspect" in url:
-            return 200, {"inspectionResult": {"inspectionResultLink": "x"}}
+            return 200, {"inspectionResult": {
+                "inspectionResultLink": "x",
+                "indexStatusResult": {
+                    "coverageState": "Indexed, not submitted",
+                    "indexingState": "INDEXING_ALLOWED",
+                    "lastCrawlTime": "2026-01-01T00:00:00Z",
+                    "verdict": "pass",
+                    "robotsTxtState": "ALLOWED"}}}
         if "sitemaps/" in url and method == "PUT":
             return 204, {}
         if "/sitemaps" in url:
@@ -78,9 +100,14 @@ class FakeWm:
             return 200, {"d": "ok"}
         if url.endswith("/user/"):
             return 200, {"user_id": "uid-1"}
+        if url.endswith("/hosts/") and method == "POST":
+            return 200, {"host_name": webmasters.host_of(),
+                          "verified": False}
         if "/hosts/" in url and "search-queries" not in url:
             return 200, {"hosts": [{"host_id": "h1",
                                     "host_name": "pstore-gxbv.onrender.com"}]}
+        if "/indexing/" in url:
+            return 201, {}
         if "search-queries/summary" in url:
             return 200, {"totals": {"clicks": 11, "shows": 400, "position": 4.2}}
         return 404, {}
@@ -218,6 +245,102 @@ class TestWebmastersClients(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(items[0]["last_submitted"], "2020-01-01")
         self.assertFalse(items[0]["is_pending"])
+
+    def test_gsc_user_sites(self):
+        self.wm.store["seoeng.gsc.token"] = json.dumps(GSC_TOK)
+        self.wm.calls.clear()
+        ok, data = webmasters.gsc_user_sites()
+        self.assertTrue(ok)
+        self.assertTrue(data["registered"])
+        self.assertTrue(any("pstore-gxbv.onrender.com" in s for s in data["sites"]))
+        self.assertEqual(len([c for c in self.wm.calls if "/webmasters/v3/sites" in c[1]]), 1)
+
+    def test_gsc_user_sites_not_connected(self):
+        self.wm.store.pop("seoeng.gsc.token", None)
+        ok, data = webmasters.gsc_user_sites()
+        self.assertFalse(ok)
+        self.assertEqual(data["sites"], [])
+        self.assertFalse(data["registered"])
+
+    def test_gsc_add_site(self):
+        self.wm.store["seoeng.gsc.token"] = json.dumps(GSC_TOK)
+        self.wm.calls.clear()
+        ok, msg = webmasters.gsc_add_site()
+        self.assertTrue(ok)
+        self.assertIn("registered", msg)
+        puts = [c for c in self.wm.calls
+                if c[0] == "PUT" and "/webmasters/v3/sites" in c[1]
+                and "/sitemaps" not in c[1]]
+        self.assertEqual(len(puts), 1)
+        # sitemap also submitted during add_site
+        sitemap_puts = [c for c in self.wm.calls
+                        if c[0] == "PUT" and "sitemaps/" in c[1]]
+        self.assertEqual(len(sitemap_puts), 1)
+
+    def test_gsc_submit_url(self):
+        self.wm.store["seoeng.gsc.token"] = json.dumps(GSC_TOK)
+        self.wm.store.pop("seoeng.gsc.inspect", None)
+        self.wm.calls.clear()
+        ok, d = webmasters.gsc_submit_url("/n/keto")
+        self.assertTrue(ok)
+        self.assertIn("url", d)
+        self.assertTrue(d["indexed"])
+        self.assertEqual(d["verdict"], "pass")
+        self.assertIn("robots_txt_state", d)
+        # budget consumed
+        self.assertLess(webmasters._inspect_budget(),
+                        webmasters.GSC_INSPECT_DAY_LIMIT -
+                        webmasters.GSC_INSPECT_DAY_MARGIN)
+
+    def test_gsc_submit_url_budget_spent(self):
+        self.wm.store["seoeng.gsc.token"] = json.dumps(GSC_TOK)
+        # spend entire budget
+        spent = webmasters.GSC_INSPECT_DAY_LIMIT - webmasters.GSC_INSPECT_DAY_MARGIN
+        import time as _time
+        today = _time.strftime("%Y-%m-%d", _time.gmtime())
+        self.wm.store["seoeng.gsc.inspect"] = json.dumps(
+            {"date": today, "used": spent})
+        ok, d = webmasters.gsc_submit_url("/n/keto")
+        self.assertFalse(ok)
+        self.assertIn("budget", d["error"])
+
+    def test_yandex_user_hosts(self):
+        self.wm.store["seoeng.yandex.token"] = json.dumps(YANDEX_TOK)
+        ok, data = webmasters.yandex_user_hosts()
+        self.assertTrue(ok)
+        self.assertEqual(data["user"], "uid-1")
+        self.assertTrue(data["registered"])
+        self.assertIn("pstore-gxbv.onrender.com", data["hosts"])
+
+    def test_yandex_add_host(self):
+        self.wm.store["seoeng.yandex.token"] = json.dumps(YANDEX_TOK)
+        ok, d = webmasters.yandex_add_host()
+        self.assertTrue(ok)
+        self.assertIn("host", d)
+        self.assertFalse(d["verified"])
+        self.assertIn("verify", d["message"].lower())
+
+    def test_yandex_submit_url(self):
+        self.wm.store["seoeng.yandex.token"] = json.dumps(YANDEX_TOK)
+        ok, d = webmasters.yandex_submit_url("/n/keto")
+        self.assertTrue(ok)
+        self.assertIn("url", d)
+        self.assertIn("keto", d["url"])
+
+    def test_yandex_submit_url_no_host(self):
+        self.wm.store["seoeng.yandex.token"] = json.dumps(YANDEX_TOK)
+        orig = webmasters._req
+        def _no_host_req(method, url, headers=None, body=None, timeout=25):
+            if url.endswith("/hosts/") and method != "POST":
+                return 200, {"hosts": []}
+            return orig(method, url, headers=headers, body=body, timeout=timeout)
+        webmasters._set_transport(_no_host_req)
+        try:
+            ok, d = webmasters.yandex_submit_url()
+            self.assertFalse(ok)
+            self.assertIn("error", d)
+        finally:
+            webmasters._set_transport(orig)
 
     def test_bing_stats(self):
         ok, data = webmasters.bing_stats("bing-key-test",
@@ -405,6 +528,8 @@ class TestSeoengineServer(unittest.TestCase):
         self.assertIn("Fetch stats", html)
         self.assertIn("Submit sitemap", html)
         self.assertIn("Setup guide", html)
+        self.assertIn("Test connection", html)
+        self.assertIn("Add this site", html)
         self.assertIn("Google Search Console", html)
         self.assertIn("Bing Webmaster", html)
         self.assertIn("Yandex Webmaster", html)
@@ -502,6 +627,64 @@ class TestSeoengineServer(unittest.TestCase):
         self.assertEqual(st, 200)
         self.assertEqual(d.get("ok"), True)
         self.assertEqual(d.get("message"), "submitted")
+
+    def test_gsc_console_actions_over_http(self):
+        self.server._set_setting("seoeng.gsc.token", json.dumps(GSC_TOK))
+        st, _, body = self._raw(
+            "POST", "/api/seoengines", cookie=self.cookie,
+            body=json.dumps({"action": "gsctest", "engine": "gsc"}),
+            ctype="application/json")
+        d = json.loads(body)
+        self.assertEqual(st, 200)
+        self.assertTrue(d["ok"])
+        self.assertTrue(d["registered"])
+        self.assertTrue(d["sites"])
+        st, _, body = self._raw(
+            "POST", "/api/seoengines", cookie=self.cookie,
+            body=json.dumps({"action": "gscadd", "engine": "gsc"}),
+            ctype="application/json")
+        d = json.loads(body)
+        self.assertEqual(st, 200)
+        self.assertTrue(d["ok"])
+        self.assertIn("registered", d["message"])
+        st, _, body = self._raw(
+            "POST", "/api/seoengines", cookie=self.cookie,
+            body=json.dumps({"action": "gscurl", "engine": "gsc",
+                             "page": "/n/keto"}),
+            ctype="application/json")
+        d = json.loads(body)
+        self.assertEqual(st, 200)
+        self.assertTrue(d["ok"])
+        self.assertTrue(d["indexed"])
+        self.assertIn("url", d)
+
+    def test_yandex_console_actions_over_http(self):
+        self.server._set_setting("seoeng.yandex.token", json.dumps(YANDEX_TOK))
+        st, _, body = self._raw(
+            "POST", "/api/seoengines", cookie=self.cookie,
+            body=json.dumps({"action": "yatest", "engine": "yandex"}),
+            ctype="application/json")
+        d = json.loads(body)
+        self.assertEqual(st, 200)
+        self.assertTrue(d["ok"])
+        self.assertTrue(d["registered"])
+        st, _, body = self._raw(
+            "POST", "/api/seoengines", cookie=self.cookie,
+            body=json.dumps({"action": "yaadd", "engine": "yandex"}),
+            ctype="application/json")
+        d = json.loads(body)
+        self.assertEqual(st, 200)
+        self.assertTrue(d["ok"])
+        self.assertIn("host", d)
+        st, _, body = self._raw(
+            "POST", "/api/seoengines", cookie=self.cookie,
+            body=json.dumps({"action": "yaurl", "engine": "yandex",
+                             "page": "/n/keto"}),
+            ctype="application/json")
+        d = json.loads(body)
+        self.assertEqual(st, 200)
+        self.assertTrue(d["ok"])
+        self.assertIn("url", d)
 
     def test_crawl_post_and_paid_set(self):
         self.server._set_setting("seoeng.gsc.token", json.dumps(GSC_TOK))

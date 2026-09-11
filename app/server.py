@@ -5020,6 +5020,33 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._send(200, {"ok": False, "error": d.get("error") or ""})
             return self._send(200, {"ok": True, "url":
                                     webmasters.site_url().rstrip("/") + "/" + page.lstrip("/")})
+        if action in ("gsctest", "gscadd", "gscurl",
+                      "yatest", "yaadd", "yaurl"):
+            """GSC + Yandex mirrors of the Bing actions: test connection
+            (list registered properties/hosts + token liveliness), add site
+            (register this property), and push one URL (inspect/crawl)."""
+            page = (body.get("page") or "").strip()[:500]
+            if page.startswith("http"):
+                page = ""
+            if action == "gsctest":
+                ok, data = webmasters.gsc_user_sites()
+                return self._send(200, {"ok": ok, **data})
+            if action == "gscadd":
+                ok, msg = webmasters.gsc_add_site()
+                return self._send(200, {"ok": ok, "engine": "gsc",
+                                        **({"message": msg} if ok
+                                           else {"error": msg})})
+            if action == "gscurl":
+                ok, d = webmasters.gsc_submit_url(page or None)
+                return self._send(200, {"ok": ok, "engine": "gsc", **d})
+            if action == "yatest":
+                ok, data = webmasters.yandex_user_hosts()
+                return self._send(200, {"ok": ok, **data})
+            if action == "yaadd":
+                ok, d = webmasters.yandex_add_host()
+                return self._send(200, {"ok": ok, "engine": "yandex", **d})
+            ok, d = webmasters.yandex_submit_url(page or None)
+            return self._send(200, {"ok": ok, "engine": "yandex", **d})
         if action == "crawl":
             """Crawl-request a batch of URLs in Google + submit the sitemap.
             Wired to the Grow expand buttons so every new page is pushed past
@@ -5112,10 +5139,10 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         each console's API or from our own referrer-attributed on-site data."""
         nav = self._admin_nav('seoengines')
         setup = {
-            "gsc": "Create a Google Cloud OAuth2 web client + enable the Search Console API. Set PSTORE_GSC_CLIENT_ID / PSTORE_GSC_CLIENT_SECRET on the host and add redirect URI %s/admin/oauth/seoengines/cb/gsc. Then Connect to approve it."
+            "gsc": "Create a Google Cloud OAuth2 web client + enable the Search Console API. Set PSTORE_GSC_CLIENT_ID / PSTORE_GSC_CLIENT_SECRET on the host and add redirect URI %s/admin/oauth/seoengines/cb/gsc. Then Connect to approve it. After connecting: Test connection lists every property the token can see, Add this site registers this URL-prefix property, and Inspect URL pushes any page through the URL Inspection API (daily quota ~200)."
                    % seo.BASE_URL,
             "bing": "Add this exact site in Bing Webmaster, then paste your Bing API key (also settable via PSTORE_BING_API_KEY). No OAuth needed.",
-            "yandex": "Create a Yandex OAuth app (PSTORE_YANDEX_CLIENT_ID / PSTORE_YANDEX_CLIENT_SECRET) with redirect URI %s/admin/oauth/seoengines/cb/yandex, add this host in Yandex Webmaster, then Connect."
+            "yandex": "Create a Yandex OAuth app (PSTORE_YANDEX_CLIENT_ID / PSTORE_YANDEX_CLIENT_SECRET) with redirect URI %s/admin/oauth/seoengines/cb/yandex, add this host in Yandex Webmaster, then Connect. After connecting: Test connection lists every host the token controls, Add this site registers this host, and Recrawl URL forces Yandex to re-crawl any page."
                    % seo.BASE_URL,
         }
         names = {"gsc": "Google Search Console",
@@ -5138,9 +5165,23 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                          '<button class="btn ghost" onclick="bingPush()">Submit URL</button>'
                          '</div>')
             else:
-                connect_btn = ('<button class="warm" onclick="act(\'connect\',\'%s\')">'
-                               'Connect console</button>' % eng)
-                extra = ""
+                connect_btn = (
+                    '<button class="warm" onclick="act(\'connect\',\'%s\')">'
+                    'Connect console</button>'
+                    '<button class="btn" onclick="act(\'%stest\',\'%s\')">'
+                    'Test connection</button>'
+                    '<button class="btn" onclick="act(\'%sadd\',\'%s\')">'
+                    'Add this site</button>'
+                    % (eng, eng, eng, eng, eng))
+                push_label = "Inspect URL" if eng == "gsc" else "Recrawl URL"
+                extra = ('<div class="row" '
+                         'style="flex-wrap:wrap;gap:8px;align-items:center">'
+                         '<input id="su-%s" placeholder="/page to %s" '
+                         'style="width:220px;max-width:100%%">'
+                         '<button class="btn ghost" onclick="pushUrl(\'%s\')">'
+                         '%s</button></div>'
+                         % (eng, "inspect" if eng == "gsc" else "recrawl",
+                            eng, push_label))
             cards.append("""
         <div class="card" style="margin:0">
          <h2>%s</h2>
@@ -5253,7 +5294,12 @@ function act(a,e){fetch("/api/seoengines",{method:"POST",headers:{"Content-Type"
   else if(a==="bingtest")o.textContent=(d.ok?(d.registered?"✓ key ok — site already registered in Bing":"✓ key ok — press Add this site to register"):"✗ key invalid: "+(d.error||""))+(d.sites&&d.sites.length?("\n\nsites on this key:\n"+d.sites.join("\n")):"");
   else if(a==="bingadd")o.textContent=d.ok?("site registered ✓"+(d.message?" · "+d.message:"")):("add failed: "+(d.error||""));
   else if(a==="bingurl")o.textContent=d.ok?("submitted ✓ "+esc(d.url)):("submit failed: "+(d.error||""));
+  else if(a==="gsctest"||a==="yatest")o.textContent=(d.ok?(d.registered?"✓ token ok — "+e+" already has this site":"✓ token ok — press Add this site to register"):"✗ "+e+" not connected: "+(d.error||""))+(d.sites&&d.sites.length?("\n\nproperties on this token:\n"+d.sites.join("\n")):(d.hosts&&d.hosts.length?("\n\nhosts on this token:\n"+d.hosts.join("\n")):""));
+  else if(a==="gscadd"||a==="yaadd")o.textContent=d.ok?("site registered ✓"+(d.verified?" (verified)":"")+(d.message?" · "+d.message:"")):("add failed: "+(d.error||""));
+  else if(a==="gscurl")o.textContent=d.ok?("inspect ✓ "+esc(d.url)+"\nindexed: "+(d.indexed?"yes":"not yet")+" · "+esc(d.coverage_state||"?")+" · "+(d.verdict||"")+" · crawled "+esc(d.last_crawl||"—")):("inspect failed: "+(d.error||""));
+  else if(a==="yaurl")o.textContent=d.ok?("recrawl queued ✓ "+esc(d.url)):("recrawl failed: "+(d.error||""));
   load();});}
+function pushUrl(e){const p=($("su-"+e)||{}).value||"";const a=e==="gsc"?"gscurl":e==="yandex"?"yaurl":"bingurl";fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:a,engine:e,page:p.trim()})}).then(r=>r.json()).then(d=>out(e,d.ok?("submitted ✓ "+esc(d.url||"")):("submit failed: "+(d.error||""))));}
 function bingPush(){const p=($("su-bing")||{}).value||"";fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"bingurl",engine:"bing",page:p.trim()})}).then(r=>r.json()).then(d=>out("bing",d.ok?("submitted ✓ "+esc(d.url)):("submit failed: "+(d.error||""))));}
 function saveKey(e){const k=$("vk-"+e).value;fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"bingkey",key:k})}).then(()=>load());}
 function verifyTok(e){const t=$("vt-"+e).value;fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"verify",engine:e,token:t})}).then(()=>{out(e,t?"verification meta saved ✓":"verification meta cleared");load();});}

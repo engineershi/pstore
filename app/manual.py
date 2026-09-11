@@ -121,6 +121,13 @@ def _chapters():
             "and the Analytics page (/admin/analytics) shows the same totals (clicks, "
             "impressions, position, CTR) next to your own referrer-attributed numbers.")
         doc.paragraph(
+            "Google and Yandex mirror those same buttons once connected: Test "
+            "connection lists every property (Google) or host (Yandex) your token "
+            "controls, Add this site registers this site's property/host, and the URL "
+            "button pushes a single page - Google's Inspect URL reports the index "
+            "verdict (coverage, last crawl, robots state; daily quota ~200) while "
+            "Yandex' Recrawl URL queues a re-crawl of that page.")
+        doc.paragraph(
             "Google snippets come from Product JSON-LD: every niche, topic and landing "
             "page emits schema.org Product markup (price, ratings and brand only when "
             "the scraped data really has them), so rich results with stars are "
