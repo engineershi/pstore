@@ -232,6 +232,44 @@ def _gsc(path, method="GET", body=None):
                 body=body)
 
 
+_GSC_FIX_HINTS = (
+    (("api has not been used", "disabled", "enabling", "permission_denied", "accessnotconfigured"),
+     "enable 'Search Console API' in Google Cloud → APIs & Services → Library (and if the "
+     "consent screen is in Testing mode, add this Google account as a test user)"),
+    (("quota", "rate", "429"),
+     "you hit Google's daily quota (URL Inspection ~200/day) — retry tomorrow"),
+    (("not found", "unknown", "domain", "property"),
+     "make sure the property %s is added — press 'Add this site' or add the URL-prefix "
+     "property in Search Console for that exact URL" % gsc_site_id()),
+)
+
+
+def _gsc_hint(status, data):
+    """Turn a raw Google Search Console error into a readable string plus a
+    concrete fix hint, so a 403/'API not enabled' or a stale token stops being
+    a mystery on the Engines hub."""
+    msg = ""
+    status_word = ""
+    if isinstance(data, dict):
+        err = data.get("error")
+        if isinstance(err, dict):
+            msg = err.get("message") or err.get("status") or ""
+            status_word = err.get("status") or ""
+        elif isinstance(err, str):
+            msg = err
+    if not msg:
+        msg = str(data)[:220] if data else ("HTTP %d" % (status or 0))
+    low = "%s %s %s" % (msg, status_word, status)
+    if "permission" in low.lower() or "denied" in low.lower():
+        return ("%s — fix: enable 'Search Console API' in Google Cloud → APIs & "
+                "Services → Library (and if the consent screen is in Testing "
+                "mode, add this Google account as a test user)." % msg.strip())
+    for needles, hint in _GSC_FIX_HINTS:
+        if any(n in low.lower() for n in needles):
+            return "%s — fix: %s." % (msg.strip(), hint)
+    return msg.strip()
+
+
 def gsc_performance(days=28, site=None):
     """Search Analytics for the property. Returns (ok, {rows, totals})."""
     site = site or gsc_site_id()
@@ -244,7 +282,7 @@ def gsc_performance(days=28, site=None):
         {"startDate": start, "endDate": end, "dimensions": ["page"],
          "rowLimit": 25, "type": "web"})
     if status != 200 or not isinstance(data, dict):
-        return False, {"error": str(data)[:200], "rows": []}
+        return False, {"error": _gsc_hint(status, data), "rows": []}
     rows = [{
         "page": (r.get("keys") or ["/"])[0],
         "clicks": int(r.get("clicks") or 0),
@@ -273,7 +311,8 @@ def gsc_submit_sitemap(site=None, sitemap=None):
         "PUT", body={})
     if status in (200, 204):
         return True, "submitted"
-    return False, ("already-submitted" if status == 400 else str(data)[:200])
+    return False, ("already-submitted" if status == 400
+                   else _gsc_hint(status, data))
 
 
 def gsc_sitemap_status(site=None):
@@ -281,7 +320,7 @@ def gsc_sitemap_status(site=None):
     status, data = _gsc(
         "/webmasters/v3/sites/%s/sitemaps" % urllib.parse.quote(site, safe=":"))
     if status != 200 or not isinstance(data, dict):
-        return (False, str(data)[:200]) if status != 200 else (True, [])
+        return (False, _gsc_hint(status, data)) if status != 200 else (True, [])
     out = []
     for s in (data.get("sitemap") or []):
         out.append({"path": s.get("path", ""), "last_submitted":
@@ -316,7 +355,7 @@ def gsc_user_sites():
                        "registered": False}
     status, data = _gsc("/webmasters/v3/sites")
     if status != 200 or not isinstance(data, dict):
-        return False, {"error": str(data)[:200], "sites": [],
+        return False, {"error": _gsc_hint(status, data), "sites": [],
                        "registered": False}
     sites = {str(s.get("siteUrl") or "").rstrip("/")
              for s in data.get("siteEntry") or []}
@@ -334,7 +373,7 @@ def gsc_add_site():
         "/webmasters/v3/sites/%s" % urllib.parse.quote(site, safe=":"),
         "PUT", body={})
     if status not in (200, 204):
-        return False, str(data)[:200]
+        return False, _gsc_hint(status, data)
     gsc_submit_sitemap()
     return True, "site registered in Search Console"
 
@@ -357,7 +396,7 @@ def gsc_submit_url(page=None, site=None):
                         {"inspectionUrl": target, "siteUrl": site})
     _consume_inspect(1)
     if status != 200:
-        return False, {"error": str(data)[:200]}
+        return False, {"error": _gsc_hint(status, data)}
     ir = (data or {}).get("inspectionResult") or {}
     idx = ir.get("indexStatusResult") or {}
     return True, {

@@ -147,6 +147,15 @@ def _chapters():
             "the og:image to confirm it resolves. Each tag turns green or red, so a "
             "breakage (like a share card that no longer renders) shows up instantly "
             "instead of silently hurting your previews and claims.")
+        doc.paragraph(
+            "When a Google console call fails, the Engines hub now says WHY and how "
+            "to fix it: a 403/Permission denied maps to 'enable the Search Console "
+            "API in Google Cloud → APIs & Services → Library' (and add this account "
+            "as a test user while the consent screen is in Testing mode), a quota "
+            "error maps to the ~200/day URL-Inspection limit, and an unknown "
+            "property points at adding it via 'Add this site'. A cancelled consent "
+            "shows 'consent was denied' instead of a cryptic stale-link message, so "
+            "every Google API error is actionable on the page itself.")
         doc.page_break()
 
     def c5(doc, num, label, blurb):
@@ -230,13 +239,15 @@ def _chapters():
             "post's clicks are counted individually in Analytics.")
         doc.paragraph(
             "Posts can be scheduled to future peak slots under 'Schedule post kits', "
-            "then pushed out two ways: 'Flush due scheduled posts' publishes exactly "
-            "the ones that are due now (what the timer does automatically) — while "
-            "'Launch blitz' ignores the schedule and publishes EVERY queued post "
-            "across all platforms immediately. That one click is the 'sell it now' "
-            "moment: front-loads the entire queue just before a launch, a promo or a "
-            "sale ends, so the funnel gets its full social send right away instead of "
-            "trickling out.")
+            "then pushed out two ways from the 'Bulk publishing' toolbar: 'Flush due "
+            "scheduled posts' publishes exactly the ones that are due now (what the "
+            "timer does automatically) — while 'Launch blitz' (the primary button) "
+            "ignores the schedule and publishes EVERY queued post across all "
+            "platforms immediately. That one click is the 'sell it now' moment: "
+            "front-loads the entire queue just before a launch, a promo or a sale "
+            "ends, so the funnel gets its full social send right away instead of "
+            "trickling out. 'Publish every niche' and 'Recycle long-tail topics' sit "
+            "beside them as quieter secondary buttons, so the toolbar never crowds.")
         doc.paragraph(
             "Marketing boosts on the Workbench (/tool) mint a real, UTM-tracked "
             "campaign per promo angle: Run persists it, folds in the SEM long-tail "

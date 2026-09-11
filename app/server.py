@@ -5115,7 +5115,12 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         if not code or not expect or not state or scope != expect_scope \
                 or not hmac.compare_digest(expect, state):
             self._set_cookie("x", max_age=0, cookie=_OAUTH_COOKIE, path="/admin")
-            return go("consent link was stale or tampered with — try again", True)
+            denied = (q.get("error") or [""])[0]
+            if denied and denied != "access_denied":
+                return go("consent error: %s" % denied[:120], True)
+            return go("consent was denied or the link was stale/tampered — "
+                      "try again; if you clicked 'Cancel' that's fine, just "
+                      "press Connect again", True)
         try:
             ok, msg = (webmasters.gsc_exchange(code) if engine == "gsc"
                        else webmasters.yandex_exchange(code))
@@ -7406,7 +7411,7 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
                        if amp_on else "<span style='color:#c5221f'>OFF</span>",
                        "Winners compound while cold posts stay dead."))
         amp_btn = ("<button class='warm' id='ampbtn'>⚡ Amplify winners now</button> "
-                   "<button class='soc-sched' id='amptog' data-on='%d'>Turn %s</button>"
+                   "<button class='btnline' id='amptog' data-on='%d'>Turn %s</button>"
                    % (1 if amp_on else 0, "OFF" if amp_on else "ON"))
         body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -7414,7 +7419,8 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
 <meta name="robots" content="noindex,nofollow">
 <style>
 .social-kits {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:16px; margin-top:16px; min-width:0; }}
-.soc-kit {{ background:#fff; border:1px solid var(--border,#e6e8ee); border-radius:18px; padding:20px; box-shadow:var(--shadow,#00000014); min-width:0; }}
+.soc-kit {{ background:#fff; border:1px solid var(--border,#e6e8ee); border-radius:18px; padding:20px; box-shadow:var(--shadow,#00000014); min-width:0; transition:transform 0.16s ease, box-shadow 0.16s ease; }}
+.soc-kit:hover {{ transform:translateY(-2px); box-shadow:var(--shadow-lg,#0000001a); }}
 .soc-kit .soc-head {{ display:flex; justify-content:space-between; align-items:flex-start; gap:10px; flex-wrap:wrap; }}
 .soc-kit h3 {{ margin:0; font-size:16px; }}
 .soc-kit .who {{ font-size:12.5px; color:var(--muted,#667085); font-weight:600; }}
@@ -7424,7 +7430,12 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
 .soc-kit .key {{ margin:10px 0 0; word-break:break-all; background:var(--bg,#f4f7fb); border:1px solid var(--border,#e6e8ee); border-radius:999px; padding:7px 14px; font-size:12px; }}
 .soc-acts {{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-top:14px; }}
 .soc-acts > * {{ flex:0 0 auto; margin:0; white-space:nowrap; }}
-.soc-acts button, .soc-acts a.btn {{ min-height:38px; padding:0 16px; font-size:13px; }}
+.soc-acts button, .soc-acts a.btn {{ min-height:38px; padding:0 15px; font-size:13px; }}
+.toolbar {{ display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:16px; }}
+.toolbar .tlb-title {{ font-size:10.5px; font-weight:800; letter-spacing:0.11em; text-transform:uppercase; color:var(--muted,#667085); padding:0 4px; white-space:nowrap; }}
+.toolbar .sep {{ width:1px; height:22px; background:var(--border,#e6e8ee); margin:0 2px; }}
+.bulkm {{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; }}
+@media (max-width:520px){{ .toolbar>.btnline,.toolbar>.warm{{ flex:1 1 100%; }} }}
 </style>
 </head><body>
 <header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
@@ -7446,10 +7457,15 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
 <div class="table-wrap"><table class="plain"><thead><tr><th>Perf</th><th>Platform</th><th>Post</th><th>Code</th><th>Published</th><th>Clicks</th><th>Live</th></tr></thead>
 <tbody>{pub_rows}</tbody></table></div>
 {perf_note}
-<button class="warm" id="flush">Flush due scheduled posts</button>
+<div class="toolbar" role="group" aria-label="Bulk publishing">
+<span class="tlb-title">Bulk publishing</span><span class="sep" aria-hidden="true"></span>
+<div class="bulkm">
 <button class="warm" id="blitz">⚡ Launch blitz (publish ALL queued now)</button>
-<button class="warm" id="puball">📣 Publish every niche</button>
-<button class="warm" id="topics">Recycle long-tail topics → posts</button>
+<button class="btnline" id="flush">Flush due scheduled posts</button>
+<button class="btnline" id="puball">📣 Publish every niche</button>
+<button class="btnline" id="topics">Recycle long-tail topics → posts</button>
+</div>
+</div>
 <p id="flushout" class="msg"></p></section>
 <section class="card" id="amplify"><h2>🔁 Auto-amplify winners</h2>
 {amp_note}

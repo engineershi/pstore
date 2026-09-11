@@ -262,6 +262,35 @@ class TestWebmastersClients(unittest.TestCase):
         self.assertEqual(data["sites"], [])
         self.assertFalse(data["registered"])
 
+    def test_gsc_403_api_not_enabled_shows_fix_hint(self):
+        self.wm.store["seoeng.gsc.token"] = json.dumps(GSC_TOK)
+        orig = webmasters._req
+        def _forbid(method, url, headers=None, body=None, timeout=25):
+            if "/webmasters/v3/sites" in url and method == "GET":
+                return 403, {"error": {"code": 403, "status": "PERMISSION_DENIED",
+                                       "message": "Search Console API has not been "
+                                                  "used in project 123 before or it "
+                                                  "is disabled."}}
+            return orig(method, url, headers=headers, body=body, timeout=timeout)
+        webmasters._set_transport(_forbid)
+        try:
+            ok, data = webmasters.gsc_user_sites()
+            self.assertFalse(ok)
+            self.assertIn("fix", data["error"])
+            self.assertIn("Search Console API", data["error"])
+        finally:
+            webmasters._set_transport(orig)
+
+    def test_gsc_hint_quota_and_property(self):
+        msg = webmasters._gsc_hint(
+            403, {"error": {"status": "RESOURCE_EXHAUSTED",
+                            "message": "Quota exceeded for quota metric"}})
+        self.assertIn("quota", msg.lower())
+        msg = webmasters._gsc_hint(
+            403, {"error": {"status": "PERMISSION_DENIED",
+                            "message": "The caller does not have permission"}})
+        self.assertIn("fix", msg)
+
     def test_gsc_add_site(self):
         self.wm.store["seoeng.gsc.token"] = json.dumps(GSC_TOK)
         self.wm.calls.clear()
@@ -738,6 +767,15 @@ class TestSeoengineServer(unittest.TestCase):
         self.assertEqual(st, 302)
         self.assertIn("admin/seoengines", loc)
         self.assertIn("err=", loc)
+
+    def test_oauth_cb_surfaces_google_error(self):
+        st, loc, _ = self._raw(
+            "GET",
+            "/admin/oauth/seoengines/cb/gsc"
+            "?error=invalid_client&state=stale")
+        self.assertEqual(st, 302)
+        self.assertIn("admin/seoengines?err=", loc)
+        self.assertIn("consent%20error", loc)
 
     def test_pageview_referrer_attribution(self):
         st, _, body = self._raw(
