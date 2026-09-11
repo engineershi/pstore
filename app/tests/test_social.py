@@ -352,6 +352,32 @@ class TestSocialSuite(unittest.TestCase):
         self.assertEqual(due, "published")
         self.assertEqual(res["still_pending"], still)   # the rest remain queued
 
+    def test_blitz_endpoint_publishes_all_queued(self):
+        st, _, _, data = self._raw(
+            "/api/social/schedule", "POST",
+            body=json.dumps({"keyword": "keto snacks", "platform": "all", "hours": 24}),
+            cookie=self.cookie)
+        self.assertEqual(st, 200)
+        with server._lock:
+            conn = server._db()
+            total = conn.execute(
+                "SELECT COUNT(*) n FROM social_posts WHERE status='scheduled'"
+            ).fetchone()["n"]
+            conn.close()
+        st, _, _, data = self._raw(
+            "/api/social/blitz", "POST", body=b"{}",
+            headers={"Content-Type": "application/json"}, cookie=self.cookie)
+        self.assertEqual(st, 200)
+        res = json.loads(data)
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["published_now"], total)
+        self.assertEqual(res["still_pending"], 0)
+
+    def test_blitz_requires_auth(self):
+        st, _, _, _ = self._raw("/api/social/blitz", "POST",
+                                body=b"{}", headers={"Content-Type": "application/json"})
+        self.assertEqual(st, 401)
+
     def test_auto_flush_module_function_due_only(self):
         # queue via the API, then force one post past-due and call the
         # handler-free module function (the timer path) with a captured hook.
@@ -381,6 +407,42 @@ class TestSocialSuite(unittest.TestCase):
                                (kinfo["id"],)).fetchone()["status"]
             conn.close()
         self.assertEqual(st2, "published")
+
+    def test_blitz_publishes_every_scheduled_post_even_not_due(self):
+        # schedule two niches; push one of them far into the future so only a
+        # due-flush would skip it — the blitz must publish everything anyway.
+        st, _, _, data = self._raw(
+            "/api/social/schedule", "POST",
+            body=json.dumps({"keyword": "keto snacks", "platform": "all", "hours": 24}),
+            cookie=self.cookie)
+        self.assertEqual(st, 200)
+        with server._lock:
+            conn = server._db()
+            conn.execute(
+                "UPDATE social_posts SET scheduled_at='2099-12-31 00:00:00' "
+                "WHERE status='scheduled'")
+            total = conn.execute(
+                "SELECT COUNT(*) n FROM social_posts WHERE status='scheduled'"
+            ).fetchone()["n"]
+            conn.commit()
+            conn.close()
+        self.assertGreater(total, 1)
+        fired = []
+        n, pending = server._flush_all_social(lambda kits: fired.extend(kits))
+        self.assertEqual(n, total)
+        self.assertEqual(len(fired), total)
+        self.assertEqual(pending, 0)
+        with server._lock:
+            conn = server._db()
+            left = conn.execute(
+                "SELECT COUNT(*) n FROM social_posts WHERE status='scheduled'"
+            ).fetchone()["n"]
+            published = conn.execute(
+                "SELECT COUNT(*) n FROM social_posts WHERE status='published'"
+            ).fetchone()["n"]
+            conn.close()
+        self.assertEqual(left, 0)
+        self.assertEqual(published, total)
 
     def test_og_image_served_for_saved_niche(self):
         st, _, ctype, data = self._raw("/og/keto-snacks")

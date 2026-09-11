@@ -184,7 +184,11 @@ By default pstore already generates SEO-ready pages with schema markup. Your job
 
 4. Indexing is **automatic**: the moment you save a niche, pstore submits the page to **IndexNow** (instant Google/Bing/Baidu indexing). Check `/keys` for the status.
 
-5. **Go long-tail.** On `/admin/opportunities`, click **"Build long-tail pages"** for a proven niche. pstore reads live Amazon autosuggest and mints nested `/n/<niche>/<term>` pages (e.g. `/n/air-fryer/basket-air-fryers`) — each a real, distinct URL with its own ranked ItemList schema, breadcrumbs, links back to the hub, sitemap entry and IndexNow ping. These catch the "long-tail" searches you'd never rank for on their own.
+5. **Supercharge Bing** on `/admin/seoengines` (**🔎 Engines**): paste your **Bing Webmaster API key** (or set `PSTORE_BING_API_KEY`), press **Test connection** to see the sites that key owns, then **Add site** to register this domain and **Submit URL** to force-crawl any single page. The Traffic-by-engine table merges each console's real 28-day **clicks + impressions** into the "Console rates" column — and `/admin/analytics` shows those same totals (clicks, impressions, avg. position, CTR) next to your own referrer-attributed numbers.
+
+6. **Rich results:** every niche, topic and landing page emits **schema.org Product JSON-LD** (price and star ratings only when the scraped data genuinely has them, so nothing fake), making star-rich snippets eligible on Google. The Schema column in `/admin/seo` turns green when the emitted markup is valid.
+
+7. **Go long-tail.** On `/admin/opportunities`, click **"Build long-tail pages"** for a proven niche. pstore reads live Amazon autosuggest and mints nested `/n/<niche>/<term>` pages (e.g. `/n/air-fryer/basket-air-fryers`) — each a real, distinct URL with its own ranked ItemList schema, breadcrumbs, links back to the hub, sitemap entry and IndexNow ping. These catch the "long-tail" searches you'd never rank for on their own.
 
 > Every `/n/` verdict page already ships conversion machinery: **reciprocal internal links** (`related`), a **live-price urgency line**, and a **sticky bottom CTA** ("see it on Amazon") that appears on scroll or exit-intent — pointing straight at your #1 pick. The heavier `/lp/` sales pages still carry the promo countdown + opt-in funnel.
 
@@ -212,6 +216,8 @@ By default pstore already generates SEO-ready pages with schema markup. Your job
 **Where:** `/admin/emails` (**📧 Emails**)
 
 Every subscriber automatically receives a **5-email buyer sequence** built from the niche's top pick:
+
+> ⚡ **Brand-new opt-ins get a welcome email the moment they subscribe** (it becomes email #1 of the sequence): greeted by name, with the niche's free PDF guide attached — the lead magnet lands in their inbox while the interest is hot. Re-subscribers are never re-emailed, and the whole flow is driven by a stored `sent_index`, so the daily auto-send can never double-send a step. If SMTP isn't configured yet the welcome is skipped silently until it is.
 
 | # | Email | Job it does |
 |---|---|---|
@@ -294,6 +300,8 @@ One click generates a ready-to-post kit for X, Facebook, LinkedIn, Instagram, Pi
 ```
 
 Each post's clicks are tracked individually — you can see in `/admin/analytics` exactly which platform and post performs.
+
+**⚡ Launch a Social Blitz:** posts can be scheduled to future peak slots ("Schedule post kits"). **"Flush due scheduled posts"** pushes out only the ones that are due now (what the timer does on its own), but **"⚡ Launch blitz (publish ALL queued now)"** ignores the schedule and publishes every queued post across all platforms at once — the one-click "sell it now" move right before a launch, a promo or a deadline, so the funnel gets its whole social send immediately instead of trickling out.
 
 **🔁 Auto-amplify winners:** pstore watches every published post's tracked clicks and automatically **re-queues winners** (posts with real click volume) to future prime-time slots, reusing the same tracked link so you keep the clicks and the code permanently. Anti-loop guards (min age 24h, max 2 reruns, cap 3 per sweep, 48h window) stop it from spamming the same post. Use the **"⚡ Amplify winners now"** button on `/admin/social` to trigger a sweep on demand, or switch the whole feature off with the toggle. A/B-test your captions first (see **STEP on Variants** below) so the amplified post is already the best-performing one.
 

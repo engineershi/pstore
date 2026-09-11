@@ -182,29 +182,85 @@ def _slugify(text):
     return s or "niche"
 
 
-def _product_graph(items):
+def _product_graph(items, page_url=None, slug=None):
+    """Product nodes (+Offer, +AggregateRating) for niche/topic/landing pages.
+    Every field is emitted only when there is data for it — a null price or an
+    incomplete rating would fail Google's Rich Results validation — and each
+    node carries a stable @id so the graph's ItemList can reference it."""
+    default_img = (BASE_URL + "/og/" + _slugify(slug) + ".png") if slug else ""
     graph = []
     for it in (items or [])[:10]:
         if not it.get("title"):
             continue
-        graph.append({
+        price = it.get("price")
+        have_price = price not in (None, "") and not (
+            isinstance(price, (int, float)) and float(price) <= 0)
+        stars = it.get("stars")
+        reviews = it.get("reviews")
+        node = {
             "@type": "Product",
             "name": it.get("title"),
-            "image": it.get("image") or "",
-            "sku": it.get("asin") or "",
-            "offers": {
-                "@type": "Offer",
-                "url": it.get("url"),
-                "price": it.get("price"),
-                "priceCurrency": it.get("currency") or "USD",
-                "availability": "https://schema.org/InStock",
-            },
-            "aggregateRating": ({"@type": "AggregateRating",
-                                 "ratingValue": it.get("stars"),
-                                 "reviewCount": it.get("reviews")}
-                                if it.get("stars") else None),
-        })
+            "image": it.get("image") or default_img,
+        }
+        if it.get("asin"):
+            node["sku"] = it["asin"]
+            if page_url:
+                node["@id"] = page_url.rstrip("/") + "#product-" + it["asin"]
+        offers = {"@type": "Offer", "url": it.get("url")}
+        if have_price:
+            offers["price"] = price if isinstance(price, (int, float)) \
+                else _clean(str(price))
+            offers["priceCurrency"] = it.get("currency") or "USD"
+        node["offers"] = offers
+        if stars and reviews:
+            node["aggregateRating"] = {
+                "@type": "AggregateRating",
+                "ratingValue": round(float(stars), 1),
+                "reviewCount": int(reviews),
+                "bestRating": 5,
+                "worstRating": 1,
+            }
+        graph.append(node)
     return graph
+
+
+def landing_product_jsonld(pick, page_url, image_url=""):
+    """Single-Product graph for the /lp/<slug> sales page (the top pick, so the
+    page stays "one-product focused" per Google merchant guidelines). Nulls and
+    partial ratings are omitted rather than serialized."""
+    if not pick or not pick.get("title"):
+        return None
+    node = {
+        "@type": "Product",
+        "name": pick.get("title"),
+        "description": pick.get("title"),
+        "image": pick.get("image") or image_url or "",
+    }
+    if pick.get("asin"):
+        node["sku"] = pick["asin"]
+        if page_url:
+            node["@id"] = page_url.rstrip("/") + "#product-" + pick["asin"]
+    price = pick.get("price")
+    have_price = price not in (None, "") and not (
+        isinstance(price, (int, float)) and float(price) <= 0)
+    offers = {"@type": "Offer"}
+    if pick.get("url"):
+        offers["url"] = pick["url"]
+    if have_price:
+        offers["price"] = price if isinstance(price, (int, float)) \
+            else _clean(str(price))
+        offers["priceCurrency"] = pick.get("currency") or "USD"
+    node["offers"] = offers
+    stars, reviews = pick.get("stars"), pick.get("reviews")
+    if stars and reviews:
+        node["aggregateRating"] = {
+            "@type": "AggregateRating",
+            "ratingValue": round(float(stars), 1),
+            "reviewCount": int(reviews),
+            "bestRating": 5,
+            "worstRating": 1,
+        }
+    return {"@context": "https://schema.org", "@graph": [node]}
 
 
 def _head(title, desc, canonical, path, jsonld=None, og_image=None, noindex=False):
@@ -545,7 +601,7 @@ def render_niche(keyword, niche, saved_niches=None, ab_headline=None, ab_variant
     ranked = "".join(
         editorial.pick_html(keyword, it, idx, items)
         for idx, it in enumerate(score_order(items)))
-    graph = _product_graph(items)
+    graph = _product_graph(items, BASE_URL + canonical, _slugify(keyword))
     il = editorial.item_list_jsonld(items, keyword)
     if il:
         graph.append(il)
@@ -638,7 +694,7 @@ def render_topic(term, parent_keyword, niche, parent_slug, style_pack=None):
     il = editorial.item_list_jsonld(items, term or parent_keyword)
     if il:
         graph.append(il)
-    graph.extend(_product_graph(items))
+    graph.extend(_product_graph(items, BASE_URL + canonical, term_slug))
     if editorial.best_pick(items):
         graph.append(editorial.breadcrumb_jsonld(term or parent_keyword))
     graph.append(_org_jsonld())

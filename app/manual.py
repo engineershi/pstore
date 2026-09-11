@@ -113,6 +113,20 @@ def _chapters():
             "a console is connected, the Traffic panel shows referral-attributed page "
             "views and clicks from your own on-site beacon.")
         doc.paragraph(
+            "Bing setup is key-based: paste your API key (or set PSTORE_BING_API_KEY) "
+            "and press Test connection to see which sites that key already owns, then "
+            "Add site to register this domain and Submit URL to push any single page "
+            "for instant crawling. The Traffic-by-engine table on the hub merges each "
+            "console's real 28-day clicks/impressions into the 'Console rates' column, "
+            "and the Analytics page (/admin/analytics) shows the same totals (clicks, "
+            "impressions, position, CTR) next to your own referrer-attributed numbers.")
+        doc.paragraph(
+            "Google snippets come from Product JSON-LD: every niche, topic and landing "
+            "page emits schema.org Product markup (price, ratings and brand only when "
+            "the scraped data really has them), so rich results with stars are "
+            "eligible. Re-check '/admin/seo' after a change - the Schema column turns "
+            "green when the emitted markup is valid.")
+        doc.paragraph(
             "Own the site everywhere it is listed: claim your domain with Google, "
             "Bing, Yandex and Pinterest from the Keys page (/keys) - paste each "
             "engine's verification token (or the meta tag it gives you) and every "
@@ -172,6 +186,15 @@ def _chapters():
             "urgency, (5) follow-up and review request. Each email carries your tagged "
             "Amazon link.")
         doc.paragraph(
+            "A brand-new opt-in gets an immediate welcome email (email #1 of the "
+            "sequence) the moment they subscribe: it greets them by name and attaches "
+            "the niche's free PDF guide right away, so the lead magnet lands in their "
+            "inbox while their interest is hot. Re-subscribers are not re-opted (and "
+            "never re-emailed) - only genuinely new leads get the welcome. If SMTP "
+            "isn't configured yet, the welcome is skipped silently and the mail just "
+            "waits; every step is driven by the subscriber's stored sent_index, so "
+            "the daily auto-send can never double-send a step.")
+        doc.paragraph(
             "Email Studio (/admin/emails) is the one place to compose and send mail: "
             "pick any niche, segment (hot/warm/cold/converted/inactive) or typed "
             "address list, choose a sequence step, converted follow-up, re-engage or "
@@ -198,6 +221,15 @@ def _chapters():
             "Facebook, LinkedIn, Instagram, Pinterest and Threads. Each kit has a "
             "platform caption, hashtags and a tracked link with its own code, so every "
             "post's clicks are counted individually in Analytics.")
+        doc.paragraph(
+            "Posts can be scheduled to future peak slots under 'Schedule post kits', "
+            "then pushed out two ways: 'Flush due scheduled posts' publishes exactly "
+            "the ones that are due now (what the timer does automatically) — while "
+            "'Launch blitz' ignores the schedule and publishes EVERY queued post "
+            "across all platforms immediately. That one click is the 'sell it now' "
+            "moment: front-loads the entire queue just before a launch, a promo or a "
+            "sale ends, so the funnel gets its full social send right away instead of "
+            "trickling out.")
         doc.paragraph(
             "Marketing boosts on the Workbench (/tool) mint a real, UTM-tracked "
             "campaign per promo angle: Run persists it, folds in the SEM long-tail "

@@ -7,6 +7,7 @@ import os
 import shutil
 import sys
 import threading
+import time
 import unittest
 import urllib.parse
 import uuid
@@ -191,6 +192,75 @@ class TestEmailSuite(unittest.TestCase):
             last = st
         self.assertEqual(last, 429)
 
+    def test_subscribe_sends_immediate_welcome_when_configured(self):
+        saved = (mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD)
+        mailer.SMTP_HOST = "smtp.test.local"
+        mailer.SMTP_USER = "u@example.com"
+        mailer.SMTP_PASSWORD = "pw"
+        try:
+            st, _, _, data = self._subscribe("welcome@example.com",
+                                             extra="first_name=Wanda")
+            self.assertEqual(st, 200)
+            self.assertTrue(json.loads(data)["ok"])
+            self._wait_welcome("welcome@example.com")
+            row = self._sub("welcome@example.com")
+            self.assertEqual(row["sent_index"], 1)
+            self.assertTrue(any(s["to"] == "welcome@example.com" for s in self.sent))
+            mail = [s for s in self.sent if s["to"] == "welcome@example.com"][-1]
+            self.assertIn("keto snacks", mail["body"])
+            self.assertTrue(mail["pixel_url"])
+        finally:
+            mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD = saved
+
+    def _wait_welcome(self, email, timeout=4.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            row = self._sub(email)
+            if row and (row["sent_index"] or 0) >= 1:
+                return
+            time.sleep(0.05)
+        self.fail("welcome email never landed (sent_index stayed 0)")
+
+    def test_subscribe_welcome_attaches_lead_magnet(self):
+        saved = (mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD)
+        mailer.SMTP_HOST = "smtp.test.local"
+        mailer.SMTP_USER = "u@example.com"
+        mailer.SMTP_PASSWORD = "pw"
+        try:
+            self._subscribe("mag@example.com")
+            self._wait_welcome("mag@example.com")
+            self.assertEqual(self._sub("mag@example.com")["sent_index"], 1)
+            mail = [s for s in self.sent if s["to"] == "mag@example.com"][-1]
+            self.assertTrue(mail["attachments"])
+            name, data = mail["attachments"][0]
+            self.assertTrue(name.endswith(".pdf"))
+            self.assertTrue(data.startswith(b"%PDF"))
+        finally:
+            mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD = saved
+
+    def test_subscribe_reactivation_does_not_resend_welcome(self):
+        saved = (mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD)
+        mailer.SMTP_HOST = "smtp.test.local"
+        mailer.SMTP_USER = "u@example.com"
+        mailer.SMTP_PASSWORD = "pw"
+        try:
+            mail = "re@example.com"
+            self._subscribe(mail)
+            self._wait_welcome(mail)
+            with server._lock:
+                conn = server._db()
+                conn.execute("UPDATE subscribers SET sent_index=2 WHERE email=?",
+                             (mail,))
+                conn.commit()
+                conn.close()
+            before = len(self.sent)
+            st, _, _, _ = self._subscribe(mail)
+            self.assertEqual(st, 200)
+            time.sleep(0.6)
+            self.assertEqual([s for s in self.sent[before:] if s["to"] == mail], [])
+        finally:
+            mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD = saved
+
     # -------------------------------------------------------------- unsubscribe
 
     def test_unsubscribe_with_valid_token(self):
@@ -340,20 +410,23 @@ class TestEmailSuite(unittest.TestCase):
         mailer.SMTP_PASSWORD = "pw"
         self._subscribe("seq@example.com")
         try:
-            for expect_idx in (1, 2):
+            # the immediate welcome is email #1; the sequence driver then
+            # advances from step 2, one send per run
+            self._wait_welcome("seq@example.com")
+            for expect_idx in (2, 3):
                 st, _, _, data = self._raw(
                     "/api/sequence/send", "POST", body="{}", cookie=self.cookie)
                 self.assertEqual(st, 200)
                 self.assertTrue(json.loads(data)["ok"])
                 self.assertEqual(json.loads(data)["sent"], 1)
                 self.assertEqual(self._sub("seq@example.com")["sent_index"], expect_idx)
-            self.assertGreaterEqual(len(self.sent), 2)
-            self.assertTrue(all(s["to"] == "seq@example.com" for s in self.sent[:2]))
+            self.assertGreaterEqual(len(self.sent), 3)
+            self.assertTrue(all(s["to"] == "seq@example.com" for s in self.sent[:3]))
             with server._lock:
                 conn = server._db()
                 cnt = conn.execute("SELECT COUNT(*) c FROM sent_emails").fetchone()["c"]
                 conn.close()
-            self.assertEqual(cnt, 2)
+            self.assertEqual(cnt, 3)
             self.assertIn("unsubscribe", self.sent[0]["body"].lower())
         finally:
             mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD = saved
@@ -372,11 +445,9 @@ class TestEmailSuite(unittest.TestCase):
         mailer.SMTP_PASSWORD = "pw"
         self._subscribe("trk@example.com")
         try:
-            self._raw("/api/sequence/send", "POST", body="{}", cookie=self.cookie)
-            self.assertEqual(len(self.sent), 1)
-            body = self.sent[0]["body"]
-            self.assertIn("/e/", body)  # click-tracked outbound link
-            self.assertIn("pixel", "") if False else None
+            self._wait_welcome("trk@example.com")
+            body = [s for s in self.sent if s["to"] == "trk@example.com"][-1]["body"]
+            self.assertIn("/e/", body)
         finally:
             mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD = saved
 
@@ -498,6 +569,8 @@ class TestEmailSuite(unittest.TestCase):
         mailer.SMTP_PASSWORD = "pw"
         self._subscribe("dry@example.com")
         try:
+            self._wait_welcome("dry@example.com")
+            self.sent.clear()
             st, _, _, data = self._raw(
                 "/api/sequence/send", "POST", body='{"dry_run":true}',
                 headers={"Content-Type": "application/json"}, cookie=self.cookie)
@@ -519,6 +592,12 @@ class TestEmailSuite(unittest.TestCase):
         self._subscribe("keto2@example.com", keyword="keto snacks")
         self._subscribe("yoga1@example.com", keyword="yoga mat")
         try:
+            # every new lead gets its immediate welcome first; the scoped send
+            # below then advances only the keto leads by one more step
+            self._wait_welcome("keto1@example.com")
+            self._wait_welcome("keto2@example.com")
+            self._wait_welcome("yoga1@example.com")
+
             def _dry(kw):
                 st, _, _, data = self._raw(
                     "/api/sequence/send", "POST",
@@ -541,9 +620,9 @@ class TestEmailSuite(unittest.TestCase):
                 headers={"Content-Type": "application/json"}, cookie=self.cookie)
             self.assertEqual(st, 200)
             self.assertEqual(json.loads(data)["sent"], 2)
-            self.assertEqual(self._sub("keto1@example.com")["sent_index"], 1)
-            self.assertEqual(self._sub("keto2@example.com")["sent_index"], 1)
-            self.assertEqual(self._sub("yoga1@example.com")["sent_index"], 0)
+            self.assertEqual(self._sub("keto1@example.com")["sent_index"], 2)
+            self.assertEqual(self._sub("keto2@example.com")["sent_index"], 2)
+            self.assertLess(self._sub("yoga1@example.com")["sent_index"], 2)
         finally:
             mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD = saved
 
@@ -731,6 +810,8 @@ class TestEmailSuite(unittest.TestCase):
         try:
             before = len(self.sent)
             self._subscribe("dryrun@example.com", keyword="keto snacks")
+            self._wait_welcome("dryrun@example.com")
+            before = len(self.sent)
             st, _, _, data = self._studio({
                 "action": "send",
                 "spec": {"type": "sequence", "niche": "keto snacks", "step": 1},
@@ -742,7 +823,7 @@ class TestEmailSuite(unittest.TestCase):
             self.assertTrue(p["dry_run"])
             self.assertEqual(p["sent"], 1)
             self.assertEqual(len(self.sent), before)
-            self.assertEqual(self._sub("dryrun@example.com")["sent_index"], 0)
+            self.assertEqual(self._sub("dryrun@example.com")["sent_index"], 1)
         finally:
             mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD = saved
 

@@ -885,6 +885,50 @@ def _flush_due_social(hook=None, now=None):
         return 0, 0
 
 
+def _flush_all_social(hook=None):
+    """Launch blitz: publish EVERY scheduled post right now (all platforms, all
+    niches), ignoring the schedule. Uses the same native-then-webhook path as
+    the due-flusher. Returns (published, pending)."""
+    stamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with _lock:
+            conn = _db()
+            rows = conn.execute(
+                "SELECT id, slug, keyword, platform, name, body, link FROM social_posts "
+                "WHERE status='scheduled' ORDER BY scheduled_at IS NULL, scheduled_at, id"
+            ).fetchall()
+            due = [dict(r) for r in rows]
+            for r in due:
+                conn.execute(
+                    "UPDATE social_posts SET status='published', published_at=?, "
+                    "scheduled_at=NULL WHERE id=?", (stamp, r["id"]))
+            conn.commit()
+            conn.close()
+        all_kits = [{"platform": r["platform"], "name": r["name"] or "",
+                     "body": r["body"] or "", "link": r["link"] or "",
+                     "slug": r["slug"] or "", "keyword": r["keyword"] or ""} for r in due]
+        if all_kits:
+            try:
+                posted = {str(r.get("slug")) + "|" + str(r.get("platform"))
+                          for r in _publish_native(all_kits)
+                          if r.get("ok") and r.get("via") == "native"}
+            except Exception:
+                posted = set()
+            webhook_kits = [k for k in all_kits
+                            if (str(k.get("slug")) + "|" + str(k.get("platform"))) not in posted]
+            if webhook_kits and hook:
+                hook(webhook_kits)
+        with _lock:
+            conn = _db()
+            pending = conn.execute(
+                "SELECT COUNT(*) AS n FROM social_posts WHERE status='scheduled'"
+            ).fetchone()["n"]
+            conn.close()
+        return len(due), pending
+    except Exception:
+        return 0, 0
+
+
 def _get_setting(key, default=""):
     try:
         with _lock:
@@ -949,6 +993,72 @@ def _topics_for_rows(parent_slug):
     for r in rows:
         existing.add(r["slug"])
     return existing
+
+
+def _send_welcome_email(subscriber_id, keyword):
+    """Best-effort immediate email #1 for a just-opted-in lead (welcome + the
+    niche's lead-magnet PDF). Runs on a background thread from /subscribe so the
+    HTTP response never blocks. Mirrors the sequence-driver's single-subscriber
+    path; on success it advances sent_index so the daily autosend continues at
+    step 2. There is no re-send when the daily run sees sent_index already >= 1."""
+    try:
+        if not mailer.configured():
+            return
+        kw = (keyword or "").strip()
+        if not kw:
+            return
+        with _lock:
+            conn = _db()
+            sub = conn.execute("SELECT * FROM subscribers WHERE id=?",
+                               (subscriber_id,)).fetchone()
+            rows = conn.execute("SELECT keyword, products FROM niches WHERE lower(keyword)=?",
+                                (kw.lower(),)).fetchall()
+            conn.close()
+        if not sub or not sub["confirmed"] or sub["unsubscribed"] \
+                or (sub["sent_index"] or 0) >= 1:
+            return
+        items = []
+        for r in rows:
+            try:
+                items = json.loads(r["products"] or "[]")
+                break
+            except Exception:
+                continue
+        if not items:
+            return  # nothing to sell yet — the autosend retries when products land
+        mail = mailer.next_email(kw, items, 1)
+        if not mail:
+            return
+        pick = market_engine.pick_for_buyers(items)
+        asin = (pick or {}).get("asin") or ""
+        link_url = mailer.tracked_url(kw, asin, subscriber_id, 1) if asin else ""
+        pixel_url = mailer.open_pixel_url(kw, asin, subscriber_id, 1)
+        reply_to = mailer.thread_reply_to(str(subscriber_id))
+        text = mailer.render_body(mail, to_name=sub["first_name"] or "",
+                                  email=sub["email"], tracked_link=link_url)
+        attachments = None
+        try:
+            import ebook
+            book = ebook.build_ebook(kw)
+            data = book.get("pdf")
+            if data:
+                attachments = [(book.get("pdf_name") or "%s-ebook.pdf" % kw, data)]
+        except Exception:
+            attachments = None
+        if not mailer.send(mail["subject"], text, sub["email"], attachments=attachments,
+                           pixel_url=pixel_url, reply_to=reply_to):
+            return
+        with _lock:
+            conn = _db()
+            conn.execute("UPDATE subscribers SET sent_index=? WHERE id=?",
+                         (1, subscriber_id))
+            conn.execute("INSERT INTO sent_emails (subscriber_id, email_index, subject, "
+                         "subject_variant) VALUES (?,?,?,?)",
+                         (subscriber_id, 1, mail["subject"], "welcome"))
+            conn.commit()
+            conn.close()
+    except Exception:
+        return
 
 
 def _build_topic_pages(parent_slug, count=6):
@@ -3447,6 +3557,10 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._page_view()
             if path == "/_gated/pdf":
                 return self._gated_pdf(q)
+            # public read-only data API (no auth, CORS-open, cached;
+            # already rate-limited by the shared /api limiter above)
+            if path.startswith("/api/public/"):
+                return self._public_api(path, q)
             if self._needs_admin(path) and not self._authed():
                 if path.startswith("/api/"):
                     return self._send(401, {"error": "unauthorized", "auth": False})
@@ -3702,6 +3816,9 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._track_click()
             if parsed.path == "/api/pageview":
                 return self._page_view()
+            if parsed.path.startswith("/api/public/"):
+                return self._send(405, {"error": "method not allowed",
+                                        "hint": "public API is read-only"})
             if parsed.path == "/api/cron/send" and self._cron_ok():
                 return self._sequence_send()
             if parsed.path == "/api/cron/inbox" and self._cron_ok():
@@ -3741,6 +3858,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._social_schedule()
             if parsed.path == "/api/social/flush":
                 return self._social_flush()
+            if parsed.path == "/api/social/blitz":
+                return self._social_blitz()
             if parsed.path == "/api/social/amplify":
                 return self._social_amplify()
             if parsed.path == "/api/social/topics":
@@ -4717,6 +4836,115 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         return {"days": days, "engines": out, "totals": {"views": total_v,
                                                          "clicks": total_c}}
 
+    def _abs(self, p):
+        return seo.BASE_URL.rstrip("/") + p
+
+    def _public_json(self, payload, code=200):
+        """JSON for the public API: read-only, cross-origin-friendly, cacheable."""
+        data = json.dumps(payload, default=str).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "public, max-age=300, s-maxage=300")
+        self.end_headers()
+        if not getattr(self, "_head_only", False):
+            self.wfile.write(data)
+        return None
+
+    def _public_stats(self):
+        try:
+            with _lock:
+                conn = _db()
+                try:
+                    n_subs = conn.execute(
+                        "SELECT COUNT(*) c FROM subscribers "
+                        "WHERE confirmed=1 AND unsubscribed=0").fetchone()["c"]
+                    n_topics = conn.execute(
+                        "SELECT COUNT(*) c FROM topics").fetchone()["c"]
+                    n_clicks = conn.execute(
+                        "SELECT COUNT(*) c FROM clicks").fetchone()["c"]
+                finally:
+                    conn.close()
+        except Exception:
+            n_subs = n_topics = n_clicks = 0
+        niches = self._all_niches()
+        return {"site": seo.BASE_URL, "niches": len(niches),
+                "products": sum(len(n.get("products") or []) for n in niches),
+                "topics": n_topics, "subscribers": n_subs, "clicks": n_clicks,
+                "urls": len(self._all_urls()),
+                "sitemap": self._abs("/sitemap.xml")}
+
+    def _niche_public(self, n, slug):
+        prods = []
+        for i, p in enumerate(n.get("products") or []):
+            prods.append({"rank": i + 1, "asin": p.get("asin") or "",
+                          "title": p.get("title") or "",
+                          "price": p.get("price"), "stars": p.get("stars"),
+                          "reviews": p.get("reviews"),
+                          "currency": p.get("currency") or "",
+                          "url": p.get("url") or ""})
+        topics = self._topics_for(slug)
+        return {"slug": slug, "keyword": n.get("keyword", ""),
+                "url": self._abs("/n/" + slug),
+                "created_at": n.get("created_at") or "",
+                "product_count": len(prods), "products": prods,
+                "topic_count": len(topics),
+                "topics": [{"term": t.get("term", ""), "slug": t.get("slug", ""),
+                            "url": self._abs("/n/%s/%s" % (slug, t.get("slug", "")))}
+                           for t in topics]}
+
+    def _public_api(self, path, q):
+        """Read-only public data API, reachable without a session. Endpoints:
+        /api/public/niches, /api/public/niches/<slug>, /api/public/topics/<slug>,
+        /api/public/stats, /api/public/sitemap, /api/public/landing/<slug>."""
+        base = path[len("/api/public"):].strip("/")
+        if base == "niches":
+            out = []
+            for n in self._all_niches():
+                slug = seo._slugify(n.get("keyword") or "")
+                if not slug:
+                    continue
+                out.append({"slug": slug, "keyword": n.get("keyword"),
+                            "url": self._abs("/n/" + slug),
+                            "product_count": len(n.get("products") or []),
+                            "created_at": n.get("created_at") or ""})
+            return self._public_json({"count": len(out), "niches": out})
+        if base.startswith("niches/"):
+            slug = base[len("niches/"):]
+            for n in self._all_niches():
+                if seo._slugify(n.get("keyword") or "") == slug:
+                    return self._public_json(self._niche_public(n, slug))
+            return self._public_json({"error": "not found", "slug": slug}, 404)
+        if base.startswith("topics/"):
+            parent = base[len("topics/"):]
+            topics = self._topics_for(parent)
+            return self._public_json(
+                {"parent": parent,
+                 "count": len(topics),
+                 "topics": [{"term": t.get("term", ""), "slug": t.get("slug", ""),
+                             "url": self._abs("/n/%s/%s" % (parent, t.get("slug", "")))}
+                            for t in topics]})
+        if base == "stats":
+            return self._public_json(self._public_stats())
+        if base == "sitemap":
+            urls = self._all_urls()
+            return self._public_json({"count": len(urls), "urls": urls})
+        if base.startswith("landing/"):
+            slug = base[len("landing/"):]
+            for n in self._all_niches():
+                if seo._slugify(n.get("keyword") or "") == slug:
+                    return self._public_json(
+                        {"slug": slug, "keyword": n.get("keyword", ""),
+                         "url": self._abs("/lp/" + slug),
+                         "created_at": n.get("created_at") or ""})
+            return self._public_json({"error": "not found", "slug": slug}, 404)
+        return self._public_json({"error": "unknown endpoint",
+                                  "endpoints": ["niches", "niches/<slug>",
+                                                "topics/<slug>", "stats",
+                                                "sitemap", "landing/<slug>"]},
+                                 404)
+
     def _seoengines_api(self, q):
         engines = webmasters.engines_status()
         days = int((q.get("days") or ["28"])[0])
@@ -4758,6 +4986,40 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             webmasters.store_set("seoeng.bing.apikey",
                                  (body.get("key") or "").strip())
             return self._send(200, {"ok": True, "message": "bing key saved"})
+        bkey = webmasters.BING_API_KEY or \
+            webmasters.store_get("seoeng.bing.apikey", "")
+        if action == "bingtest":
+            """Validate the active Bing key: list the sites registered to it
+            and report whether ours is among them. No side effects."""
+            ok, data = webmasters.bing_user_sites(bkey)
+            return self._send(200, {"ok": True, **data} if ok and bkey
+                              else {"ok": False, **data})
+        if action == "bingadd":
+            """Register this site with Bing Webmaster + submit the sitemap,
+            so verification also exposes indexing controls for the property."""
+            if not bkey:
+                return self._send(200, {"ok": False, "error": "bing key not set"})
+            s, d = webmasters.bing_add_site(bkey, webmasters.site_url())
+            if s not in (200, 201):
+                return self._send(200, {"ok": False,
+                                        "error": str(d)[:150]})
+            webmasters.bing_submit_sitemap(bkey, webmasters.site_url())
+            return self._send(200, {"ok": True, "engine": "bing",
+                                    "message": "site registered", "sites": [d]})
+        if action == "bingurl":
+            """SubmitUrl crawl-push for one page (path like /n/slug). Auto-
+            the full site URL; a bare path is fine."""
+            if not bkey:
+                return self._send(200, {"ok": False, "error": "bing key not set"})
+            page = (body.get("page") or "").strip()[:500]
+            if page.startswith("http"):
+                page = ""
+            ok, d = webmasters.bing_submit_url(bkey, webmasters.site_url(),
+                                               page or None)
+            if not ok:
+                return self._send(200, {"ok": False, "error": d.get("error") or ""})
+            return self._send(200, {"ok": True, "url":
+                                    webmasters.site_url().rstrip("/") + "/" + page.lstrip("/")})
         if action == "crawl":
             """Crawl-request a batch of URLs in Google + submit the sitemap.
             Wired to the Grow expand buttons so every new page is pushed past
@@ -4852,7 +5114,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         setup = {
             "gsc": "Create a Google Cloud OAuth2 web client + enable the Search Console API. Set PSTORE_GSC_CLIENT_ID / PSTORE_GSC_CLIENT_SECRET on the host and add redirect URI %s/admin/oauth/seoengines/cb/gsc. Then Connect to approve it."
                    % seo.BASE_URL,
-            "bing": "Add this exact site in Bing Webmaster, then paste/保存 your Bing API key (also settable via PSTORE_BING_API_KEY). No OAuth needed.",
+            "bing": "Add this exact site in Bing Webmaster, then paste your Bing API key (also settable via PSTORE_BING_API_KEY). No OAuth needed.",
             "yandex": "Create a Yandex OAuth app (PSTORE_YANDEX_CLIENT_ID / PSTORE_YANDEX_CLIENT_SECRET) with redirect URI %s/admin/oauth/seoengines/cb/yandex, add this host in Yandex Webmaster, then Connect."
                    % seo.BASE_URL,
         }
@@ -4863,12 +5125,18 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         cards = []
         for (eng,) in engines:
             if eng == "bing":
-                connect_btn = ('<button class="btn ghost" disabled title="Bing uses a key, '
-                               'not OAuth">key-based</button>')
-                extra = ("<div class='row' style='flex-wrap:wrap;gap:1px'>"
-                         "<input id='vk-bing' placeholder='Bing API key' "
-                         "style='width:260px;max-width:100%'>&nbsp;"
-                         "<button class='btn' onclick='saveKey(\"bing\")'>Save key</button></div>")
+                connect_btn = ('<button class="warm" onclick="act(\'bingtest\',\'bing\')">'
+                               'Test key</button>'
+                               '<button class="btn" onclick="act(\'bingadd\',\'bing\')">'
+                               'Add this site</button>')
+                extra = ('<div class="row" style="flex-wrap:wrap;gap:8px;align-items:center">'
+                         '<input id="vk-bing" placeholder="Bing API key" '
+                         'style="width:220px;max-width:100%">'
+                         '<button class="btn ghost" onclick="saveKey(\'bing\')">Save key</button>'
+                         '<input id="su-bing" placeholder="/page to submit" '
+                         'style="width:190px;max-width:100%">'
+                         '<button class="btn ghost" onclick="bingPush()">Submit URL</button>'
+                         '</div>')
             else:
                 connect_btn = ('<button class="warm" onclick="act(\'connect\',\'%s\')">'
                                'Connect console</button>' % eng)
@@ -4952,7 +5220,7 @@ pre.preview{white-space:pre-wrap;word-break:break-word;background:#f8fafc;border
   </section>
   <section class="card"><h2>📊 Traffic by engine <span class="hint">(last {days} days, referral-attributed)</span></h2>
   <div class="tblflow"><table class="plain" id="traf">
-   <thead><tr><th>Engine</th><th class="ct">Pageviews</th><th class="ct">Affiliate clicks</th><th class="ct">CTR→click</th><th>Console rates (last 28d)</th></tr></thead>
+   <thead><tr><th>Engine</th><th class="ct">Pageviews</th><th class="ct">Affiliate clicks</th><th class="ct">CTR→click</th><th>Console rates (last {days}d)</th></tr></thead>
    <tbody><tr><td colspan="5" class="hint">Loading…</td></tr></tbody></table></div>
   <p id="traffic-msg" class="msg"></p>
  </section>
@@ -4982,7 +5250,11 @@ function act(a,e){fetch("/api/seoengines",{method:"POST",headers:{"Content-Type"
   o.style.display=o.style.display==="none"?"block":"none";
   if(a==="submit")o.textContent=e==="gsc"?"Simple sitemap PUT → "+ (d.ok?("ok: "+d.message):"err: "+d.error):(d.ok?"submitted ✓":"err: "+d.error);
   else if(a==="sync")o.textContent=formatStats(d);
+  else if(a==="bingtest")o.textContent=(d.ok?(d.registered?"✓ key ok — site already registered in Bing":"✓ key ok — press Add this site to register"):"✗ key invalid: "+(d.error||""))+(d.sites&&d.sites.length?("\n\nsites on this key:\n"+d.sites.join("\n")):"");
+  else if(a==="bingadd")o.textContent=d.ok?("site registered ✓"+(d.message?" · "+d.message:"")):("add failed: "+(d.error||""));
+  else if(a==="bingurl")o.textContent=d.ok?("submitted ✓ "+esc(d.url)):("submit failed: "+(d.error||""));
   load();});}
+function bingPush(){const p=($("su-bing")||{}).value||"";fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"bingurl",engine:"bing",page:p.trim()})}).then(r=>r.json()).then(d=>out("bing",d.ok?("submitted ✓ "+esc(d.url)):("submit failed: "+(d.error||""))));}
 function saveKey(e){const k=$("vk-"+e).value;fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"bingkey",key:k})}).then(()=>load());}
 function verifyTok(e){const t=$("vt-"+e).value;fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"verify",engine:e,token:t})}).then(()=>{out(e,t?"verification meta saved ✓":"verification meta cleared");load();});}
 function chip(ok){return ok===false?'<span class="badg" style="background:#ffe6e6;color:#c0392b">✗</span>':ok===true?'<span class="badg" style="background:#e6ffe8;color:#1e8e3e">✓</span>':'<span class="badg" style="background:#eceff3;color:#667">◦</span>';}
@@ -5001,10 +5273,14 @@ function formatStats(d){const t=(d.totals||{});const r=(d.rows||[]).slice(0,12);
 function load(){fetch("/api/seoengines").then(r=>r.json()).then(d=>{
   for(const e of d.engines){$("st-"+e.engine).innerHTML=badge(e.state);$("tok-"+e.engine).textContent=e.state==="ready"?"connected":(e.client?"token pending":"client ids missing");$("last-"+e.engine).textContent=e.last_sync||"never";}
   const tr=d.traffic; const tgs={"google":"Google","bing":"Bing","yandex":"Yandex","duckduckgo":"DuckDuckGo","yahoo":"Yahoo","direct":"Direct","other":"Other"};
+  const snapKeys={"google":"gsc","bing":"bing","yandex":"yandex"};
+  const consoleCell=(k)=>{const s=d.snapshots[snapKeys[k]];if(!s||!s.totals)return '<span class="hint" style="font-size:12px">—</span>';
+    const t=s.totals;const asOf=(s.at||"").replace("UTC","").trim();
+    return `<span class="hint" style="font-size:12px">${t.clicks??0} clicks · ${t.impressions??0} impr · ${t.position??"—"} pos<br>CTR ${t.ctr??0}% <span style="opacity:.7">(${asOf})</span></span>`;};
   const rows=[];
   for(const k in tr.engines){const v=tr.engines[k];const ctr=v.views?((v.clicks/v.views)*100).toFixed(1):0;
-    rows.push(`<tr><td>${tgs[k]}</td><td class="ct">${v.views}</td><td class="ct">${v.clicks}</td><td class="ct">${ctr}%</td><td class="ct hint" style="font-size:12px"></td></tr>`);}
-  rows.push(`<tr style="font-weight:700"><td>All</td><td class="ct">${tr.totals.views}</td><td class="ct">${tr.totals.clicks}</td><td class="ct">${tr.totals.views?((tr.totals.clicks/tr.totals.views)*100).toFixed(1):0}%</td><td></td></tr>`);
+    rows.push(`<tr><td>${tgs[k]}</td><td class="ct">${v.views}</td><td class="ct">${v.clicks}</td><td class="ct">${ctr}%</td><td class="ct">${consoleCell(k)}</td></tr>`);}
+  rows.push(`<tr style="font-weight:700"><td>All</td><td class="ct">${tr.totals.views}</td><td class="ct">${tr.totals.clicks}</td><td class="ct">${tr.totals.views?((tr.totals.clicks/tr.totals.views)*100).toFixed(1):0}%</td><td><span class="hint" style="font-size:12px">own referrer attribution</span></td></tr>`);
   $("traf").querySelector("tbody").innerHTML=rows.join("");
   $("h-host").textContent=d.host;$("h-sitemap").textContent=d.sitemap;$("h-robots").textContent="robots.txt ↗";
   msgs();
@@ -6917,6 +7193,13 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
         return self._send(200, {"ok": True, "published_now": published_now,
                                 "still_pending": pending})
 
+    def _social_blitz(self):
+        """Launch blitz: publish ALL scheduled posts immediately (every platform,
+        every niche), ignoring the schedule — for the 'sell it now' moment."""
+        published, pending = _flush_all_social(self._webhook_publish)
+        return self._send(200, {"ok": True, "published_now": published,
+                                "still_pending": pending})
+
     def _social_amplify(self):
         """Manual trigger for the auto-amplify loop (POST /api/social/amplify),
         so an owner can re-queue winning posts on demand instead of waiting for
@@ -7118,6 +7401,7 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
 <tbody>{pub_rows}</tbody></table></div>
 {perf_note}
 <button class="warm" id="flush">Flush due scheduled posts</button>
+<button class="warm" id="blitz">⚡ Launch blitz (publish ALL queued now)</button>
 <button class="warm" id="puball">📣 Publish every niche</button>
 <button class="warm" id="topics">Recycle long-tail topics → posts</button>
 <p id="flushout" class="msg"></p></section>
@@ -7159,6 +7443,15 @@ async function flush(){{
     ? "Published " + d.published_now + " due post(s) now; " + d.still_pending + " still queued."
     : "Flush failed.";
   setTimeout(()=>location.reload(), 900);
+}}
+async function blitz(){{
+  $("flushout").textContent = "⚡ Launching blitz — publishing ALL queued posts now…";
+  const r = await fetch("/api/social/blitz", {{method:"POST", headers:{{"Content-Type":"application/json"}}}});
+  const d = await r.json().catch(()=>({{ok:false}}));
+  $("flushout").textContent = d && d.ok
+    ? "⚡ Blitz done — " + d.published_now + " post(s) published; " + d.still_pending + " still pending."
+    : "Blitz failed.";
+  setTimeout(()=>location.reload(), 1200);
 }}
 async function puball(){{
   $("flushout").textContent = "Publishing every niche…";
@@ -7202,6 +7495,7 @@ document.addEventListener("click", (e)=>{{
   const s = e.target.closest(".soc-sched");
   if (s){{ sched(s); return; }}
   if (e.target.closest("#flush")){{ flush(); return; }}
+  if (e.target.closest("#blitz")){{ blitz(); return; }}
   if (e.target.closest("#puball")){{ puball(); return; }}
   if (e.target.closest("#topics")){{ recycle(); return; }}
   if (e.target.closest("#ampbtn")){{ ampl(); return; }}
@@ -7236,15 +7530,18 @@ document.addEventListener("click", (e)=>{{
                 ).fetchone()["c"]
             finally:
                 _conn.close()
+        bing_key = webmasters.BING_API_KEY or webmasters.store_get("seoeng.bing.apikey", "")
         strip = (
             '<div class="feature"><h3>%d</h3><p class="hint">niches saved</p></div>'
             '<div class="feature"><h3>%d</h3><p class="hint">fully indexable</p></div>'
             '<div class="feature"><h3>%d</h3><p class="hint">need work</p></div>'
             '<div class="feature"><h3>%d</h3><p class="hint">active subscribers</p></div>'
             '<div class="feature"><h3>%s</h3><p class="hint">Search Console token</p></div>'
+            '<div class="feature"><h3>%s</h3><p class="hint">Bing API key</p></div>'
             % (audit["count"], audit["indexable"], audit["needs_work"],
                active_subs,
-               "✓ set" if audit["google_verification"] else "—"))
+               "✓ set" if audit["google_verification"] else "—",
+               "✓ set" if bing_key else "—"))
         rows = ""
         for r in audit["niches"]:
             c = r["checks"]
@@ -7270,6 +7567,8 @@ document.addEventListener("click", (e)=>{{
                      else '<span style="color:#c0392b">Not set</span> — prove Search Console ownership to get the site indexed.')
         pint_state = ('<span style="color:#1e8e3e">Claimed</span> — the site emits your p:domain_verify meta.' if audit.get("pinterest_verification")
                       else '<span style="color:#c0392b">Not set</span> — add your Pinterest domain-claim token under /keys/site/pinterest.')
+        bing_state = ('<span style="color:#1e8e3e">Configured</span> — Bing API key is set.' if bing_key
+                      else '<span style="color:#c0392b">Not set</span> — grab the key in Bing Webmaster, then paste it on <a href="/admin/seoengines">/admin/seoengines ↗</a> or set PSTORE_BING_API_KEY.')
         site_keys = ('<div class="row" style="align-items:stretch;margin-top:10px">'
                      '<div class="feature"><h3>✓</h3><p class="hint">Search Console token<br>'
                      '<a href="/keys/site/gsc">/keys/site/gsc ↗</a></p></div>'
@@ -7308,6 +7607,7 @@ document.addEventListener("click", (e)=>{{
 <div class="row" style="align-items:stretch">{strip}</div>
 <p class="hint" style="margin-top:10px">Search Console owner token: {gsc_state}</p>
 <p class="hint" style="margin-top:6px">Pinterest website claim: {pint_state}</p>
+<p class="hint" style="margin-top:6px">Bing Webmaster: {bing_state}</p>
 <p class="hint" style="margin-top:6px">Sitemap <a href="{seo._clean(audit['sitemap'])}">{seo._clean(audit['sitemap'])}</a> · Robots <a href="{seo._clean(audit['robots'])}">{seo._clean(audit['robots'])}</a> · Canonical base <code>{seo._clean(audit['site_url'])}</code></p>
 <p class="hint" style="margin-top:4px">Locked to team members granted the <b>SEO &amp; consoles</b> function — the owner hands it out under <a href="/admin/users">Users &amp; roles</a>.</p>
 {site_keys}
@@ -9218,6 +9518,7 @@ document.addEventListener("click", async function(e){{
             conn = _db()
             row = conn.execute("SELECT id, unsubscribed FROM subscribers WHERE email=?",
                                (email,)).fetchone()
+            is_new = False
             if row:
                 conn.execute(
                     "UPDATE subscribers SET unsubscribed=0, confirmed=1, source=?, keyword=?, first_name=? "
@@ -9229,12 +9530,19 @@ document.addEventListener("click", async function(e){{
                     "INSERT INTO subscribers (email, source, keyword, first_name, confirmed) "
                     "VALUES (?,?,?,?,1)", (email, source, keyword, first_name))
                 sid = cur.lastrowid
+                is_new = True
                 msg = "Done — you'll only hear from us when these picks change, and you can unsubscribe any time."
             conn.commit()
             conn.close()
         # Signed, short-lived token lets this just-opted-in visitor grab the
         # gated PDF lead magnet immediately (Cialdini's reciprocity in action).
         token = security.make_token("pdf:" + keyword, 10 * 60) if keyword else ""
+        # Fire-and-forget welcome email for brand-new leads only (a returning
+        # subscriber may already be mid-sequence). No-op when SMTP is not
+        # configured or the keyword lacks products — the autosend picks it up.
+        if is_new and keyword:
+            threading.Thread(target=_send_welcome_email, args=(sid, keyword),
+                             daemon=True).start()
         return self._send(200, {"ok": True, "id": sid, "message": msg,
                                 "download_token": token})
 
@@ -11237,6 +11545,32 @@ AI status: {"<b>configured</b> (%s · %s)" % (seo._clean(_active), seo._clean(ai
             "<tr><td>%s</td><td class='ct'>%d</td></tr>"
             % (seo._clean(r["page"] or "—"), r["c"]) for r in event_pages
         ) or "<tr><td colspan='2' class='hint'>Views appear as pages load.</td></tr>"
+        console_rows = ""
+        console_clicks = console_impressions = 0
+        for eng, label in (("gsc", "Google"), ("bing", "Bing"), ("yandex", "Yandex")):
+            s = webmasters.last_sync(eng)
+            if not s or not s.get("totals"):
+                console_rows += (
+                    "<tr><td>%s</td><td class='hint' colspan='5'>not synced — run "
+                    "“⟳ Fetch stats” on /admin/seoengines to load it</td></tr>" % label)
+                continue
+            t = s["totals"]
+            c = int(t.get("clicks") or 0)
+            i = int(t.get("impressions") or 0)
+            console_clicks += c
+            console_impressions += i
+            pos = t.get("position")
+            pos_s = "—" if pos in (None, "") else "%.1f" % float(pos)
+            ctr = t.get("ctr")
+            ctr_s = "—" if ctr in (None, "") else "%.1f%%" % float(ctr)
+            console_rows += (
+                "<tr><td>%s</td><td class='ct'>%d</td><td class='ct'>%d</td>"
+                "<td class='ct'>%s</td><td class='ct'>%s</td><td class='hint'>%s</td></tr>"
+                % (label, c, i, pos_s, ctr_s, seo._clean(s.get("at") or "—")))
+        total_console_rows = (
+            "<tr style='font-weight:700'><td>All engines</td><td class='ct'>%d</td>"
+            "<td class='ct'>%d</td><td class='ct'></td><td class='ct'></td>"
+            "<td class='hint'>last 28d</td></tr>" % (console_clicks, console_impressions))
         body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Analytics — pstore</title><link rel="stylesheet" href="/style.css">
@@ -11256,6 +11590,16 @@ AI status: {"<b>configured</b> (%s · %s)" % (seo._clean(_active), seo._clean(ai
   <div class="feature"><h3>{stats['active']}</h3><p class="hint">active subscribers</p></div>
   <div class="feature"><h3>{stats['emails_sent']}</h3><p class="hint">emails sent</p></div>
 </div></section>
+<section class="card"><h2>🔎 Console impressions &amp; clicks</h2>
+<p class="hint">Real search-console totals from Google Search Console, Bing Webmaster and Yandex Webmaster (whichever you've connected and synced). Your own referrer-attributed clicks sit alongside for context.</p>
+<div class="row" style="align-items:stretch">
+  <div class="feature"><h3>{console_impressions:,}</h3><p class="hint">console impressions (28d)</p></div>
+  <div class="feature"><h3>{console_clicks:,}</h3><p class="hint">console clicks (28d)</p></div>
+</div>
+<div class="table-wrap" style="margin-top:8px"><table class="plain"><thead><tr><th>Engine</th><th>Clicks</th><th>Impressions</th><th>Avg. position</th><th>CTR</th><th>Last sync</th></tr></thead><tbody>
+{console_rows}
+{total_console_rows}
+</tbody></table></div></section>
 <section class="card"><h2>💰 Earnings & conversion</h2>
 <div class="row" style="align-items:stretch">
   <div class="feature"><h3>${est['commission_est']:.2f}</h3><p class="hint">est. commission this period</p></div>

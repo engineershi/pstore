@@ -18,6 +18,7 @@ import urllib.parse
 
 import market_engine
 import amazon as amazon_mod
+import seo
 
 
 def _esc(s):
@@ -553,6 +554,17 @@ def _find_amazon_url(ctx):
     return amazon_mod.affiliate_url(asin)
 
 
+def _landing_jsonld_html(context, base, slug, og_image, e):
+    """Product rich-snippet JSON-LD for the /lp/ page head (top pick only)."""
+    pick = context.get("pick") or {}
+    page_url = (base + "/lp/" + slug) if base else ""
+    graph = seo.landing_product_jsonld(pick, page_url, og_image)
+    if not graph:
+        return ""
+    return ('<script type="application/ld+json">%s</script>'
+            % json.dumps(graph).replace("</", "<\\/"))
+
+
 def render_landing_page_page(context, keyword, site_url=None):
     """Render the full HTML for a CMS-driven landing page."""
     sections = context.get("sections", [])
@@ -610,9 +622,14 @@ def render_landing_page_page(context, keyword, site_url=None):
 <meta property="og:url" content="{e(base)}/lp/{e(slug)}">
 <link rel="canonical" href="{e(base)}/lp/{e(slug)}">
 <meta property="og:image" content="{e(og_image)}">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="{e(keyword_title)}">
+<meta name="twitter:image" content="{e(og_image)}">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="{e(keyword_title)} — The Data-Backed #1 Pick">
 <meta name="twitter:description" content="The ranked best {e(keyword)} pick from live Amazon data.">
+{_landing_jsonld_html(context, base, slug, og_image, e)}
 <style>{css}</style>
 </head>
 <body>

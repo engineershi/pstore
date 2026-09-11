@@ -15,6 +15,7 @@ URLs (no /go cloaking) so the site stays Amazon-Affiliate-compliant.
 """
 import hashlib
 import html
+import json
 import re
 import urllib.parse
 
@@ -171,6 +172,7 @@ def build_landing_page(keyword, items, site_url=None):
       <p>Hit the button below. It takes you straight to this exact item on Amazon, ready to check out.</p></div>
     <div class="qa"><b>Shipping?</b>
       <p>Handled entirely by Amazon — just pick the delivery option that suits you at checkout.</p></div>"""
+    _ld = _landing_ld(pick, slug, base, og_image)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -182,9 +184,14 @@ def build_landing_page(keyword, items, site_url=None):
 <meta property="og:type" content="website">
 <meta property="og:url" content="{e(base)}/lp/{e(slug)}">
 <meta property="og:image" content="{e(og_image)}">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="{e(title)}">
+<meta name="twitter:image" content="{e(og_image)}">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="{e(title)}">
 <meta name="twitter:description" content="The ranked best {e(keyword)} pick from live Amazon data.">
+{_ld}
 <style>
   * {{ box-sizing: border-box; }}
   body {{ margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
@@ -235,6 +242,17 @@ def build_landing_page(keyword, items, site_url=None):
 <script src="/courier.js" defer></script>
 </body>
 </html>"""
+
+
+def _landing_ld(pick, slug, base, og_image):
+    """Product rich-snippet JSON-LD for the legacy /lp/ page head."""
+    import seo
+    page_url = (base + "/lp/" + slug) if base else ""
+    graph = seo.landing_product_jsonld(pick, page_url, og_image)
+    if not graph:
+        return ""
+    return ('<script type="application/ld+json">%s</script>'
+            % json.dumps(graph).replace("</", "<\\/"))
 
 
 def build_email_sequence(keyword, items):
