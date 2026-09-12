@@ -585,6 +585,11 @@ class TestSeoengineServer(unittest.TestCase):
         self.assertIn("Yandex Webmaster", html)
         self.assertIn("Traffic by engine", html)
         self.assertIn("/api/seoengines", html)
+        # Regression: the inline action-JS must carry \n escapes as backslash-n,
+        # never a real newline (a single \n in the python source becomes an actual
+        # newline in the served HTML, which kills the whole <script> block).
+        self.assertIn("\\n\\nsites on this key:\\n", html)
+        self.assertNotIn("\n\nsites on this key:", html)
 
     def test_seoengines_api_get(self):
         st, _, body = self._raw("GET", "/api/seoengines", cookie=self.cookie)

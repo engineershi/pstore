@@ -53,6 +53,19 @@ def _post(url, payload, headers, timeout=15):
         return 0, {}
 
 
+def _get(url, headers, timeout=15):
+    """GET ``url`` (Pinterest board lookups etc). Test seam like :func:`_post`;
+    tests stub it with the same fake and payload arg. Never raises."""
+    try:
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, _read_json(resp)
+    except urllib.error.HTTPError as e:
+        return e.code, _read_json(e)
+    except Exception:
+        return 0, {}
+
+
 def _read_json(resp):
     try:
         raw = resp.read()
@@ -137,6 +150,8 @@ def _body_for(platform, kit):
     body = (kit.get("body") or "")
     link = kit.get("link") or ""
     return {"body": body, "link": link, "image": kit.get("image") or "",
+            "image_png": kit.get("image_png") or "",
+            "board_id": str(kit.get("board_id") or ""),
             "platform": platform}
 
 
@@ -178,17 +193,64 @@ def _post_twitter(b, kv):
             "message": ("posted id=" + str(cid)) if cid else json.dumps(data or st)}
 
 
+_PINT_BOARD_CACHE = {}
+
+
+def _pint_board_id(kv):
+    """Best-effort Pinterest board id for the token's account. Resolution order:
+    an explicit board NAME from `kv("pinterest", "board")` (settings key
+    social.key.pinterest.board) wins; otherwise the account's "Default" board;
+    otherwise the first board in the list. Cached per (token, name) in-process so
+    a blitz doesn't call the boards API per pin. Returns '' when the account has
+    no boards or the lookup fails (the caller then fails the post and the webhook
+    fallback takes over)."""
+    tok = _pint_cred(kv)[0] or ""
+    if not tok:
+        return ""
+    wanted = str(kv("pinterest", "board") or "").strip().lower()
+    cache_key = tok + "|" + wanted
+    if cache_key in _PINT_BOARD_CACHE:
+        return _PINT_BOARD_CACHE[cache_key]
+    st, data = _get("https://api.pinterest.com/v5/boards?page_size=100",
+                    {"Authorization": "Bearer " + tok}, timeout=15)
+    items = (data or {}).get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return ""
+    board_id = ""
+    for it in items:
+        if wanted and str(it.get("name") or "").strip().lower() == wanted:
+            board_id = str(it.get("id") or "")
+            break
+        if not wanted and str(it.get("name") or "").strip().lower() == "default":
+            board_id = str(it.get("id") or "")
+            break
+    if not board_id:
+        for it in items:
+            if it.get("id"):
+                board_id = str(it.get("id"))
+                break
+    if board_id:
+        _PINT_BOARD_CACHE[cache_key] = board_id
+    return board_id
+
+
 def _post_pinterest(b, kv):
     tok = _pint_cred(kv)[0] or ""
     if not tok:
         return {"ok": False, "platform": "Pinterest", "via": "skipped",
                 "message": "No Pinterest board token configured."}
+    board = b.get("board_id") or _pint_board_id(kv)
+    if not board:
+        return {"ok": False, "platform": "Pinterest", "via": "native",
+                "message": "Pinterest account has no board to pin to (add one "
+                           "or set a board name)."}
+    image = b.get("image_png") or b.get("image") or og_image(b["link"])
     payload = {
         "title": (b["body"] or "").split("\n", 1)[0][:100],
         "description": b["body"] or "",
         "link": b["link"] or "",
-        "media_source": {"source_type": "image_url",
-                         "url": b.get("image") or og_image(b["link"])},
+        "board_id": board,
+        "media_source": {"source_type": "image_url", "url": image},
     }
     st, data = _post("https://api.pinterest.com/v5/pins",
                      payload, {"Authorization": "Bearer " + tok, **pint_ignore()})

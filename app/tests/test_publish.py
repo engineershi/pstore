@@ -20,20 +20,27 @@ class FakeResp:
 class Base(unittest.TestCase):
     def setUp(self):
         self._orig_post = publish._post
+        self._orig_get = publish._get
         self._orig_img = publish.og_image
+        publish._PINT_BOARD_CACHE.clear()
         publish.og_image = lambda url: "https://example.com/og.png"
         self.captured = []
         self.requests = []
 
     def tearDown(self):
         publish._post = self._orig_post
+        publish._get = self._orig_get
         publish.og_image = self._orig_img
 
-    def _ok(self, payload=None):
+    def _ok(self, payload=None, boards=None):
+        boards = boards if boards is not None else [{"id": "board-1", "name": "Default"}]
         def fake(url, payload_, headers, timeout=15):
             self.requests.append((url, payload_, headers))
+            if "/v5/boards" in url:
+                return 200, {"items": boards}
             return 201, (payload or json.loads('{"id":"r1"}' if url.endswith("/pins") else '{}'))
         publish._post = fake
+        publish._get = lambda url, headers, timeout=15: fake(url, {}, headers, timeout=timeout)
 
     def _keys(self, mapping=None):
         mapping = mapping or {}
@@ -73,7 +80,36 @@ class TestNativeScaffold(Base):
                               self._keys({("pinterest", "token"): "PIN"}))
         self.assertTrue(res["ok"])
         self.assertEqual(res["via"], "native")
-        self.assertIn("api.pinterest.com/v5/pins", self.requests[0][0])
+        boards = [(u, p, h) for u, p, h in self.requests if "/v5/boards" in u]
+        pins = [(u, p, h) for u, p, h in self.requests if "/v5/pins" in u]
+        self.assertEqual(len(boards), 1, "board lookup happens once")
+        self.assertEqual(len(pins), 1)
+        self.assertIn("api.pinterest.com/v5/pins", pins[0][0])
+        self.assertEqual(pins[0][1]["board_id"], "board-1")
+        self.assertEqual(pins[0][1]["media_source"], {"source_type": "image_url",
+                                                      "url": "https://example.com/og.png"})
+        self.assertIn("Bearer PIN", pins[0][2].get("Authorization", ""))
+
+    def test_pinterest_board_name_override_and_cache(self):
+        self._ok()
+        # Two posts with the same token+board resolve the board once (cache).
+        publish.post_to("Pinterest", self._kit("Pinterest"),
+                        self._keys({("pinterest", "token"): "PIN",
+                                    ("pinterest", "board"): "Keto Zone"}))
+        res = publish.post_to("Pinterest", self._kit("Pinterest"),
+                              self._keys({("pinterest", "token"): "PIN",
+                                          ("pinterest", "board"): "Keto Zone"}))
+        self.assertTrue(res["ok"])
+        boards = [p for p, _, _ in self.requests if "/v5/boards" in p]
+        self.assertEqual(len(boards), 1)
+
+    def test_pinterest_no_board_fails_natively(self):
+        self._ok(boards=[])
+        res = publish.post_to("Pinterest", self._kit("Pinterest"),
+                              self._keys({("pinterest", "token"): "PIN"}))
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["via"], "native")
+        self.assertIn("no board", res["message"].lower())
 
     def test_facebook_posts_with_token(self):
         self._ok()

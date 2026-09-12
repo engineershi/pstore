@@ -763,9 +763,12 @@ def _publish_key_getter():
         so each candidate field name resolves to that one value."""
     def kv(ns, name):
         base = _get_setting("social.key." + ns, "")
-        if ns != "twitter":
-            return base
-        sub = _get_setting("social.key.twitter.%s" % name, "")
+        if ns == "twitter":
+            sub = _get_setting("social.key.twitter.%s" % name, "")
+            return sub or base
+        # Non-token named keys (e.g. `social.key.pinterest.board`) must resolve
+        # to that named sub-key, not the platform token.
+        sub = _get_setting("social.key.%s.%s" % (ns, name), "")
         return sub or base
     return kv
 
@@ -1917,6 +1920,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        if ctype.startswith("text/html") and (
+                self.path.startswith("/admin") or self.path.startswith("/dashboard")
+                or self.path.startswith("/tool") or self.path.startswith("/keys")):
+            # Admin pages are session/state dependent — never cache them so a
+            # phone can't serve a stale copy of the console UI.
+            self.send_header("Cache-Control", "no-store")
         self.end_headers()
         if not getattr(self, "_head_only", False):
             self.wfile.write(data)
@@ -5313,24 +5322,26 @@ function badge(state){return state==="ready"?'<span class="badg" style="backgrou
   :state==="needs-consent"?'<span class="badg" style="background:#fff3cd;color:#8a6d1a">needs consent</span>'
   :state==="needs-key"?'<span class="badg" style="background:#fff3cd;color:#8a6d1a">needs key</span>'
   :'<span class="badg" style="background:#ffe6e6;color:#c0392b">'+(state||"?")+'</span>';}
-function act(a,e){fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:a,engine:e,days:28})}).then(r=>r.json()).then(d=>{
+function act(a,e){const o=$("out-"+e);if(o){o.style.display="block";o.textContent="working…";}
+ fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:a,engine:e,days:28})}).then(r=>r.json().catch(()=>({ok:false,error:"bad response ("+r.status+")"}))).then(d=>{
   if(a==="connect"){ if(d.ok&&d.url){window.location=d.url;} else {out(e,"Connect unavailable: "+ (d.error||""));} return;}
-  const o=$("out-"+e); if(!o)return;
-  o.style.display=o.style.display==="none"?"block":"none";
+  if(o)o.textContent="";
   if(a==="submit")o.textContent=e==="gsc"?"Simple sitemap PUT → "+ (d.ok?("ok: "+d.message):"err: "+d.error):(d.ok?"submitted ✓":"err: "+d.error);
   else if(a==="sync")o.textContent=formatStats(d);
-  else if(a==="bingtest")o.textContent=(d.ok?(d.registered?"✓ key ok — site already registered in Bing":"✓ key ok — press Add this site to register"):"✗ key invalid: "+(d.error||""))+(d.sites&&d.sites.length?("\n\nsites on this key:\n"+d.sites.join("\n")):"");
+  else if(a==="bingtest")o.textContent=(d.ok?(d.registered?"✓ key ok — site already registered in Bing":"✓ key ok — press Add this site to register"):"✗ key invalid: "+(d.error||""))+(d.sites&&d.sites.length?("\\n\\nsites on this key:\\n"+d.sites.join("\\n")):"");
   else if(a==="bingadd")o.textContent=d.ok?("site registered ✓"+(d.message?" · "+d.message:"")):("add failed: "+(d.error||""));
   else if(a==="bingurl")o.textContent=d.ok?("submitted ✓ "+esc(d.url)):("submit failed: "+(d.error||""));
-  else if(a==="gsctest"||a==="yatest")o.textContent=(d.ok?(d.registered?"✓ token ok — "+e+" already has this site":"✓ token ok — press Add this site to register"):"✗ "+e+" not connected: "+(d.error||""))+(d.sites&&d.sites.length?("\n\nproperties on this token:\n"+d.sites.join("\n")):(d.hosts&&d.hosts.length?("\n\nhosts on this token:\n"+d.hosts.join("\n")):""));
+  else if(a==="gsctest"||a==="yatest")o.textContent=(d.ok?(d.registered?"✓ token ok — "+e+" already has this site":"✓ token ok — press Add this site to register"):"✗ "+e+" not connected: "+(d.error||""))+(d.sites&&d.sites.length?("\\n\\nproperties on this token:\\n"+d.sites.join("\\n")):(d.hosts&&d.hosts.length?("\\n\\nhosts on this token:\\n"+d.hosts.join("\\n")):""));
   else if(a==="gscadd"||a==="yaadd")o.textContent=d.ok?("site registered ✓"+(d.verified?" (verified)":"")+(d.message?" · "+d.message:"")):("add failed: "+(d.error||""));
-  else if(a==="gscurl")o.textContent=d.ok?("inspect ✓ "+esc(d.url)+"\nindexed: "+(d.indexed?"yes":"not yet")+" · "+esc(d.coverage_state||"?")+" · "+(d.verdict||"")+" · crawled "+esc(d.last_crawl||"—")):("inspect failed: "+(d.error||""));
+  else if(a==="gscurl")o.textContent=d.ok?("inspect ✓ "+esc(d.url)+"\\nindexed: "+(d.indexed?"yes":"not yet")+" · "+esc(d.coverage_state||"?")+" · "+(d.verdict||"")+" · crawled "+esc(d.last_crawl||"—")):("inspect failed: "+(d.error||""));
   else if(a==="yaurl")o.textContent=d.ok?("recrawl queued ✓ "+esc(d.url)):("recrawl failed: "+(d.error||""));
-  load();});}
-function pushUrl(e){const p=($("su-"+e)||{}).value||"";const a=e==="gsc"?"gscurl":e==="yandex"?"yaurl":"bingurl";fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:a,engine:e,page:p.trim()})}).then(r=>r.json()).then(d=>out(e,d.ok?("submitted ✓ "+esc(d.url||"")):("submit failed: "+(d.error||""))));}
-function bingPush(){const p=($("su-bing")||{}).value||"";fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"bingurl",engine:"bing",page:p.trim()})}).then(r=>r.json()).then(d=>out("bing",d.ok?("submitted ✓ "+esc(d.url)):("submit failed: "+(d.error||""))));}
-function saveKey(e){const k=$("vk-"+e).value;fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"bingkey",key:k})}).then(()=>load());}
-function verifyTok(e){const t=$("vt-"+e).value;fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"verify",engine:e,token:t})}).then(()=>{out(e,t?"verification meta saved ✓":"verification meta cleared");load();});}
+  load();if(o){o.scrollIntoView({block:"nearest",behavior:"smooth"});}
+ }).catch(err=>{if(o)o.textContent="request failed: "+err.message;});}
+function out(e,t){const o=$("out-"+e);if(o){o.style.display="block";o.textContent=t;if(o.scrollIntoView)o.scrollIntoView({block:"nearest",behavior:"smooth"});return 1;}return 0;}
+function pushUrl(e){const p=($("su-"+e)||{}).value||"";const a=e==="gsc"?"gscurl":e==="yandex"?"yaurl":"bingurl";const o=$("out-"+e);if(o){o.style.display="block";o.textContent="working…";}fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:a,engine:e,page:p.trim()})}).then(r=>r.json().catch(()=>({ok:false,error:"bad response ("+r.status+")"}))).then(d=>out(e,d.ok?("submitted ✓ "+esc(d.url||"")):("submit failed: "+(d.error||"")))).catch(err=>{if(o)o.textContent="request failed: "+err.message;});}
+function bingPush(){const p=($("su-bing")||{}).value||"";const o=$("out-bing");if(o){o.style.display="block";o.textContent="working…";}fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"bingurl",engine:"bing",page:p.trim()})}).then(r=>r.json().catch(()=>({ok:false,error:"bad response ("+r.status+")"}))).then(d=>out("bing",d.ok?("submitted ✓ "+esc(d.url)):("submit failed: "+(d.error||"")))).catch(err=>{if(o)o.textContent="request failed: "+err.message;});}
+function saveKey(e){const k=$("vk-"+e).value;const o=$("out-"+e);if(!k){out(e,"paste a key first");return;}if(o){o.style.display="block";o.textContent="working…";}fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"bingkey",key:k})}).then(r=>r.json().catch(()=>({ok:false}))).then(d=>{out(e,d.ok?"bing key saved ✓":"bing key save failed");load();}).catch(err=>{if(o)o.textContent="request failed: "+err.message;});}
+function verifyTok(e){const t=$("vt-"+e).value;const o=$("out-"+e);if(o){o.style.display="block";o.textContent="working…";}fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"verify",engine:e,token:t})}).then(r=>r.json().catch(()=>({ok:false}))).then(()=>{out(e,t?"verification meta saved ✓":"verification meta cleared");load();}).catch(err=>{if(o)o.textContent="request failed: "+err.message;});}
 function chip(ok){return ok===false?'<span class="badg" style="background:#ffe6e6;color:#c0392b">✗</span>':ok===true?'<span class="badg" style="background:#e6ffe8;color:#1e8e3e">✓</span>':'<span class="badg" style="background:#eceff3;color:#667">◦</span>';}
 function tagCheck(){const $o=$("tagout");if(!$o)return;const p=$("tgp").value;
  $o.innerHTML='<p class="hint">Fetching '+esc(p)+' the way a search engine would…</p>';
@@ -5359,7 +5370,6 @@ function load(){fetch("/api/seoengines").then(r=>r.json()).then(d=>{
   $("h-host").textContent=d.host;$("h-sitemap").textContent=d.sitemap;$("h-robots").textContent="robots.txt ↗";
   msgs();
 }).catch(e=>{$("traffic-msg").textContent="Failed to load: "+e;});}
-function out(e,t){const o=$("out-"+e);if(o){o.style.display="block";o.textContent=t;}}
 function msgs(){const u=new URLSearchParams(location.search);const m=u.get("msg")||u.get("err");if(m){const t=$("traffic-msg");if(t){t.textContent=(u.get("err")?"✗ ":"")+m;setTimeout(()=>{t.textContent="";history.replaceState({},"","/admin/seoengines");},6000);}}}
 document.addEventListener("DOMContentLoaded",load);
 </script>
