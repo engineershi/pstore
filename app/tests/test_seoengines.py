@@ -591,6 +591,16 @@ class TestSeoengineServer(unittest.TestCase):
         self.assertIn("\\n\\nsites on this key:\\n", html)
         self.assertNotIn("\n\nsites on this key:", html)
 
+    def test_rss_feed_served_with_enclosures(self):
+        st, _, body = self._raw("GET", "/rss.xml", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        xml = body.decode("utf-8", "replace")
+        self.assertIn("<rss version=\"2.0\"", xml)
+        import re
+        self.assertNotEqual(re.findall(r"<item>", xml), [])
+        self.assertIn("<enclosure url=", xml)
+        self.assertIn(".png", xml)
+
     def test_seoengines_api_get(self):
         st, _, body = self._raw("GET", "/api/seoengines", cookie=self.cookie)
         self.assertEqual(st, 200)

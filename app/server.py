@@ -3611,6 +3611,10 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._send_cached(seo.sitemap_xsl(),
                                          "application/xslt+xml; charset=utf-8",
                                          max_age=86400)
+            if path.rstrip("/").lower() == "/rss.xml":
+                return self._send_cached(self._rss(),
+                                         "application/rss+xml; charset=utf-8",
+                                         max_age=3600)
             if path == "/blog":
                 return self._send_cached(seo.render_blog(self._all_niches()),
                                          "text/html; charset=utf-8", edge=False)
@@ -4456,6 +4460,44 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             lm = (t["created_at"] or "")[:10] or "2026-08-28"
             entries.append((f"/n/{t['parent_slug']}/{t['slug']}", lm))
         return seo.render_sitemap(entries)
+
+    def _rss(self):
+        """RSS 2.0 feed of every published niche (Pinterest native RSS auto-
+        publisher + feed readers). Each item carries the raster /og/<slug>.png
+        share card as an enclosure so Pinterest finds an image per post."""
+        items = []
+        for page in seo.STATIC_PAGES:
+            items.append({"title": page.replace("-", " ").title(),
+                          "link": seo.BASE_URL.rstrip("/") + "/" + page,
+                          "description": page,
+                          "image": "",
+                          "pubdate": "2026-08-28 00:00:00"})
+        with _lock:
+            conn = _db()
+            rows = conn.execute(
+                "SELECT keyword, products, created_at FROM niches").fetchall()
+            conn.close()
+        base = seo.BASE_URL.rstrip("/")
+        for r in rows:
+            prods = (r["products"] or "").strip()
+            if not prods or prods in ("[]", "{}"):
+                continue
+            try:
+                kw = seo._slugify(r["keyword"])
+            except Exception:
+                kw = "niche"
+            title = (" ".join(w.capitalize() for w in re.split(r"[^A-Za-z0-9]+",
+                                                                r["keyword"])
+                              if w)) or r["keyword"]
+            items.append({
+                "title": title,
+                "link": base + "/n/" + kw,
+                "description": title + " — the best sellers, compared and "
+                               "rated. Full guide: " + base + "/n/" + kw,
+                "image": base + "/og/" + kw + ".png",
+                "pubdate": r["created_at"] or "",
+            })
+        return seo.render_rss(items)
 
     def _landing(self):
         return seo.render_landing(self._all_niches())

@@ -12,6 +12,7 @@ import json
 import os
 import re
 import hashlib
+from datetime import datetime
 
 import editorial
 
@@ -820,6 +821,60 @@ def render_sitemap(entries):
         f"<url><loc>{BASE_URL}{_clean(p)}</loc><lastmod>{lm}</lastmod></url>\n"
         for p, lm in entries)
     body = '<?xml version="1.0" encoding="UTF-8"?>\n' + SITEMAP_XSL_PI + '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' + urls + "</urlset>\n"
+    return body.encode("utf-8")
+
+
+def _rfc2822(sqlite_dt):
+    """'YYYY-MM-DD HH:MM:SS' (UTC) -> RFC 2822 pubDate. Falls back to epoch."""
+    try:
+        dt = datetime.strptime((sqlite_dt or "")[:19], "%Y-%m-%d %H:%M:%S")
+        return dt.strftime("%a, %d %b %Y %H:%M:%S +0000")
+    except Exception:
+        return "Thu, 01 Jan 1970 00:00:00 +0000"
+
+
+def _clean_xml(text):
+    return (str(text or "").replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+RSS_HEAD = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<rss version="2.0" '
+    'xmlns:atom="http://www.w3.org/2005/Atom" '
+    'xmlns:media="http://search.yahoo.com/mrss/">\n'
+    "<channel>\n"
+    f"<title>{_clean_xml('pstore — fresh buying-guide picks')}</title>\n"
+    f"<link>{BASE_URL}</link>\n"
+    f"<description>{_clean_xml('Curated affiliate niche picks and buying guides from ' + BASE_URL)}</description>\n"
+    f'<atom:link href="{BASE_URL}/rss.xml" rel="self" type="application/rss+xml"/>\n'
+    "<language>en-us</language>\n"
+    "<ttl>60</ttl>\n"
+)
+
+
+def render_rss(items):
+    """items: list of dicts {title, link, description, image, pubdate}.
+    RSS 2.0 with a raster (PNG) enclosure per item so feed readers and
+    Pinterest's native RSS auto-publisher find an image on every post."""
+    body = RSS_HEAD
+    for it in items:
+        g = _clean_xml(it["link"])
+        t = _clean_xml(it.get("title") or it["link"])
+        d = _clean_xml(it.get("description") or "")
+        img = _clean_xml(it.get("image") or "")
+        p = _rfc2822(it.get("pubdate") or "")
+        body += "<item>\n"
+        body += f"<title>{t}</title>\n"
+        body += f"<link>{g}</link>\n"
+        body += f'<guid isPermaLink="true">{g}</guid>\n'
+        body += f"<pubDate>{p}</pubDate>\n"
+        body += f"<description>{d}</description>\n"
+        if img:
+            body += f'<enclosure url="{img}" type="image/png"/>\n'
+            body += f'<media:thumbnail url="{img}"/>\n'
+        body += "</item>\n"
+    body += "</channel>\n</rss>\n"
     return body.encode("utf-8")
 
 
