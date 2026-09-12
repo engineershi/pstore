@@ -495,14 +495,23 @@ def gsc_crawl(urls, site=None, cap=None):
     out["skipped"] = max(0, len(urls) - out["inspected"])
     out["ok"] = out["inspected"] > 0 or out["submitted"]
     return out
+def _bing_url(path, key):
+    """Bing JSON/REST endpoint with the API key as the `apikey` query param
+    (the documented auth method for current API keys). The legacy WebmasterAPI
+    header is still sent as a backup so older key formats keep working."""
+    return "%s%s?apikey=%s" % (BING_API, path,
+                               urllib.parse.quote(str(key or ""), safe=""))
+
+
 def bing_add_site(key, url):
-    return _req("POST", BING_API + "/AddSite", _hdr(WebmasterAPI=key),
-                {"siteUrl": url})
+    return _req("POST", _bing_url("/AddSite", key),
+                _hdr(WebmasterAPI=key), {"siteUrl": url})
 
 
 def bing_submit_sitemap(key, url, sitemap=None):
     sitemap = sitemap or url.rstrip("/") + "/sitemap.xml"
-    return _req("POST", BING_API + "/SubmitSitemap", _hdr(WebmasterAPI=key),
+    return _req("POST", _bing_url("/SubmitSitemap", key),
+                _hdr(WebmasterAPI=key),
                 {"siteUrl": url, "sitemapUrl": sitemap})
 
 
@@ -510,7 +519,7 @@ def bing_stats(key, url, days=28):
     """Bing keyword/page stats. GET artifact varies by endpoint; we ask
     GetKeywordStats and parse the top-query aggregate for the site."""
     q = urllib.parse.urlencode({"siteUrl": url, "country": "US"})
-    status, data = _req("GET", BING_API + "/GetKeywordStats?%s" % q,
+    status, data = _req("GET", _bing_url("/GetKeywordStats", key) + "&" + q,
                         _hdr(WebmasterAPI=key))
     if status != 200 or not isinstance(data, list):
         return False, {"error": str(data)[:200], "rows": []}
@@ -546,7 +555,8 @@ def bing_user_sites(key):
     (ok, {"sites": [...], "registered": bool})."""
     if not key:
         return False, {"error": "bing API key not set", "sites": [], "registered": False}
-    status, data = _req("GET", BING_API + "/GetUserSites", _hdr(WebmasterAPI=key))
+    status, data = _req("GET", _bing_url("/GetUserSites", key),
+                        _hdr(WebmasterAPI=key))
     if status != 200:
         return False, {"error": str(data)[:200], "sites": [], "registered": False}
     if isinstance(data, dict):  # JSON-fragment wrapper
@@ -565,7 +575,8 @@ def bing_submit_url(key, url, page=None):
     the site root; `page` is a path (None submits the root). Returns
     (ok, {"submitted": [...], "error": ...})."""
     target = url.rstrip("/") + (("/" + page.lstrip("/")) if page else "")
-    status, data = _req("POST", BING_API + "/SubmitUrl", _hdr(WebmasterAPI=key),
+    status, data = _req("POST", _bing_url("/SubmitUrl", key),
+                        _hdr(WebmasterAPI=key),
                         {"siteUrl": url, "url": target})
     if status in (200, 201):
         return True, {"submitted": [target]}
