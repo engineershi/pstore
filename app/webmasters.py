@@ -339,7 +339,7 @@ def url_inspect(url, site=None):
     flow must have granted webmasters (see GSC_SCOPE)."""
     site = site or gsc_site_id()
     body = {"inspectionUrl": (url or "").strip(), "siteUrl": site}
-    status, data = _gsc("/webmasters/v3/urlInspection/index/inspect",
+    status, data = _gsc("/v1/urlInspection/index:inspect",
                         "POST", body)
     return status, data
 
@@ -392,7 +392,7 @@ def gsc_submit_url(page=None, site=None):
     if _inspect_budget() <= 0:
         return False, {"error": "daily URL-inspection budget spent "
                                "(%d/day)" % GSC_INSPECT_DAY_LIMIT}
-    status, data = _gsc("/webmasters/v3/urlInspection/index/inspect", "POST",
+    status, data = _gsc("/v1/urlInspection/index:inspect", "POST",
                         {"inspectionUrl": target, "siteUrl": site})
     _consume_inspect(1)
     if status != 200:
@@ -466,7 +466,7 @@ def inspect_new(url, site=None):
     try:
         if not _gsc_bearer():
             return None
-        _gsc("/webmasters/v3/urlInspection/index/inspect", "POST",
+        _gsc("/v1/urlInspection/index:inspect", "POST",
              {"inspectionUrl": (url or "").strip(),
               "siteUrl": site or gsc_site_id()})
         _consume_inspect(1)

@@ -76,7 +76,7 @@ class FakeWm:
                 {"siteUrl": "https://pstore-gxbv.onrender.com/",
                  "permissionLevel": "full"},
                 {"siteUrl": "sc-domain:example.com"}]}
-        if "urlInspection/index/inspect" in url:
+        if "urlInspection/index" in url:
             return 200, {"inspectionResult": {
                 "inspectionResultLink": "x",
                 "indexStatusResult": {
@@ -209,7 +209,7 @@ class TestWebmastersClients(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertEqual(out["inspected"], 2)
         self.assertEqual(out["total"], 2)
-        inspect = [c for c in self.wm.calls if "urlInspection/index/inspect" in c[1]]
+        inspect = [c for c in self.wm.calls if "urlInspection/index" in c[1]]
         self.assertEqual(len(inspect), 2)
         # budget consumed by the two inspections
         self.assertEqual(webmasters._inspect_budget(),
