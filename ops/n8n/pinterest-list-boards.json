@@ -1,0 +1,93 @@
+{
+  "name": "Pstore: List Pinterest Boards",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "Run this once (click \"Execute workflow\") after connecting the Pin-Interest credential. It lists every board on the Pinterest account; copy the numeric Board ID into \"Prep Pin Payload\" in the RSS → Pinterest workflow."
+      },
+      "id": "10000000-0000-4000-8000-000000000000",
+      "name": "Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -320,
+        -140
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "10000000-0000-4000-8000-000000000001",
+      "name": "Run once",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -160,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "board",
+        "operation": "getAll",
+        "returnAll": true,
+        "mode": "runOnceForAllItems"
+      },
+      "id": "10000000-0000-4000-8000-000000000002",
+      "name": "Pinterest: List Boards",
+      "type": "n8n-nodes-pin-interest.pinInterest",
+      "typeVersion": 1,
+      "position": [
+        40,
+        0
+      ],
+      "credentials": {
+        "pinInterestOAuth2Api": {
+          "id": "",
+          "name": "Pinterest Account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "10000000-0000-4000-8000-000000000003",
+      "name": "Board IDs",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        240,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Run once": {
+      "main": [
+        [
+          {
+            "node": "Pinterest: List Boards",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pinterest: List Boards": {
+      "main": [
+        [
+          {
+            "node": "Board IDs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

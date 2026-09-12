@@ -1,0 +1,186 @@
+{
+  "name": "Pstore: RSS → Pinterest",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "Pstore RSS → Pinterest\n\nWatches https://pstore-gxbv.onrender.com/rss.xml every 6 hours and creates a pin for each new niche. Only-new dedup is stored in workflow static data (persisted after successful scheduled runs only).\n\nSetup:\n1. Install the community node n8n-nodes-pin-interest (Settings → Community nodes).\n2. Create the \"Pin-Interest OAuth2 API\" credential from your Pinterest developer app (scopes: pins:write, boards:read, user_accounts:read; redirect https://<your-n8n>/rest/oauth2-credential/callback).\n3. Run pinterest-list-boards.json once, copy the board id into \"Prep Pin Payload\".\n4. Activate.\n\nIMPORTANT: do NOT run this while Pinterest's native RSS bulk importer is also consuming /rss.xml — you would double-post every niche. Use one or the other."
+      },
+      "id": "00000000-0000-4000-8000-000000000000",
+      "name": "Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -420,
+        -180
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000001",
+      "name": "Every 6 hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://pstore-gxbv.onrender.com/rss.xml",
+        "options": {
+          "ignoreSSL": false
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000002",
+      "name": "Watch Pstore RSS",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.1,
+      "position": [
+        -20,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Keep only unseen RSS items and mark them seen immediately, so the same\n// niche is never offered twice (even if a later pin fails). Items without an\n// enclosure image are promo/test entries that will never get art — drop them.\nconst state = $getWorkflowStaticData('global');\nstate.seen = Array.isArray(state.seen) ? state.seen : [];\n\nconst seen = new Set(state.seen);\nconst fresh = [];\n\nfor (const item of $input.all()) {\n  const j = item.json ?? {};\n  const guid = String(j.guid ?? j.link ?? '');\n  if (!guid || seen.has(guid)) continue;\n  seen.add(guid);\n  const imageUrl = String(j.enclosure?.url ?? '');\n  if (!imageUrl) continue;\n  fresh.push({ json: { ...j, guid, image_url: imageUrl } });\n}\n\nstate.seen = Array.from(seen).slice(-2000);\nreturn fresh.slice(0, 3); // steady drip: at most 3 pins per run"
+      },
+      "id": "00000000-0000-4000-8000-000000000003",
+      "name": "Only New Items",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        180,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the final Pinterest payload for one RSS item.\n// Set BOARD_ID from the pinterest-list-boards workflow output.\nconst BOARD_ID = ''; // <-- your numeric Pinterest board id\n\nconst out = [];\nfor (const item of $input.all()) {\n  const j = item.json ?? {};\n  const src = String(j.contentSnippet ?? j.content ?? '');\n  const description = [src.slice(0, 400), String(j.link ?? '')]\n    .filter(Boolean).join('\\n\\n');\n  out.push({\n    json: {\n      guid: String(j.guid ?? j.link ?? ''),\n      boardId: BOARD_ID,\n      image_url: String(j.image_url ?? ''),\n      title: String(j.title ?? '').slice(0, 100),\n      description: description.slice(0, 500),\n      link: String(j.link ?? ''),\n    },\n  });\n}\nreturn out;"
+      },
+      "id": "00000000-0000-4000-8000-000000000004",
+      "name": "Prep Pin Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        380,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "pin",
+        "operation": "create",
+        "boardId": "={{ $json.boardId }}",
+        "mediaSource": "url",
+        "imageUrl": "={{ $json.image_url }}",
+        "title": "={{ $json.title }}",
+        "description": "={{ $json.description }}",
+        "link": "={{ $json.link }}",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "00000000-0000-4000-8000-000000000005",
+      "name": "Pinterest: Create Pin",
+      "type": "n8n-nodes-pin-interest.pinInterest",
+      "typeVersion": 1,
+      "position": [
+        580,
+        0
+      ],
+      "credentials": {
+        "pinInterestOAuth2Api": {
+          "id": "",
+          "name": "Pinterest Account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 20000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {},
+      "id": "00000000-0000-4000-8000-000000000006",
+      "name": "Posted OK",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        780,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Every 6 hours": {
+      "main": [
+        [
+          {
+            "node": "Watch Pstore RSS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Watch Pstore RSS": {
+      "main": [
+        [
+          {
+            "node": "Only New Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Only New Items": {
+      "main": [
+        [
+          {
+            "node": "Prep Pin Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep Pin Payload": {
+      "main": [
+        [
+          {
+            "node": "Pinterest: Create Pin",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pinterest: Create Pin": {
+      "main": [
+        [
+          {
+            "node": "Posted OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

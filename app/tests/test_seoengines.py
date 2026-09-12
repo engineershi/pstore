@@ -600,6 +600,32 @@ class TestSeoengineServer(unittest.TestCase):
         self.assertNotEqual(re.findall(r"<item>", xml), [])
         self.assertIn("<enclosure url=", xml)
         self.assertIn(".png", xml)
+        # niche items carry a stable UTM so pin clicks are attributed to the
+        # affiliate funnel (and the guid stays stable for n8n dedup)
+        self.assertIn("utm_source=pinterest&amp;utm_medium=rss&amp;utm_campaign=", xml)
+        self.assertIn("/n/", xml)
+
+    def test_admin_rss_page(self):
+        st, _, body = self._raw("GET", "/admin/rss", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        page = body.decode("utf-8", "replace")
+        self.assertIn("/rss.xml", page)
+        self.assertIn("utm_source=pinterest", page)
+        self.assertIn("Pinterest", page)
+        self.assertIn("n8n", page)
+
+    def test_admin_rss_page_requires_auth(self):
+        # admin pages redirect guests to /admin/login (302), unlike APIs (401)
+        st, loc, _ = self._raw("GET", "/admin/rss")
+        self.assertEqual(st, 302)
+        self.assertIn("/admin/login", loc)
+
+    def test_analytics_page_shows_rss_card(self):
+        st, _, body = self._raw("GET", "/admin/analytics", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        page = body.decode("utf-8", "replace")
+        self.assertIn("RSS &amp; Pinterest pins", page)
+        self.assertIn("/admin/rss", page)
 
     def test_seoengines_api_get(self):
         st, _, body = self._raw("GET", "/api/seoengines", cookie=self.cookie)

@@ -322,9 +322,9 @@ FUNCTION_PATHS = {
                   "/api/content"),
     "email": ("/admin/emails", "/api/mail", "/api/sequence/", "/api/subscribers"),
     "social": ("/admin/social", "/api/social"),
-    "seo": ("/admin/seo", "/admin/seoengines", "/admin/sem", "/seo/snippet/",
-            "/api/sem", "/api/seo-audit", "/api/seo/topics", "/api/seoengines",
-            "/api/indexnow", "/api/topics/generate"),
+    "seo": ("/admin/seo", "/admin/seoengines", "/admin/rss", "/admin/sem",
+            "/seo/snippet/", "/api/sem", "/api/seo-audit", "/api/seo/topics",
+            "/api/seoengines", "/api/indexnow", "/api/topics/generate"),
     "content": ("/admin/cms", "/admin/ebooks", "/admin/refresh",
                 "/api/cms", "/api/suggest", "/api/refresh", "/api/settings",
                 "/api/ai/"),
@@ -342,7 +342,7 @@ FUNCTION_PATHS = {
 NAV_FN = {
     "dashboard": "dashboard", "tool": "dashboard", "opportunities": "dashboard",
     "priority": "dashboard", "sem": "seo", "seo": "seo", "seoengines": "seo",
-    "cms": "content", "ebooks": "content", "refresh": "content",
+    "rss": "seo", "cms": "content", "ebooks": "content", "refresh": "content",
     "funnel": "marketing", "marketing": "marketing", "emails": "email",
     "social": "social", "variants": "marketing", "segments": "marketing",
     "pricedrop": "marketing", "template": "marketing", "keys": "keys", "apikeys": "keys",
@@ -3283,9 +3283,10 @@ for (const id of ["me-name","me-pw","me-pw2"])
               ("/admin/priority", "💰 Prioritize", "priority"),
               ("/admin/sem", "🎯 SEM", "sem")]),
             ("Build",
-             [("/admin/seo", "🔍 SEO", "seo"),
-              ("/admin/seoengines", "🔎 Engines", "seoengines"),
-              ("/admin/cms", "🧩 Lead pages", "cms"),
+[("/admin/seo", "🔍 SEO", "seo"),
+               ("/admin/seoengines", "🔎 Engines", "seoengines"),
+               ("/admin/rss", "📡 RSS", "rss"),
+               ("/admin/cms", "🧩 Lead pages", "cms"),
               ("/admin/ebooks", "📕 Ebooks", "ebooks"),
               ("/admin/refresh", "📡 Refresh", "refresh")]),
             ("Market",
@@ -3697,6 +3698,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._admin_seo()
             if path == "/admin/seoengines":
                 return self._admin_seoengines(q)
+            if path == "/admin/rss":
+                return self._admin_rss(q)
             if path == "/admin/manual":
                 return self._admin_manual()
             if path == "/admin/manual.pdf":
@@ -4489,15 +4492,132 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             title = (" ".join(w.capitalize() for w in re.split(r"[^A-Za-z0-9]+",
                                                                 r["keyword"])
                               if w)) or r["keyword"]
+            # Every pin links back with a stable UTM so inbound clicks swap the
+            # affiliate session tag (pinterest is a paid source) and are grouped
+            # as source=pinterest in /admin/analytics. The UTM is deterministic,
+            # so the RSS guid (== link) stays stable for n8n dedup.
+            tagged = (base + "/n/" + kw + "?utm_source=pinterest&utm_medium=rss"
+                      "&utm_campaign=" + urllib.parse.quote(r["keyword"]))
             items.append({
                 "title": title,
-                "link": base + "/n/" + kw,
+                "link": tagged,
                 "description": title + " — the best sellers, compared and "
-                               "rated. Full guide: " + base + "/n/" + kw,
+                               "rated. Full guide: " + tagged,
                 "image": base + "/og/" + kw + ".png",
                 "pubdate": r["created_at"] or "",
             })
         return seo.render_rss(items)
+
+    def _feed_stats(self):
+        """RSS health shared by /admin/rss and /admin/analytics: total items,
+        how many carry an image enclosure, newest item pub date."""
+        n = 0
+        newest = ""
+        with _lock:
+            conn = _db()
+            rows = conn.execute(
+                "SELECT keyword, products, created_at FROM niches").fetchall()
+            conn.close()
+        for r in rows:
+            prods = (r["products"] or "").strip()
+            if not prods or prods in ("[]", "{}"):
+                continue
+            n += 1
+            if (r["created_at"] or "") > newest:
+                newest = r["created_at"] or ""
+        return {"items": len(seo.STATIC_PAGES) + n, "images": n, "newest": newest}
+
+    def _admin_rss(self, q):
+        """Admin page for the RSS 2.0 feed: status, the Pinterest + n8n posting
+        paths, and every niche that will become a pin (with its UTM-tagged link
+        so pin traffic is attributed back to the affiliate funnel)."""
+        feed = seo.BASE_URL.rstrip("/") + "/rss.xml"
+        st = self._feed_stats()
+        base = seo.BASE_URL.rstrip("/")
+        with _lock:
+            conn = _db()
+            pin_clicks = conn.execute(
+                "SELECT COUNT(*) c FROM clicks WHERE source IN ('pinterest','pin')"
+            ).fetchone()["c"]
+            nic_created = conn.execute(
+                "SELECT keyword, products, created_at FROM niches "
+                "ORDER BY created_at DESC").fetchall()
+            conn.close()
+        item_rows = []
+        for r in nic_created:
+            prods = (r["products"] or "").strip()
+            if not prods or prods in ("[]", "{}"):
+                continue
+            kw = seo._slugify(r["keyword"])
+            title = (" ".join(w.capitalize() for w in re.split(r"[^A-Za-z0-9]+",
+                                                                r["keyword"])
+                              if w)) or r["keyword"]
+            link = (base + "/n/" + kw + "?utm_source=pinterest&utm_medium=rss"
+                    "&utm_campaign=" + urllib.parse.quote(r["keyword"]))
+            item_rows.append(
+                "<tr><td>%s</td><td><code>%s</code></td><td>%s</td>"
+                "<td><a target='_blank' rel='noopener' href='%s'>png ↗</a></td></tr>"
+                % (seo._clean(title), seo._clean(link),
+                   seo._clean(r["created_at"] or "—"),
+                   base + "/og/" + kw + ".png"))
+            if len(item_rows) >= 40:
+                break
+        rows_html = "".join(item_rows) or \
+            "<tr><td colspan='4' class='hint'>No niches with products yet — pins appear as soon as picks land.</td></tr>"
+        newest = st["newest"] or "never"
+        body = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RSS feed — pstore</title><link rel="stylesheet" href="/style.css">
+<meta name="robots" content="noindex,nofollow">
+</head><body>
+<header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
+<div class="hero"><h1>RSS <span>feed.</span></h1>
+<p class="tagline">Every niche as a pin-ready item. Pinterest's native bulk importer reads this URL with no app approval; n8n can too.</p></div>
+{self._admin_nav('rss')}
+</header>
+<main>
+<section class="card"><h2>📡 Feed &amp; status</h2>
+<div class="row" style="align-items:stretch">
+  <div class="feature" style="flex:2.2"><h3><code style="font-size:15px">{seo._clean(feed)}</code></h3>
+  <p class="hint">public RSS 2.0 — <button class="btnline rss-copy" data-url="{seo._clean(feed)}">Copy URL</button></p></div>
+  <div class="feature"><h3>{st['items']}</h3><p class="hint">items in feed</p></div>
+  <div class="feature"><h3>{st['images']}</h3><p class="hint">with image enclosure</p></div>
+  <div class="feature"><h3>{pin_clicks}</h3><p class="hint">pinterest-source clicks</p></div>
+  <div class="feature"><h3>{seo._clean(newest)}</h3><p class="hint">newest item</p></div>
+</div></section>
+<section class="card"><h2>🎯 Where it lands &amp; how clicks are credited</h2>
+<p class="hint">Every item links back to its niche page with a stable
+<code>?utm_source=pinterest&amp;utm_medium=rss&amp;utm_campaign=&lt;slug&gt;</code>.
+When a pin is clicked the visitor arrives tagged: the server switches the page's
+Amazon affiliate tag (pinterest counts as a paid source) and each on-page click is
+reported as <code>source=pinterest</code> — grouped live on <a href="/admin/analytics">/admin/analytics</a>.
+The UTM is deterministic, so the RSS guid never changes and n8n's only-new dedup stays stable.</p></section>
+<section class="card"><h2>🛠 Two posting paths (pick one — never both)</h2>
+<div class="row" style="align-items:stretch">
+  <div class="feature"><h3>Native Pinterest importer</h3><p class="hint"><b>Live now</b> — no app approval. Settings → “Create Pins in bulk” → this URL, up to 200 pins/day, board <b>Deals</b>. Zero setup beyond what's done.</p></div>
+  <div class="feature"><h3>n8n workflow</h3><p class="hint">Off-box schedule + per-pin control. Ready-to-import JSON in <code>ops/n8n/</code> (community node <code>n8n-nodes-pin-interest</code>); needs your Pinterest dev-app approval (~7 days). <b>Remove the native importer first</b> or every niche gets pinned twice.</p></div>
+</div></section>
+<section class="card"><h2>🗂 Items that become pins (latest {len(item_rows)})</h2>
+<div class="table-wrap"><table class="plain"><thead><tr><th>Niche</th><th>Pin link</th><th>Added</th><th>Card image</th></tr></thead><tbody>
+{rows_html}
+</tbody></table></div></section>
+</main>
+<footer><p>The feed is served at <code>{seo._clean(feed)}</code> with <code>Cache-Control: max-age=3600</code>. Sitemap and XML sitemap auto-cover every new niche.</p></footer>
+{_TOTOP}
+<script>
+document.addEventListener("click", function (e) {{
+  var b = e.target.closest ? e.target.closest(".rss-copy") : null;
+  if (!b) return;
+  var ta = document.createElement("textarea");
+  ta.value = b.getAttribute("data-url") || "";
+  document.body.appendChild(ta); ta.select();
+  try {{ document.execCommand("copy"); b.textContent = "Copied ✓"; }}
+  catch (err) {{ b.textContent = "Copy: " + ta.value; }}
+  document.body.removeChild(ta);
+}});
+</script>
+</body></html>"""
+        return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
 
     def _landing(self):
         return seo.render_landing(self._all_niches())
@@ -11821,7 +11941,11 @@ AI status: {"<b>configured</b> (%s · %s)" % (seo._clean(_active), seo._clean(ai
             month_rows = conn.execute(
                 "SELECT month, orders, earnings FROM earnings_records "
                 "ORDER BY month DESC LIMIT 24").fetchall()
+            pin_clicks = conn.execute(
+                "SELECT COUNT(*) c FROM clicks WHERE source IN ('pinterest','pin')"
+            ).fetchone()["c"]
             conn.close()
+        feed_stats = self._feed_stats()
         # Earnings estimate from the recorded click volume + config, plus the
         # real orders/earnings logged straight from the Associates dashboard.
         est = earnings.estimate(total, "")
@@ -11901,6 +12025,14 @@ AI status: {"<b>configured</b> (%s · %s)" % (seo._clean(_active), seo._clean(ai
   <div class="feature"><h3>{views}</h3><p class="hint">page views (leads + site)</p></div>
   <div class="feature"><h3>{stats['active']}</h3><p class="hint">active subscribers</p></div>
   <div class="feature"><h3>{stats['emails_sent']}</h3><p class="hint">emails sent</p></div>
+</div></section>
+<section class="card"><h2>📡 RSS &amp; Pinterest pins</h2>
+<p class="hint">The <a href="/admin/rss">RSS feed</a> carries every niche with a stable UTM — pin clicks swap the affiliate tag and report as <code>source=pinterest</code>. Pick one posting path; never both.</p>
+<div class="row" style="align-items:stretch">
+  <div class="feature"><h3>{feed_stats['items']}</h3><p class="hint">feed items</p></div>
+  <div class="feature"><h3>{feed_stats['images']}</h3><p class="hint">with image enclosure</p></div>
+  <div class="feature"><h3>{pin_clicks}</h3><p class="hint">pinterest-source clicks</p></div>
+  <div class="feature"><h3>{seo._clean(feed_stats['newest'] or 'never')}</h3><p class="hint">newest feed item</p></div>
 </div></section>
 <section class="card"><h2>🔎 Console impressions &amp; clicks</h2>
 <p class="hint">Real search-console totals from Google Search Console, Bing Webmaster and Yandex Webmaster (whichever you've connected and synced). Your own referrer-attributed clicks sit alongside for context.</p>
