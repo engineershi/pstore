@@ -1530,6 +1530,15 @@ def _db():
                  "ON email_sends (campaign, subscriber_id, asin)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_email_sends_campaign "
                  "ON email_sends (campaign, subscriber_id)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS pricewatch (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT NOT NULL,
+        asin TEXT NOT NULL,
+        keyword TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+    )""")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pricewatch_dedup "
+                 "ON pricewatch (email, asin)")
     conn.execute("""CREATE TABLE IF NOT EXISTS outbox (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         spec TEXT NOT NULL,
@@ -1594,6 +1603,16 @@ def _db():
         pass
     try:
         conn.execute("ALTER TABLE sent_emails ADD COLUMN subject_variant INTEGER DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE subscribers ADD COLUMN ref_token TEXT DEFAULT ''")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE subscribers ADD COLUMN referred_by TEXT DEFAULT ''")
         conn.commit()
     except Exception:
         pass
@@ -3812,6 +3831,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._reset_post()
             if parsed.path == "/subscribe":
                 return self._subscribe()
+            if parsed.path == "/price-alert":
+                return self._price_alert()
             if parsed.path == "/api/track":
                 return self._track_click()
             if parsed.path == "/api/pageview":
@@ -3854,6 +3875,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._social_publish()
             if parsed.path == "/api/social/publish-all":
                 return self._social_publish_all()
+            if parsed.path == "/api/social/pint":
+                return self._social_pint_blitz()
             if parsed.path == "/api/social/schedule":
                 return self._social_schedule()
             if parsed.path == "/api/social/flush":
@@ -7155,6 +7178,35 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
         return self._send(200, {"ok": True, "niches": len(niches), "published": total,
                                 "native": native, "skipped": skipped, "per": per})
 
+    def _social_pint_blitz(self):
+        """Pin the newest niches: build + publish a Pinterest kit (with the shared
+        OG pin card) for the freshest niches that have products — the fastest
+        eyeballs for brand-new buyer pages. Dispatches native+webhook like any
+        other publish. Body: {limit?: n}."""
+        body = self._body()
+        try:
+            limit = max(1, min(int(body.get("limit") or 10), 50))
+        except (TypeError, ValueError):
+            limit = 10
+        niches = [n for n in self._all_niches() if n.get("products")]
+        niches.sort(key=lambda n: n.get("created_at") or "", reverse=True)
+        niches = niches[:limit]
+        published = native = skipped = 0
+        pined = []
+        for n in niches:
+            try:
+                data = self._social_publish_keyword(n["keyword"], "Pinterest")
+            except Exception:
+                data = None
+            if data is None:
+                skipped += 1
+                continue
+            published += data["published"]
+            native += data["native"]
+            pined.append(n["keyword"])
+        return self._send(200, {"ok": True, "published": published, "native": native,
+                                "skipped": skipped, "niches": pined})
+
     def _schedule_times(self, count, hours=24, now=None):
         """Spread `count` posts across the next `hours`, but snap each slot to a
         high-engagement window (peak-slot biasing) so a niche's batch lands when
@@ -7463,6 +7515,7 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
 <button class="warm" id="blitz">⚡ Launch blitz (publish ALL queued now)</button>
 <button class="btnline" id="flush">Flush due scheduled posts</button>
 <button class="btnline" id="puball">📣 Publish every niche</button>
+<button class="btnline" id="pint">📌 Pin fresh niches (Pinterest)</button>
 <button class="btnline" id="topics">Recycle long-tail topics → posts</button>
 </div>
 </div>
@@ -7524,6 +7577,16 @@ async function puball(){{
     : "Publish-all failed.";
   setTimeout(()=>location.reload(), 1500);
 }}
+async function pint(){{
+  $("flushout").textContent = "📌 Pinning fresh niches…";
+  const r = await fetch("/api/social/pint", {{method:"POST", headers:{{"Content-Type":"application/json"}},
+    body: JSON.stringify({{limit: 10}})}});
+  const d = await r.json().catch(()=>({{ok:false}}));
+  $("flushout").textContent = d && d.ok
+    ? "📌 Pinned " + d.published + " Pinterest kit(s) from " + d.niches.length + " fresh niche(s)" + (d.native ? " (" + d.native + " native)" : "") + (d.skipped ? ". " + d.skipped + " had no top pick." : "") + "."
+    : "Pin blitz failed.";
+  setTimeout(()=>location.reload(), 1500);
+}}
 async function recycle(){{
   $("flushout").textContent = "Building topic kits…";
   const r = await fetch("/api/social/topics", {{method:"POST", headers:{{"Content-Type":"application/json"}},
@@ -7559,6 +7622,7 @@ document.addEventListener("click", (e)=>{{
   if (e.target.closest("#flush")){{ flush(); return; }}
   if (e.target.closest("#blitz")){{ blitz(); return; }}
   if (e.target.closest("#puball")){{ puball(); return; }}
+  if (e.target.closest("#pint")){{ pint(); return; }}
   if (e.target.closest("#topics")){{ recycle(); return; }}
   if (e.target.closest("#ampbtn")){{ ampl(); return; }}
   if (e.target.closest("#amptog")){{ amptog(); return; }}
@@ -9576,6 +9640,7 @@ document.addEventListener("click", async function(e){{
         keyword = str(body.get("keyword") or "").strip()[:120]
         first_name = str(body.get("first_name") or "").strip()[:80]
         source = (str(body.get("source") or "niche").strip()[:40]) or "niche"
+        ref = str(body.get("ref") or "").strip()[:80]
         with _lock:
             conn = _db()
             row = conn.execute("SELECT id, unsubscribed FROM subscribers WHERE email=?",
@@ -9594,8 +9659,14 @@ document.addEventListener("click", async function(e){{
                 sid = cur.lastrowid
                 is_new = True
                 msg = "Done — you'll only hear from us when these picks change, and you can unsubscribe any time."
+            ref_token = self._ensure_ref_token(conn, sid)
+            if ref and ref != ref_token:
+                conn.execute(
+                    "UPDATE subscribers SET referred_by=? WHERE id=? "
+                    "AND (referred_by IS NULL OR referred_by='')", (ref[:80], sid))
             conn.commit()
             conn.close()
+        ref_slug = seo._slugify(keyword) if keyword else ""
         # Signed, short-lived token lets this just-opted-in visitor grab the
         # gated PDF lead magnet immediately (Cialdini's reciprocity in action).
         token = security.make_token("pdf:" + keyword, 10 * 60) if keyword else ""
@@ -9606,7 +9677,79 @@ document.addEventListener("click", async function(e){{
             threading.Thread(target=_send_welcome_email, args=(sid, keyword),
                              daemon=True).start()
         return self._send(200, {"ok": True, "id": sid, "message": msg,
-                                "download_token": token})
+                                "download_token": token,
+                                "referral_url": self._referral_url(ref_slug, ref_token)})
+
+    def _price_alert(self):
+        """Public price-watch signup from a product card: captures the email as a
+        subscriber (same list the sequence uses) AND records the ASIN+niche they
+        want to be emailed about, so a price drop auto-emails + resells them with
+        an affiliate link. Same device rate limit as /subscribe."""
+        key = "watch|" + security.client_key(self.headers, self._client_ip())
+        if not security.SUBSCRIBE_LIMITER.hit(key):
+            return self._send(429, {"ok": False, "error": "Too many signups from this device — try again later."})
+        body = self._body()
+        email = str(body.get("email") or "").strip().lower()
+        asin = str(body.get("asin") or "").strip().upper()[:40]
+        keyword = str(body.get("keyword") or "").strip()[:120]
+        if not _EMAIL_RE.match(email):
+            return self._send(200, {"ok": False, "error": "That email doesn't look right."})
+        if len(asin) < 6 or not asin.isalnum():
+            return self._send(200, {"ok": False, "error": "We couldn't find that product."})
+        first_name = str(body.get("first_name") or "").strip()[:80]
+        ref = str(body.get("ref") or "").strip()[:80]
+        with _lock:
+            conn = _db()
+            row = conn.execute("SELECT id, unsubscribed FROM subscribers WHERE email=?",
+                               (email,)).fetchone()
+            is_new = False
+            if row:
+                conn.execute(
+                    "UPDATE subscribers SET unsubscribed=0, confirmed=1, source='price-alert', "
+                    "keyword=?, first_name=? WHERE id=?",
+                    (keyword, first_name, row["id"]))
+                sid = row["id"]
+            else:
+                cur = conn.execute(
+                    "INSERT INTO subscribers (email, source, keyword, first_name, confirmed) "
+                    "VALUES (?, 'price-alert', ?, ?, 1)", (email, keyword, first_name))
+                sid = cur.lastrowid
+                is_new = True
+            conn.execute("INSERT OR IGNORE INTO pricewatch (email, asin, keyword) VALUES (?,?,?)",
+                         (email, asin, keyword))
+            ref_token = self._ensure_ref_token(conn, sid)
+            if ref and ref != ref_token:
+                conn.execute(
+                    "UPDATE subscribers SET referred_by=? WHERE id=? "
+                    "AND (referred_by IS NULL OR referred_by='')", (ref[:80], sid))
+            conn.commit()
+            conn.close()
+        if is_new and keyword:
+            threading.Thread(target=_send_welcome_email, args=(sid, keyword),
+                             daemon=True).start()
+        ref_slug = seo._slugify(keyword) if keyword else ""
+        return self._send(200, {"ok": True, "id": sid,
+                                "message": "You're on the list — we'll email you the moment this price drops. "
+                                           "Meanwhile, your free guide is ready below.",
+                                "download_token": security.make_token("pdf:" + keyword, 10 * 60)
+                                if keyword else "",
+                                "referral_url": self._referral_url(ref_slug, ref_token)})
+
+    def _ensure_ref_token(self, conn, sid):
+        row = conn.execute("SELECT ref_token FROM subscribers WHERE id=?", (sid,)).fetchone()
+        if row and row["ref_token"]:
+            return row["ref_token"]
+        tok = os.urandom(8).hex()
+        while conn.execute("SELECT 1 FROM subscribers WHERE ref_token=?", (tok,)).fetchone():
+            tok = os.urandom(8).hex()
+        conn.execute("UPDATE subscribers SET ref_token=? WHERE id=?", (tok, sid))
+        return tok
+
+    def _referral_url(self, slug, token):
+        if not slug or not token:
+            return ""
+        base = self._site_base() or mailer.site_base()
+        return "%s/lp/%s?ref=%s" % (base, slug, token)
 
     def _gated_pdf(self, q):
         """Public endpoint that serves the niche's PDF lead magnet:
@@ -10345,7 +10488,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                 if a:
                     asin_niche[a] = n["keyword"]
 
-        sent = candidates = already = errors = 0
+        sent = candidates = already = errors = watcher_emails = 0
         all_members = self._segment_members(keyword=kw_filter or None,
                                             segments_names=("hot", "converted"),
                                             limit=5000)
@@ -10370,9 +10513,64 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                 sent += 1
             else:
                 already += 1
+
+        # Price-watchers: everyone who clicked "Track this price" on a card
+        # wants to hear about THAT product specifically — a higher-intent email
+        # than the seat-belt HOT/CONVERTED blast, with its own affiliate CTA.
+        watchers = self._pricewatch_rows()
+        drop_asin = {d["asin"] for d in drops}
+        for w in watchers:
+            if sent + errors >= cap:
+                break
+            asin = w["asin"]
+            if asin not in drop_asin:
+                continue
+            if kw_filter and (w.get("keyword") or "").strip().lower() != kw_filter:
+                continue
+            sub = self._subscriber_by_email(w["email"])
+            if not sub:
+                continue
+            kw = sub["keyword"] or ""
+            d = {"asin": asin, "title": next((x["title"] for x in drops if x["asin"] == asin), asin),
+                 "old": next((x["old"] for x in drops if x["asin"] == asin), 0),
+                 "new": next((x["new"] for x in drops if x["asin"] == asin), 0),
+                 "drop": next((x["drop"] for x in drops if x["asin"] == asin), 0),
+                 "drop_pct": next((x["drop_pct"] for x in drops if x["asin"] == asin), 0)}
+            mail = pricedrop.drop_email([d], base_url=os.environ.get("PSTORE_URL", ""),
+                                        pick_links={asin: amazon.affiliate_url(asin)})
+            if not mail["subject"]:
+                continue
+            watcher_emails += 1
+            if self._dispatch_one_off("pricedrop:" + asin, sub, kw, asin,
+                                      mail["subject"], mail["text"]):
+                sent += 1
+            else:
+                already += 1
         return {"ok": True, "drops": drops, "candidates": candidates,
                 "sent": sent, "already_sent": already, "errors": errors,
-                "keyword": kw_filter or None}
+                "keyword": kw_filter or None, "watcher_emails": watcher_emails}
+
+    def _pricewatch_rows(self):
+        """Distinct watched (email, asin, keyword) rows, newest first."""
+        with _lock:
+            conn = _db()
+            rows = conn.execute(
+                "SELECT DISTINCT pw.email AS email, pw.asin AS asin, pw.keyword AS keyword "
+                "FROM pricewatch pw ORDER BY pw.id DESC").fetchall()
+            conn.close()
+        return [{"email": r["email"], "asin": r["asin"], "keyword": r["keyword"] or ""}
+                for r in rows]
+
+    def _subscriber_by_email(self, email):
+        with _lock:
+            conn = _db()
+            row = conn.execute(
+                "SELECT id, email, keyword, first_name FROM subscribers "
+                "WHERE email=? AND unsubscribed=0", (email,)).fetchone()
+            conn.close()
+        return {"id": row["id"], "email": row["email"],
+                "keyword": row["keyword"] or "", "first_name": row["first_name"] or ""} \
+            if row else None
 
     def _niche_items(self, keyword):
         """Product list for a saved niche keyword, or []."""
@@ -12267,6 +12465,18 @@ class _AutosendStub:
     def _dispatch_studio(self, spec, recipients, dry=False):
         return Handler._dispatch_studio(self, spec, recipients, dry)
 
+    def _segment_members(self, keyword=None, segments_names=("hot", "converted"), limit=1000):
+        return Handler._segment_members(self, keyword, segments_names, limit)
+
+    def _all_niches(self):
+        return Handler._all_niches(self)
+
+    def _pricewatch_rows(self):
+        return Handler._pricewatch_rows(self)
+
+    def _subscriber_by_email(self, email):
+        return Handler._subscriber_by_email(self, email)
+
 
 def _ingest_inbound(messages, mailbox="inbox"):
     """Store fetched inbound messages into mailbox_messages, deduped by
@@ -12370,10 +12580,20 @@ def _autosend_tick():
             "status": "error", "error": str(exc)[:200], "hours": cfg["hours"],
             "limit": cfg["limit"]}))
         return "error: %s" % exc
+    # Same daily slot also fires price-drop alerts captured via "Track this
+    # price" cards — highest-intent emails (someone watching a product wants
+    # the exact moment it's on sale). Best-effort, separate send budget.
+    alerts = 0
+    try:
+        res2 = Handler._pricedrop_send(stub)
+        alerts = ((res2 or {}).get("sent") or 0)
+    except Exception:
+        alerts = 0
     _set_setting(_AUTOSEND_LAST_KEY, marker)
     _set_setting(AUTOSEND_STATE_KEY, json.dumps({
         "status": "sent" if ok else "fail", "sent": sent, "errors": errors,
-        "hours": cfg["hours"], "limit": cfg["limit"], "last_run": marker}))
+        "hours": cfg["hours"], "limit": cfg["limit"], "last_run": marker,
+        "price_alerts": alerts}))
     return "sent" if ok else "fail"
 
 

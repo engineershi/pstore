@@ -199,6 +199,8 @@ By default pstore already generates SEO-ready pages with schema markup. Your job
 
 - The form collects **first name + email** (that's the `courier.js` form on every page).
 - The **first name is captured** so your emails read "Hi Jane," not "Hi there" — this dramatically lifts open rates.
+- **"🔔 Track price"** buttons on every review card capture the same email *and* register a price-watch: the moment that exact product drops, the daily pass emails the watcher a personal "price just dropped" alert with a tracked check-price link — a transactional email that captures a lead and sells in one step.
+- Every capture also shows a **referral link** ("share the guide, you both win"): the first friend who signs up through it credits the referrer once in the subscribers table.
 
 ```
    VISITOR on /n/air-fryer
@@ -300,6 +302,8 @@ One click generates a ready-to-post kit for X, Facebook, LinkedIn, Instagram, Pi
 ```
 
 Each post's clicks are tracked individually — you can see in `/admin/analytics` exactly which platform and post performs.
+
+For brand-new niches that Google hasn't indexed yet, hit **📌 Pin fresh niches (Pinterest)** on the bulk-publishing toolbar: it builds and publishes a Pinterest kit (with the share card) for the newest saved niches — the fastest way to put eyeballs on pages still invisible to search engines.
 
 **⚡ Launch a Social Blitz:** posts can be scheduled to future peak slots ("Schedule post kits"). **"Flush due scheduled posts"** pushes out only the ones that are due now (what the timer does on its own), but **"⚡ Launch blitz (publish ALL queued now)"** ignores the schedule and publishes every queued post across all platforms at once — the one-click "sell it now" move right before a launch, a promo or a deadline, so the funnel gets its whole social send immediately instead of trickling out.
 

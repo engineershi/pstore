@@ -287,6 +287,8 @@ My one-line take: it solves the problem, it's priced well{(' at ' + price) if pr
 
 👉 Take a peek: {url}
 {alt1}
+And if you're not ready yet — no pressure: we'll also email you the moment this pick's price drops, so you can grab it at the best number. No spam, just the deal.
+
 No strings, no code — just the link. If it's not your thing, hit delete.
 
 — {{your_name}}"""},

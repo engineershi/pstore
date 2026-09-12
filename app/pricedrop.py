@@ -194,21 +194,31 @@ def check(rows, fresh_prices, store=None, min_drop_pct=DEFAULT_MIN_DROP_PCT,
 
 
 # ------------------------------------------------------------------ email copy
-def drop_email(drops, base_url=""):
+def drop_email(drops, base_url="", pick_links=None):
     """Build a 'price dropped' email body + subject from a check() result.
-    Returns dict {subject, html, text, drops}."""
+    `pick_links` maps an ASIN to an affiliate/check-price URL — each drop gets
+    its own "Check price on Amazon" CTA (callers collapse them to a tracked
+    link at send time). Returns dict {subject, html, text, drops}."""
     if not drops:
         return {"subject": "", "html": "", "text": "", "drops": []}
     subject = "Price dropped on your picks \u2697\ufe0f"
     rows = []
+    text_rows = []
     for d in drops:
+        link = ((pick_links or {}).get(d.get("asin")) or "") or ""
         rows.append(
             '<li style="margin:6px 0"><strong>%s</strong> '
             '\u2014 was %s, now <span style="color:#b12704">%s</span> '
-            '(save %s / %.1f%% off)</li>'
+            '(save %s / %.1f%% off)%s</li>'
             % (_h(d.get("title") or d.get("asin")),
                _fmt(d.get("old")), _fmt(d.get("new")),
-               _fmt(d.get("drop")), d.get("drop_pct") or 0))
+               _fmt(d.get("drop")), d.get("drop_pct") or 0,
+               (' — <a href="%s" style="color:#b12704">check price</a>' % _h(link)) if link else ""))
+        text_rows.append(
+            "- %s: was %s, now %s (save %s / %.1f%% off)%s"
+            % (d.get("title") or d.get("asin"), _fmt(d.get("old")),
+               _fmt(d.get("new")), _fmt(d.get("drop")), d.get("drop_pct") or 0,
+               (" — check price: %s" % link) if link else ""))
     html = (
         '<div style="font-family:Helvetica,Arial,sans-serif;max-width:560px">'
         '<h2 style="margin:0 0 8px">\u2697\ufe0f A price just dropped</h2>'
@@ -219,11 +229,7 @@ def drop_email(drops, base_url=""):
         '<p style="color:#888;font-size:12px">You receive this because you asked '
         'to hear about deals. <a href="%s">Unsubscribe</a>.</p></div>'
         % ("".join(rows), _h(base_url)))
-    text = "A price just dropped!\n\n" + "\n".join(
-        "- %s: was %s, now %s (save %s / %.1f%% off)"
-        % (d.get("title") or d.get("asin"), _fmt(d.get("old")),
-           _fmt(d.get("new")), _fmt(d.get("drop")), d.get("drop_pct") or 0)
-        for d in drops)
+    text = "A price just dropped!\n\n" + "\n".join(text_rows)
     return {"subject": subject, "html": html, "text": text, "drops": drops}
 
 

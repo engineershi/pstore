@@ -249,6 +249,20 @@ def _chapters():
             "trickling out. 'Publish every niche' and 'Recycle long-tail topics' sit "
             "beside them as quieter secondary buttons, so the toolbar never crowds.")
         doc.paragraph(
+            "For brand-new buyer pages that are invisible to Google, hit 'Pin fresh "
+            "niches (Pinterest)': it builds and publishes a Pinterest kit with the "
+            "share card for the newest saved niches — the fastest way to put eyeballs "
+            "on pages search engines haven't indexed yet.")
+        doc.paragraph(
+            "Every review card on a live page carries a 'Track price' button. A "
+            "visitor who clicks it becomes a subscriber AND a price-watcher; the "
+            "moment that product genuinely drops, the daily email pass sends them a "
+            "personal 'price just dropped' alert with a tracked check-price link — a "
+            "transactional email that both captures a lead and sells, in one step. "
+            "Each capture also mints a personal referral link on the lead page "
+            "('share the guide, you both win'), and the first capture ever credits "
+            "the referrer in the subscribers table.")
+        doc.paragraph(
             "Marketing boosts on the Workbench (/tool) mint a real, UTM-tracked "
             "campaign per promo angle: Run persists it, folds in the SEM long-tail "
             "phrases, warms the lead-magnet PDF and pings IndexNow; the Social page "
@@ -671,6 +685,7 @@ def render_admin_manual(nav_html, totop_html):
 
 <h3 id="s4">7 · Step 4 — Send the 5-part buyer sequence</h3>
 <p>Every subscriber enters a 5-email sequence from the top pick: hook → social proof → objections → soft urgency → follow-up + review. Each carries your tagged Amazon link.</p>
+<p>Review cards add a <b>“Track price”</b> button: a click turns a visitor into a subscriber <i>and</i> a price-watcher. The daily email pass then sends watchers a personal “price just dropped” alert with a tracked check-price link the moment their product actually goes on sale — a transactional capture that sells at the same time. Every capture also shows a <b>referral link</b> (“share the guide, you both win”), and the referrer is credited once in the subscribers table.</p>
 <p><a class="tooltag" href="/admin/emails">📨 Email Studio</a> is the one place to compose and send mail: pick any niche, segment (hot/warm/cold/converted/inactive) or a typed address list, choose a sequence step, converted follow-up, re-engage or a fully custom subject + body, then deliver <b>now</b> or <b>schedule a UTC slot</b>. A live preview shows exactly what lands in the inbox.</p>
 <ul class="step-list">
 <li>Pick recipients with the checkboxes, or type any address(es) — one per line; the count updates live.</li>
@@ -680,7 +695,7 @@ def render_admin_manual(nav_html, totop_html):
 </ul>
 
 <h3 id="s5">8 · Step 5-6 — Ebook lead magnet + social posts + boosts</h3>
-<p>The <a class="tooltag" href="/admin/ebooks">📕 Ebooks</a> page turns any niche into a designed PDF in one click. Free AI providers are built in (OpenCode, Mistral, NVIDIA); add an OpenAI key for extra polish. The <a class="tooltag" href="/admin/social">📣 Social</a> page generates a ready-to-post kit for X, Facebook, LinkedIn, Instagram, Pinterest and Threads — each with a <b>tracked link</b>, so every post's clicks are counted individually in <a class="tooltag" href="/admin/analytics">📊 Analytics</a>.</p>
+<p>The <a class="tooltag" href="/admin/ebooks">📕 Ebooks</a> page turns any niche into a designed PDF in one click. Free AI providers are built in (OpenCode, Mistral, NVIDIA); add an OpenAI key for extra polish. The <a class="tooltag" href="/admin/social">📣 Social</a> page generates a ready-to-post kit for X, Facebook, LinkedIn, Instagram, Pinterest and Threads — each with a <b>tracked link</b>, so every post's clicks are counted individually in <a class="tooltag" href="/admin/analytics">📊 Analytics</a>.<br><b>Pin fresh niches (Pinterest)</b>: one click builds + publishes a Pinterest kit with the share card for the newest saved niches — fast eyeballs for pages the search engines haven't indexed yet.</p>
 <p>The <a class="tooltag" href="/tool">🛠 Workbench</a> <b>Marketing boosts</b> panel mints a real, UTM-tracked campaign per promo angle (<b>▶ Run</b> persists it, folds in SEM long-tail phrases, warms the lead-magnet PDF and pings IndexNow; <b>⟶ Social page</b> publishes one as a live, attributed Boost post). Each boost keeps a stable link so its clicks aggregate over time.</p>
 
 <h3 id="s6">9 · Step 7-8 — Launch + keep data fresh</h3>

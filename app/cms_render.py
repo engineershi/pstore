@@ -389,9 +389,10 @@ def _section_html(section, ctx):
 
     if stype == "email_gate":
         headline = section.get("headline", "Get the free guide")
-        sub = section.get("subheadline", "")
+        sub = section.get("subheadline", "The picks real buyers keep choosing — plus a "
+                                          "price-drop alert the moment any of them goes on sale.")
         btn = section.get("button_text", "Send me the guide →")
-        privacy = section.get("privacy_text", "")
+        privacy = section.get("privacy_text", "No spam. Pricedrop alerts only when a pick's price changes.")
         pdf_head = section.get("pdf_headline", "Your guide is ready!")
         pdf_sub = section.get("pdf_subheadline", "")
         pdf_gated = bool((ctx.get("settings") or {}).get("pdf_gated", True))

@@ -644,6 +644,8 @@ body.show-sticky .sticky-cta{{display:flex;}}
 .sticky-cta .sticky-line{{margin:0;color:#dfe3ea;font-size:13px;line-height:1.3;flex:1 1 auto;min-width:0;white-space:normal;overflow-wrap:anywhere;}}
 .sticky-cta .sticky-line b{{color:#fff;}}
 .sticky-cta .cta{{margin:0;color:#fff;text-decoration:none;font-weight:700;padding:12px 18px;border-radius:8px;white-space:nowrap;}}
+.sticky-cta .sticky-actions{{display:flex;gap:8px;flex:0 0 auto;}}
+.sticky-cta .sticky-actions .cta:first-child{{background:#1d2127;border:1px solid #2a2e36;color:#cfd6e0;}}
 .urgency{{font-size:14px;}}
 </style>
 <script>
@@ -661,11 +663,18 @@ window.addEventListener("scroll",function(){{clearTimeout(t);t=setTimeout(on,120
 window.addEventListener("load",on);on();
 /* exit-intent: cursor leaving the top of the viewport nudges the CTA even pre-scroll */
 document.documentElement.addEventListener("mouseout",function(e){{
-if(s&&!e.relatedTarget&&(e.clientY||0)<=0&&!document.body.classList.contains("show-sticky")){{show();}}
+if(s&&!e.relatedTarget&&(e.clientY||0)<=0&&!document.body.classList.contains("show-sticky")){{
+show();
+if(!document.body.getAttribute("data-opted")){{
+var o=document.querySelector("form.courier");
+if(o){{o.scrollIntoView({{behavior:"smooth",block:"center"}});
+var f=o.querySelector("[name=email]");if(f)setTimeout(function(){{f.focus();}},500);}}
+}}
+}}
 }});
 }})();
 </script>
-{optin_html(keyword, "niche")}
+{optin_html(keyword, "niche", anchor="courier")}
 <script src="/courier.js" defer></script>
 <script src="/table-flow.js" defer></script>
 </main>

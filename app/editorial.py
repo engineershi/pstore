@@ -326,8 +326,10 @@ def sticky_cta_html(keyword, best):
         lbl += " · %s" % price
     return ('<div class="sticky-cta" data-niche="%s" data-source="niche">'
             '<p class="sticky-line">Our #1 pick for <b>%s</b></p>'
+            '<div class="sticky-actions">'
+            '<a class="cta" href="#courier" data-ev="sticky-guide">Free guide ↓</a>'
             '<a class="cta warm" href="%s" data-beacon="sticky" data-ev="sticky" data-asin="%s">%s</a>'
-            '</div>' % (
+            '</div></div>' % (
                 _clean(_slug(keyword)), _clean(title)[:70],
                 url, _clean(asin), _clean(lbl)))
 
@@ -346,6 +348,14 @@ def pick_html(keyword, item, idx, items):
         label = "Check price on Amazon" + (" — %s" % price if price else "")
         cta = '<a class="btn" href="%s" data-asin="%s" target="_blank" rel="nofollow sponsored noopener">%s</a>' \
               % (_clean(_aff(item)), _clean(item.get("asin") or ""), label)
+    watch = ""
+    if _aff(item) and item.get("price") is not None:
+        watch = ('<button type="button" class="watch-price" data-watch-asin="%s" '
+                 'data-watch-keyword="%s" style="margin-top:10px;display:inline-block;'
+                 'border:1px solid #d0d4dc;background:#f7f8fa;color:#23262e;padding:9px 14px;'
+                 'border-radius:8px;font-weight:600;cursor:pointer;font-size:12.5px">'
+                 '\U0001f514 Track price — email me when it drops</button>'
+                 % (_clean(item.get("asin") or ""), _clean(keyword)))
     return ('<div class="pick%s">'
             '<div class="pick-head"><span class="rank">#%d</span>'
             '<h3>%s</h3><span class="badge">%s</span></div>'
@@ -353,10 +363,10 @@ def pick_html(keyword, item, idx, items):
             '<p class="why">%s</p>'
             '<div class="pilo"><div><h4>Good to know</h4><ul class="pros">%s</ul></div>'
             '<div><h4>Watch out</h4><ul class="cons">%s</ul></div></div>'
-            '<p class="starsline">%s %s</p>%s</div>'
+            '<p class="starsline">%s %s</p>%s%s</div>'
             % (" top" if idx == 0 else "", idx + 1, _clean(_display(item)), badge,
                _clean(quick_take(item, items)), _clean(why), pros, cons,
-               stars, reviews, cta))
+               stars, reviews, cta, watch))
 
 
 def upsell_block(items, keyword=""):

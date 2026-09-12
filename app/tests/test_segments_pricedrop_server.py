@@ -113,6 +113,8 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
             conn.execute("DELETE FROM email_events")
             conn.execute("DELETE FROM clicks")
             conn.execute("DELETE FROM niches")
+            conn.execute("DELETE FROM pricewatch")
+            conn.execute("DELETE FROM email_sends")
             conn.commit()
             conn.close()
 
@@ -272,6 +274,115 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
         data = json.loads(body)
         self.assertEqual(data["ok"], True)
         self.assertIn("drops", data)
+
+    def test_price_alert_captures_watcher_and_referral(self):
+        """'Track this price' card converts a visitor into a subscriber AND a
+        pricewatch row; the first capture credits the referrer once."""
+        self._seed()
+        st, ct, body = self._raw("/price-alert", method="POST",
+                                 body=json.dumps({"email": "watchy@x.com",
+                                                  "asin": "B012345678",
+                                                  "keyword": "keto snacks",
+                                                  "ref": "abc123"}))
+        self.assertEqual(st, 200)
+        d = json.loads(body)
+        self.assertTrue(d["ok"], d)
+        self.assertIn("/lp/keto-snacks?ref=", d.get("referral_url") or "")
+        self.assertTrue(d.get("download_token"))
+        with server._lock:
+            conn = server._db()
+            sub = conn.execute("SELECT id, ref_token, referred_by FROM subscribers "
+                               "WHERE email='watchy@x.com'").fetchone()
+            watch = conn.execute("SELECT COUNT(*) AS c FROM pricewatch "
+                                 "WHERE email='watchy@x.com' AND asin='B012345678'").fetchone()
+            conn.close()
+        self.assertIsNotNone(sub)
+        self.assertEqual(sub["referred_by"], "abc123")
+        self.assertTrue(sub["ref_token"])
+        self.assertEqual(watch["c"], 1)
+        # re-watching the same product never duplicates the watch row
+        st2, _, body2 = self._raw("/price-alert", method="POST",
+                                  body=json.dumps({"email": "watchy@x.com",
+                                                   "asin": "B012345678",
+                                                   "keyword": "keto snacks"}))
+        d2 = json.loads(body2)
+        self.assertTrue(d2["ok"])
+        with server._lock:
+            conn = server._db()
+            c = conn.execute("SELECT COUNT(*) AS c FROM pricewatch "
+                             "WHERE email='watchy@x.com'").fetchone()
+            referred = conn.execute("SELECT referred_by FROM subscribers "
+                                    "WHERE email='watchy@x.com'").fetchone()
+            conn.close()
+        self.assertEqual(c["c"], 1)
+        self.assertEqual(referred["referred_by"], "abc123")
+
+    def test_pricedrop_send_fans_out_to_price_watchers(self):
+        """A price-watcher (hot segment member or not) gets their own drop alert
+        with a tracked check-price CTA, deduped to one per (watcher, ASIN)."""
+        self._seed()
+        with server._lock:
+            conn = server._db()
+            conn.execute(
+                "INSERT INTO subscribers (email, keyword, confirmed, unsubscribed, sent_index) "
+                "VALUES (?,?,1,0,0)", ("watchy@x.com", "keto snacks"))
+            conn.execute("INSERT INTO pricewatch (email, asin, keyword) "
+                         "VALUES ('watchy@x.com','B012345678','keto snacks')")
+            conn.execute("DELETE FROM email_sends")
+            conn.commit()
+            conn.close()
+        server.Handler._price_store(None).set_baseline("B012345678", 19.99)
+        saved_search = amazon.search
+        saved_send = mailer._send
+        saved_smtp = (mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD)
+        mailer.SMTP_HOST = "smtp.test.local"
+        mailer.SMTP_USER = "x@x"
+        mailer.SMTP_PASSWORD = "pw"
+        captured = []
+        amazon.search = lambda asin, top=1: (
+            [{"asin": asin, "title": "Keto Gummies", "price": 9.99}], "stub")
+        mailer._send = lambda subject, body, to, attachments=None, pixel_url=None, **k: (
+            captured.append({"to": to, "subject": subject, "body": body}) or True)
+        try:
+            st, ct, body = self._raw("/api/pricedrop/send", method="POST",
+                                     body=b"{}", cookie=self.cookie)
+            self.assertEqual(st, 200)
+            data = json.loads(body)
+            self.assertTrue(data["ok"], data)
+            self.assertGreaterEqual(len(data["drops"]), 1)
+            self.assertEqual(data["watcher_emails"], 1)
+            hit = [c for c in captured if c["to"] == "watchy@x.com"]
+            self.assertEqual(len(hit), 1)
+            self.assertIn("drop", hit[0]["subject"].lower())
+            self.assertIn("check price", hit[0]["body"].lower())
+        finally:
+            amazon.search = saved_search
+            mailer._send = saved_send
+            mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD = saved_smtp
+            with server._lock:
+                conn = server._db()
+                conn.execute("DELETE FROM email_sends")
+                conn.close()
+
+    def test_pint_blitz_publishes_newest_niche_pinterest_kit(self):
+        """The one-click Pinterest blitz builds + publishes a Pinterest kit for
+        the newest saved niche with products and flips its social_post row to
+        published."""
+        self._seed()
+        st, ct, body = self._raw("/api/social/pint", method="POST",
+                                 body=b'{"limit": 5}', cookie=self.cookie)
+        self.assertEqual(st, 200)
+        d = json.loads(body)
+        self.assertTrue(d["ok"], d)
+        self.assertTrue(d["published"] >= 1, d)
+        self.assertIn("keto snacks", d["niches"])
+        with server._lock:
+            conn = server._db()
+            row = conn.execute("SELECT platform, status FROM social_posts "
+                               "WHERE lower(slug)='keto-snacks' AND platform='Pinterest'").fetchone()
+            conn.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["status"], "published")
 
     def test_sequence_send_branches_converted_to_upsell(self):
         """Segment-aware sequence: a lead who clicked a product ASIN (hot@x in
