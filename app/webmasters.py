@@ -509,10 +509,14 @@ def bing_add_site(key, url):
 
 
 def bing_submit_sitemap(key, url, sitemap=None):
+    """Submit a sitemap feed to Bing. The JSON API's sitemap method is
+    SubmitFeed (`siteUrl` + `feedUrl`); `/SubmitSitemap` does not exist on
+    the JSON protocol and 404s. Success returns HTTP 200 with an empty body
+    (or `{"d": null}`)."""
     sitemap = sitemap or url.rstrip("/") + "/sitemap.xml"
-    return _req("POST", _bing_url("/SubmitSitemap", key),
+    return _req("POST", _bing_url("/SubmitFeed", key),
                 _hdr(WebmasterAPI=key),
-                {"siteUrl": url, "sitemapUrl": sitemap})
+                {"siteUrl": url, "feedUrl": sitemap})
 
 
 def bing_stats(key, url, days=28):
@@ -551,23 +555,39 @@ def _strip_site_url(v):
 
 def bing_user_sites(key):
     """Sites registered to a Bing Webmaster API key. Also doubles as the
-    cheapest key-liveliness check (GetUserSites). Returns
-    (ok, {"sites": [...], "registered": bool})."""
+    cheapest key-liveliness check (GetUserSites). GetUserSites returns each
+    site as a Site object dict (`Url`, `AuthenticationCode`,
+    `DnsVerificationCode`, `IsVerified`), so we accept both dicts and plain
+    strings. Returns (ok, {"sites": [...], "registered": bool,
+    "verified": bool})."""
     if not key:
-        return False, {"error": "bing API key not set", "sites": [], "registered": False}
+        return False, {"error": "bing API key not set", "sites": [],
+                       "registered": False, "verified": False}
     status, data = _req("GET", _bing_url("/GetUserSites", key),
                         _hdr(WebmasterAPI=key))
     if status != 200:
-        return False, {"error": str(data)[:200], "sites": [], "registered": False}
+        return False, {"error": str(data)[:200], "sites": [],
+                       "registered": False, "verified": False}
     if isinstance(data, dict):  # JSON-fragment wrapper
         inner = data.get("d")
         data = inner if isinstance(inner, list) else []
     if not isinstance(data, list):
         return False, {"error": "unexpected GetUserSites response", "sites": [],
-                       "registered": False}
-    sites = {_strip_site_url(v) for v in data if isinstance(v, str)}
+                       "registered": False, "verified": False}
+    sites = set()
+    all_verified = True
+    for v in data:
+        if isinstance(v, str):
+            sites.add(_strip_site_url(v))
+        elif isinstance(v, dict):
+            u = v.get("Url") or v.get("url")
+            if u:
+                sites.add(_strip_site_url(u))
+            if v.get("IsVerified") is False:
+                all_verified = False
     return True, {"sites": sorted(sites),
-                  "registered": _strip_site_url(site_url()) in sites}
+                  "registered": _strip_site_url(site_url()) in sites,
+                  "verified": bool(sites) and all_verified}
 
 
 def bing_submit_url(key, url, page=None):

@@ -52,7 +52,7 @@ class FakeWm:
             self._saved
 
     def _req(self, method, url, headers=None, body=None, timeout=25):
-        self.calls.append((method, url))
+        self.calls.append((method, url, body))
         if "oauth2.googleapis.com/token" in url:
             return 200, dict(GSC_TOK)
         if "oauth.yandex.ru/token" in url:
@@ -96,8 +96,17 @@ class FakeWm:
         if "GetKeywordStats" in url:
             return 200, [{"Query": "keto", "Clicks": 3, "Impressions": 90,
                           "Position": 2.5, "MaxPosition": 1}]
-        if "SubmitSitemap" in url:
-            return 200, {"d": "ok"}
+        if "SubmitFeed" in url:
+            return 200, {}
+        if "GetUserSites" in url:
+            return 200, {"d": [{
+                "__type": "Site:#Microsoft.Bing.Webmaster.Api",
+                "AuthenticationCode": "ED01349E7C980956FE9C55F554DA7600",
+                "DnsVerificationCode": "abc.pstore-gxbv.onrender.com",
+                "IsVerified": False,
+                "Url": "https://pstore-gxbv.onrender.com/"}]}
+        if "AddSite" in url and "?apikey=" in url:
+            return 200, {"d": None}
         if url.endswith("/user/"):
             return 200, {"user_id": "uid-1"}
         if url.endswith("/hosts/") and method == "POST":
@@ -383,8 +392,20 @@ class TestWebmastersClients(unittest.TestCase):
         s, d = webmasters.bing_submit_sitemap(
             "bing-key-test", "https://pstore-gxbv.onrender.com")
         self.assertEqual(s, 200)
-        calls = [c for c in self.wm.calls if "SubmitSitemap" in c[1]]
+        calls = [c for c in self.wm.calls if "SubmitFeed" in c[1]]
         self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "POST")
+        body = calls[0][2] or {}
+        self.assertEqual(body.get("siteUrl"), "https://pstore-gxbv.onrender.com")
+        self.assertTrue(body.get("feedUrl", "").endswith("/sitemap.xml"))
+        self.assertNotIn("SubmitSitemap", calls[0][1])
+
+    def test_bing_user_sites_parses_site_dicts(self):
+        ok, data = webmasters.bing_user_sites("bing-key-test")
+        self.assertTrue(ok)
+        self.assertEqual(data["sites"], ["pstore-gxbv.onrender.com"])
+        self.assertTrue(data["registered"])
+        self.assertFalse(data["verified"])
 
     def test_yandex_auth_url(self):
         url = webmasters.yandex_auth_url("y-st")
