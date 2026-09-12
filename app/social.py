@@ -15,6 +15,7 @@ Publishing is kept honest and pluggable:
                   fires for each published post, so Zapier/Make/browser tools
                   (or a future native API) can post it for real.
 """
+import math
 import re
 import secrets
 import urllib.parse
@@ -238,25 +239,42 @@ def _hashtag(s):
 def og_svg(slug, keyword, title, stars, reviews):
     """Small share-preview card (SVG, stdlib-only) used as og:image/twitter:image."""
     kw = html_esc(keyword) or "Niche pick"
-    t = html_esc(title or "Best picks, ranked")
-    pr = ("%.1f★" % stars) if stars else "Top rated"
+    t = html_esc(title or "Best picks, ranked fresh")
+    pr = ("%.1f" % float(stars)) if stars else "Top rated"
     if stars and isinstance(reviews, (int, float)):
-        pr += " · %d reviews" % reviews
+        pr += " · %d reviews" % int(reviews)
     tr = t if len(t) <= 34 else t[:33] + "…"
     kwl = kw if len(kw) <= 26 else kw[:25] + "…"
     return f"""<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
-<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-<stop offset="0" stop-color="#ff6b2c"/><stop offset="1" stop-color="#7c5cff"/>
-</linearGradient></defs>
-<rect width="1200" height="630" fill="url(#g)"/>
-<text x="64" y="120" font-family="Helvetica,Arial,sans-serif" font-size="44" font-weight="700"
-  fill="rgba(255,255,255,.85)">{kwl} · ranked</text>
-<text x="64" y="300" font-family="Helvetica,Arial,sans-serif" font-size="72" font-weight="800"
-  fill="#ffffff">{tr}</text>
-<circle cx="64" cy="430" r="46" fill="#ffffff" opacity="0.18"/>
-<path d="M64 446 l16 16 l30 -30" stroke="#ffffff" stroke-width="12" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-<text x="132" y="446" font-family="Helvetica,Arial,sans-serif" font-size="38" font-weight="700" fill="#ffffff">{pr}</text>
-<text x="64" y="552" font-family="Helvetica,Arial,sans-serif" font-size="30" font-weight="600" fill="rgba(255,255,255,.85)">pstore → full list + live prices</text>
+ <defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="0.45" y2="1">
+   <stop offset="0" stop-color="#0D1A33"/><stop offset="1" stop-color="#24395E"/>
+  </linearGradient>
+  <radialGradient id="w" cx="0.18" cy="0.22" r="0.95">
+   <stop offset="0" stop-color="#FFB060" stop-opacity="0.32"/>
+   <stop offset="1" stop-color="#FFB060" stop-opacity="0"/>
+  </radialGradient>
+  <radialGradient id="t" cx="0.84" cy="0.88" r="0.95">
+   <stop offset="0" stop-color="#56CCFF" stop-opacity="0.25"/>
+   <stop offset="1" stop-color="#56CCFF" stop-opacity="0"/>
+  </radialGradient>
+ </defs>
+ <rect width="1200" height="630" fill="url(#bg)"/>
+ <rect width="1200" height="630" fill="url(#w)"/>
+ <rect width="1200" height="630" fill="url(#t)"/>
+ <circle cx="86" cy="76" r="6" fill="#FFBA6A"/>
+ <text x="116" y="84" font-family="Helvetica,Arial,sans-serif" font-size="32" font-weight="700" fill="rgba(203,221,252,0.95)" letter-spacing="2">PSTORE</text>
+ <text x="96" y="156" font-family="Helvetica,Arial,sans-serif" font-size="44" font-weight="800" fill="#FFBA6A" letter-spacing="1">{kwl}</text>
+ <text x="96" y="280" font-family="Helvetica,Arial,sans-serif" font-size="72" font-weight="800" fill="#F7FAFF">{tr}</text>
+ <g fill="#FFBA6A"><text x="96" y="420" font-size="64">★★★</text></g>
+ <text x="330" y="416" font-family="Helvetica,Arial,sans-serif" font-size="40" font-weight="700" fill="#DAE5FA">{html_esc(pr)}</text>
+ <line x1="100" y1="470" x2="1100" y2="470" stroke="rgba(255,255,255,.18)" stroke-width="6" stroke-dasharray="2 22" stroke-linecap="round"/>
+ <rect x="96" y="498" width="610" height="80" rx="26" fill="#FFBB74"/>
+ <rect x="104" y="506" width="594" height="64" rx="22" fill="#FFBA6A"/>
+ <text x="148" y="556" font-family="Helvetica,Arial,sans-serif" font-size="44" font-weight="900" fill="#182540">FULL LIST + PRICES</text>
+ <path d="M640 538 h34 m-14 -13 l14 13 l-14 13" stroke="#182540" stroke-width="7" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+ <circle cx="822" cy="544" r="4" fill="#50D99F"/>
+ <text x="846" y="556" font-family="Helvetica,Arial,sans-serif" font-size="28" font-weight="600" fill="rgba(174,194,228,0.95)" letter-spacing="1">RANKED FRESH</text>
 </svg>""".encode("utf-8")
 
 
@@ -273,7 +291,6 @@ def html_esc(s):
 # ----------------------------------------------------------------------------
 
 _CANVAS = (1200, 630)
-_COLOR_GRAD = ((255, 107, 44), (124, 92, 255))  # top -> bottom (matches SVG gradient)
 
 
 def _png_encode(width, height, rgb_rows):
@@ -285,7 +302,7 @@ def _png_encode(width, height, rgb_rows):
                 + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
     ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
     scanlines = b"".join(b"\x00" + bytes(rgb) for rgb in rgb_rows)
-    return (sig + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(scanlines, 6))
+    return (sig + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(scanlines, 2))
             + chunk(b"IEND", b""))
 
 
@@ -357,10 +374,11 @@ _SUBST = {"\u00b7": ".", "\u2026": "...", "\u2192": ">", "\u2605": "*",
           "\ufffc": " "}  # non-breaking / object replacements stripped below
 
 
-def _raster_text(s, x, y, scale):
+def _raster_text(s, x, y, scale, gap=0):
     """Pixel positions (set of (x, y)) for the uppercase text `s` drawn at
     origin (x, y) with the built-in 5x7 font scaled `scale`x. Non-ASCII maps
-    through _SUBST, then onto the font (uppercase fallback), else a space."""
+    through _SUBST, then onto the font (uppercase fallback), else a space.
+    `gap` adds extra pixels of letter-spacing for a calmer, premium look."""
 
     def _rows(ch):
         if ch in _SUBST:
@@ -374,7 +392,7 @@ def _raster_text(s, x, y, scale):
             return None
         return _FONT[" "]
 
-    advance = 6 * scale + 1
+    advance = 6 * scale + 1 + gap
     pts = set()
     xx, yy = x, y
     for raw in s:
@@ -394,87 +412,305 @@ def _raster_text(s, x, y, scale):
     return pts
 
 
-def og_png(slug, keyword, title, stars, reviews):
-    """Raster 1200x630 share card — same story as og_svg but a real PNG so
-    Pinterest/Twitter/Facebook render it. Pure stdlib (zlib + struct)."""
-    W, H = _CANVAS
-    t0, t1 = _COLOR_GRAD
-    img = bytearray(W * H * 3)
-    for y in range(H):
-        t = y / (H - 1)
-        r = int(t0[0] + (t1[0] - t0[0]) * t)
-        g = int(t0[1] + (t1[1] - t0[1]) * t)
-        b = int(t0[2] + (t1[2] - t0[2]) * t)
-        img[y * W * 3:(y + 1) * W * 3] = bytes((r, g, b)) * W
+# ----------------------------------------------------------------------------
+# Card design system — calm, smooth, trustworthy: a deep navy canvas with two
+# soft light glows (amber + teal), gold accents and a single clear gold call
+# to action. Every niche card shares one pre-rendered background canvas, so
+# warm-up of hundreds of cards is a memcpy + label pass, not a full re-draw.
+# ----------------------------------------------------------------------------
 
-    def _stamp(pts, rgb):
+_GRAD_CARD = ((13, 26, 48), (36, 58, 102))  # calm navy, top -> bottom
+_GOLD = (255, 186, 106)
+_WHITE = (247, 250, 255)
+_GOLD_SOFT = (255, 168, 74)
+_INK = (24, 37, 64)                          # navy text on the gold button
+_CREAM = (203, 221, 252)
+_MUTED = (174, 194, 228)
+_BODY = (218, 229, 250)
+_LINE = (90, 116, 162)
+_GREEN = (80, 217, 159)
+
+
+def _blend(img, W, H, x, y, rgb, a=1.0):
+    i = (y * W + x) * 3
+    img[i] = int(img[i] + (rgb[0] - img[i]) * a)
+    img[i + 1] = int(img[i + 1] + (rgb[1] - img[i + 1]) * a)
+    img[i + 2] = int(img[i + 2] + (rgb[2] - img[i + 2]) * a)
+
+
+def _round_run(x0, y0, x1, y1, r, y):
+    """Inclusive (xa, xb) x-span of the rounded rect at row y."""
+    cy = y0 + r
+    if y > y1 - r:
+        cy = y1 - r
+    dy = y - cy
+    d = r * r - dy * dy
+    dx = int(math.sqrt(d)) if d > 0 else 0
+    xa = max(x0, x0 + r - dx)
+    xb = min(x1, x1 - r + dx)
+    return (xa, xb)
+
+
+def _fill_round_rect(img, W, H, x0, y0, x1, y1, r, rgb, a=1.0):
+    """Rounded rect painted as horizontal runs (fast bytearray slices)."""
+    if a >= 0.999:
+        for y in range(y0, y1 + 1):
+            xa, xb = _round_run(x0, y0, x1, y1, r, y)
+            if xa > xb:
+                continue
+            o = y * W * 3 + xa * 3
+            img[o:o + (xb - xa + 1) * 3] = bytes(rgb) * (xb - xa + 1)
+        return
+    for y in range(y0, y1 + 1):
+        xa, xb = _round_run(x0, y0, x1, y1, r, y)
+        o = y * W * 3 + xa * 3
+        for _ in range(xa, xb + 1):
+            img[o] = int(img[o] + (rgb[0] - img[o]) * a)
+            img[o + 1] = int(img[o + 1] + (rgb[1] - img[o + 1]) * a)
+            img[o + 2] = int(img[o + 2] + (rgb[2] - img[o + 2]) * a)
+            o += 3
+
+
+def _ring_round_rect(img, W, H, x0, y0, x1, y1, r, rgb, a=1.0, w=2):
+    ir = max(0, r - w)
+    for y in range(y0, y1 + 1):
+        oxa, oxb = _round_run(x0, y0, x1, y1, r, y)
+        ixa, ixb = _round_run(x0 + w, y0 + w, x1 - w, y1 - w, ir, y)
+        for x in range(oxa, ixa):
+            o = y * W * 3 + x * 3
+            img[o] = int(img[o] + (rgb[0] - img[o]) * a)
+            img[o + 1] = int(img[o + 1] + (rgb[1] - img[o + 1]) * a)
+            img[o + 2] = int(img[o + 2] + (rgb[2] - img[o + 2]) * a)
+        for x in range(ixb + 1, oxb + 1):
+            o = y * W * 3 + x * 3
+            img[o] = int(img[o] + (rgb[0] - img[o]) * a)
+            img[o + 1] = int(img[o + 1] + (rgb[1] - img[o + 1]) * a)
+            img[o + 2] = int(img[o + 2] + (rgb[2] - img[o + 2]) * a)
+
+
+def _glow(img, W, H, cx, cy, R, rgb, amp, step=2):
+    """Soft radial light. Painted every `step`-th pixel (fine for a blur)."""
+    xmin, xmax = max(0, cx - R), min(W - 1, cx + R)
+    ymin, ymax = max(0, cy - R), min(H - 1, cy + R)
+    R2 = R * R
+    for py in range(ymin, ymax + 1, step):
+        dy2 = (py - cy) ** 2
+        for px in range(xmin, xmax + 1, step):
+            d2 = (px - cx) ** 2 + dy2
+            if d2 >= R2:
+                continue
+            t = 1.0 - (d2 ** 0.5) / R
+            _blend(img, W, H, px, py, rgb, amp * t * t)
+
+
+def _dot(img, W, H, cx, cy, rad, rgb, a=1.0):
+    r2 = rad * rad
+    for dy in range(-rad, rad + 1):
+        for dx in range(-rad, rad + 1):
+            if dx * dx + dy * dy <= r2:
+                x, y = cx + dx, cy + dy
+                if 0 <= x < W and 0 <= y < H:
+                    _blend(img, W, H, x, y, rgb, a)
+
+
+def _stroke(img, W, H, x0, y0, x1, y1, rgb, width, a=1.0):
+    steps = max(abs(x1 - x0), abs(y1 - y0), 1)
+    for i in range(steps + 1):
+        px = round(x0 + (x1 - x0) * i / steps)
+        py = round(y0 + (y1 - y0) * i / steps)
+        for dy in range(-width, width + 1):
+            for dx in range(-width, width + 1):
+                x, y = px + dx, py + dy
+                if 0 <= x < W and 0 <= y < H:
+                    _blend(img, W, H, x, y, rgb, a)
+
+
+def _star_pts(cx, cy, R):
+    pts = []
+    for i in range(10):
+        ang = -90.0 + i * 36.0
+        rad = R if i % 2 == 0 else R * 0.45
+        pts.append((cx + rad * math.cos(math.radians(ang)),
+                    cy + rad * math.sin(math.radians(ang))))
+    return pts
+
+
+def _in_poly(px, py, poly):
+    inside = False
+    j = len(poly) - 1
+    for i in range(len(poly)):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        if (yi > py) != (yj > py) and \
+           px < (xj - xi) * (py - yi) / (yj - yi) + xi:
+            inside = not inside
+        j = i
+    return inside
+
+
+def _star(img, W, H, cx, cy, R, rgb, a=1.0):
+    poly = _star_pts(cx, cy, R)
+    x0, y0 = int(cx - R), int(cy - R)
+    x1, y1 = int(cx + R) + 1, int(cy + R) + 1
+    for py in range(y0, y1):
+        for px in range(x0, x1):
+            if _in_poly(px + 0.5, py + 0.5, poly):
+                _blend(img, W, H, px, py, rgb, a)
+
+
+def _vignette(img, W, H, strength=0.13):
+    w2, h2 = W / 2.0, H / 2.0
+    maxd = (w2 * w2 + h2 * h2) ** 0.5
+    cut = 0.55
+    for py in range(H):
+        for px in range(W):
+            d = (((px - w2) ** 2 + (py - h2) ** 2) ** 0.5) / maxd
+            if d <= cut:
+                continue
+            s = 1.0 - strength * min(1.0, (d - cut) / (1.0 - cut))
+            i = (py * W + px) * 3
+            img[i] = int(img[i] * s)
+            img[i + 1] = int(img[i + 1] * s)
+            img[i + 2] = int(img[i + 2] * s)
+
+
+_BG_CANVAS = None  # shared, immutable background (same for every card)
+
+
+def _base_canvas():
+    """The calm shared backdrop: navy gradient + two soft glows + vignette,
+    plus the static brand chrome (pill, dotted divider, gold CTA button with
+    label + arrow, reassurance tag) that is identical on every card. Rendered
+    once and reused by every niche card (one bytearray copy per card), so the
+    whole pinned fleet looks pixel-identical and warms up fast."""
+    global _BG_CANVAS
+    if _BG_CANVAS is None:
+        W, H = _CANVAS
+        t0, t1 = _GRAD_CARD
+        img = bytearray(W * H * 3)
+        for y in range(H):
+            t = y / (H - 1)
+            img[y * W * 3:(y + 1) * W * 3] = bytes((
+                int(t0[0] + (t1[0] - t0[0]) * t),
+                int(t0[1] + (t1[1] - t0[1]) * t),
+                int(t0[2] + (t1[2] - t0[2]) * t))) * W
+        _glow(img, W, H, 250, 150, 520, (255, 176, 96), 0.15)
+        _glow(img, W, H, 1010, 540, 470, (86, 204, 255), 0.12)
+        _vignette(img, W, H)
+
+        def _stamp(pts, rgb, a=1.0):
+            for (px, py) in pts:
+                if 0 <= px < W and 0 <= py < H:
+                    _blend(img, W, H, px, py, rgb, a)
+
+        # brand row — quiet, top-left
+        _dot(img, W, H, 86, 76, 6, _GOLD)
+        _stamp(_raster_text("PSTORE", 116, 58, 3, gap=2), _CREAM)
+
+        # fresh pill — busiest signal sits small, top-right
+        pill = "UPDATED DAILY"
+        pw = _text_width(pill, 3, gap=1) + 40
+        px0, py0, px1, py1 = 1104 - pw, 56, 1104, 96
+        _fill_round_rect(img, W, H, px0, py0, px1, py1, 20, (255, 255, 255), 0.06)
+        _ring_round_rect(img, W, H, px0, py0, px1, py1, 20, (255, 255, 255), 0.20, 2)
+        _dot(img, W, H, px0 + 18, 76, 4, _GREEN)
+        _stamp(_raster_text(pill, px0 + 36, 64, 3, gap=1), _MUTED)
+
+        # calm dotted divider
+        for x in range(100, 1106, 26):
+            _dot(img, W, H, x, 472, 3, (255, 255, 255), 0.14)
+
+        # single gold call to action — painted once, identical everywhere
+        bx0, by0, bx1, by1 = 96, 496, 706, 576
+        _fill_round_rect(img, W, H, bx0 + 3, by0 + 5, bx1 + 3, by1 + 5, 26, (8, 15, 30), 0.35)
+        _fill_round_rect(img, W, H, bx0, by0, bx1, by1, 26, _GOLD_SOFT, 1.0)
+        _fill_round_rect(img, W, H, bx0 + 8, by0 + 8, bx1 - 8, by1 - 8, 22, _GOLD, 1.0)
+        _stamp(_raster_text("FULL LIST + PRICES", 148, 532, 4, gap=1), _INK)
+        _stroke(img, W, H, 640, 536, 674, 536, _INK, 6)
+        _stroke(img, W, H, 660, 522, 674, 536, _INK, 6)
+        _stroke(img, W, H, 660, 550, 674, 536, _INK, 6)
+
+        # soft reassurance, bottom-right
+        _dot(img, W, H, 822, 542, 4, _GREEN)
+        _stamp(_raster_text("RANKED FRESH", 846, 528, 3, gap=1), _MUTED)
+
+        # two faint plus marks frame the composition without noise
+        for (px, py) in ((66, 258), (1134, 316)):
+            _stamp(_raster_text("+", px, py, 2, gap=0), (255, 255, 255), 0.16)
+
+        _BG_CANVAS = bytes(img)
+    return _BG_CANVAS
+
+
+def _text_width(s, scale, gap=0):
+    return len(s) * (6 * scale + 1 + gap)
+
+
+def _wrap(s, limit):
+    lines = []
+    for w in str(s or "").split(" "):
+        if not lines:
+            lines.append(w)
+        elif len(lines[-1]) + 1 + len(w) <= limit:
+            lines[-1] += " " + w
+        else:
+            lines.append(w)
+    return (lines[:2] or [""]) if lines else [""]
+
+
+def og_png(slug, keyword, title, stars, reviews):
+    """Raster 1200x630 share card — the PNG that Pinterest and the OG crawlers
+    see. Calm navy chrome from the shared canvas plus per-niche content: gold
+    keyword label, one headline, and gold-star trust proof. Pure stdlib."""
+    W, H = _CANVAS
+    img = bytearray(_base_canvas())
+
+    def _stamp(pts, rgb, a=1.0):
         for (px, py) in pts:
             if 0 <= px < W and 0 <= py < H:
-                i = (py * W + px) * 3
-                img[i] = rgb[0]; img[i + 1] = rgb[1]; img[i + 2] = rgb[2]
+                _blend(img, W, H, px, py, rgb, a)
 
-    white = (255, 255, 255)
-    # keyword pill (uppercased)
+    # keyword — gold label, the niche the card is about
     kw = (keyword or slug or "niche").replace("-", " ").upper()
-    kw_t = kw if len(kw) <= 26 else kw[:25] + "..."
-    _stamp(_raster_text(kw_t, 64, 88, 4), white)
+    kw_t = kw if len(kw) <= 30 else kw[:29] + "..."
+    _stamp(_raster_text(kw_t, 96, 122, 4, gap=2), _GOLD)
 
-    # title (one or two lines at scale 5 -> 34 chars/line)
-    tr = (title or "Best picks, ranked").upper()
-    line1 = tr if len(tr) <= 34 else tr[:33] + "..."
-    _stamp(_raster_text(line1, 64, 258, 5), white)
-    if len(tr) > 34:
-        line2 = tr[33:66]
-        _stamp(_raster_text(line2 + ("..." if len(tr) > 66 else ""), 64, 302, 5), white)
+    # headline — cool white, calm line spacing, at most two soft-wrapped lines
+    lines = _wrap(title or "Best picks, ranked", 32)
+    for i, ln in enumerate(lines[:2]):
+        ln = ln.upper()
+        if len(ln) > 32:
+            ln = ln[:31] + "..."
+        _stamp(_raster_text(ln, 96, 208 + i * 50, 5, gap=1), _WHITE)
 
-    # translucent bullet + white checkmark (mirrors the SVG circle + path)
-    import math
-    cx, cy, rad = 64, 430, 46
-    for dy in range(-rad, rad + 1):
-        hw = int(math.sqrt(max(0, rad * rad - dy * dy)))
-        for x in range(cx - hw, cx + hw + 1):
-            if 0 <= x < W and 0 <= cy + dy < H:
-                i = ((cy + dy) * W + x) * 3
-                img[i] = int(0.18 * 255 + 0.82 * img[i])
-                img[i + 1] = int(0.18 * 255 + 0.82 * img[i + 1])
-                img[i + 2] = int(0.18 * 255 + 0.82 * img[i + 2])
-
-    def _check_line(x0, y0, x1, y1, rgb, width):
-        pts = set()
-        steps = max(abs(x1 - x0), abs(y1 - y0), 1)
-        for i in range(steps + 1):
-            px = int(round(x0 + (x1 - x0) * i / steps))
-            py = int(round(y0 + (y1 - y0) * i / steps))
-            for dx in range(-width, width + 1):
-                for dy in range(-width, width + 1):
-                    pts.add((px + dx, py + dy))
-        _stamp(pts, rgb)
-
-    _check_line(78, 452, 96, 470, white, 5)
-    _check_line(96, 470, 126, 440, white, 5)
-
-    # rating + proof
+    # trust row — gold stars + proof number (or a check for top-rated)
+    y_star = 392
     if stars:
-        pr = "%.1f STARS" % stars
-        if isinstance(reviews, (int, float)):
-            pr += " / %d REVIEWS" % reviews
+        try:
+            _s = float(stars)
+        except (TypeError, ValueError):
+            _s = 0.0
+        for i in range(3):
+            _star(img, W, H, 108 + i * 52, y_star, 17, _GOLD)
+        pr = "%.1f" % _s
+        if isinstance(reviews, (int, float)) and reviews:
+            pr += " · %d REVIEWS" % int(reviews)
+        _stamp(_raster_text(pr.upper(), 300, 372, 4, gap=1), _BODY)
     else:
-        pr = "TOP RATED"
-    _stamp(_raster_text(pr, 132, 406, 4), white)
-
-    # footer
-    _stamp(_raster_text("PSTORE > FULL LIST + LIVE PRICES", 64, 524, 3), white)
+        _stroke(img, W, H, 102, 384, 118, 400, _GOLD, 7)
+        _stroke(img, W, H, 118, 400, 148, 368, _GOLD, 7)
+        _stamp(_raster_text("TOP RATED PICKS", 176, 372, 4, gap=1), _BODY)
 
     rows = (bytes(img[i:i + W * 3]) for i in range(0, len(img), W * 3))
     return _png_encode(W, H, rows)
 
 
 def favicon_png(size=64):
-    """Small brand icon (default 64x64) for /og/favicon.png — accent-to-violet
-    background with a white "P": the same story as the og cards but tiny.
+    """Small brand icon (default 64x64) for /og/favicon.png — calm navy
+    background with a gold "P": the same story as the share cards but tiny.
     Pure stdlib; cached by the HTTP layer."""
     W = H = size
-    t0, t1 = _COLOR_GRAD
+    t0, t1 = _GRAD_CARD
     img = bytearray(W * H * 3)
     for y in range(H):
         t = y / max(H - 1, 1)
@@ -484,10 +720,9 @@ def favicon_png(size=64):
         img[y * W * 3:(y + 1) * W * 3] = bytes((r, g, b)) * W
     scale = max(2, size // 16)  # 5x7 font at this scale -> centered letter
     pts = _raster_text("P", (W - 5 * scale) // 2, (H - 7 * scale) // 2, scale)
-    white = (255, 255, 255)
     for (px, py) in pts:
         if 0 <= px < W and 0 <= py < H:
             i = (py * W + px) * 3
-            img[i] = white[0]; img[i + 1] = white[1]; img[i + 2] = white[2]
+            img[i] = _GOLD[0]; img[i + 1] = _GOLD[1]; img[i + 2] = _GOLD[2]
     rows = (bytes(img[i:i + W * 3]) for i in range(0, len(img), W * 3))
     return _png_encode(W, H, rows)

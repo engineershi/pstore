@@ -334,7 +334,7 @@ FUNCTION_PATHS = {
                   "/api/segments", "/api/pricedrop", "/api/tools", "/api/template",
                   "/api/earnings", "/api/subjects"),
     "analytics": ("/admin/analytics", "/admin/backup", "/admin/manual",
-                  "/api/analytics"),
+                  "/api/analytics", "/api/pin-health"),
     "keys": ("/keys", "/keys/", "/admin/apikeys", "/api/keys"),
 }
 
@@ -368,12 +368,14 @@ _EBOOK_WARMING_LOCK = threading.Lock()
 _SOCIAL_WEBHOOK = os.environ.get("SOCIAL_WEBHOOK", "")  # optional real-posting hook
 _PNG_CACHE = {}  # slug -> raster og card bytes (pure-Python render, capped)
 OG_CACHE_DIR = os.environ.get("PSTORE_OG_CACHE") or None  # persistent /og/*.png cache
+_OG_CACHE_VERSION = "navy2"  # bump when the share-card design changes
 
 
 def _og_cache_dir():
     """Directory for the persistent og-card PNG cache. Env override wins;
     otherwise a data disk if present, else the app root. Computed once so the
-    boot prewarmer and the request handler share one location."""
+    boot prewarmer and the request handler share one location. When the card
+    design version changes, the cached PNGs are purged and re-rendered."""
     global OG_CACHE_DIR
     if OG_CACHE_DIR is None:
         try:
@@ -383,6 +385,28 @@ def _og_cache_dir():
             OG_CACHE_DIR = base
         except Exception:
             OG_CACHE_DIR = os.path.join(ROOT, ".og-cache")
+    try:
+        mark = os.path.join(OG_CACHE_DIR, ".og-version")
+        current = ""
+        try:
+            with open(mark, "r") as f:
+                current = (f.read() or "").strip()
+        except Exception:
+            pass
+        if current != _OG_CACHE_VERSION:
+            for fn in os.listdir(OG_CACHE_DIR):
+                if fn.endswith(".png"):
+                    try:
+                        os.unlink(os.path.join(OG_CACHE_DIR, fn))
+                    except Exception:
+                        pass
+            try:
+                with open(mark, "w") as f:
+                    f.write(_OG_CACHE_VERSION + "\n")
+            except Exception:
+                pass
+    except Exception:
+        pass
     return OG_CACHE_DIR
 
 
@@ -3795,6 +3819,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._subscribers_json()
             if path == "/api/analytics":
                 return self._analytics_api()
+            if path == "/api/pin-health":
+                return self._pin_health_api(q)
             if path == "/api/subjects":
                 return self._subjects_api(q)
             if path == "/api/mail":
@@ -11916,6 +11942,73 @@ AI status: {"<b>configured</b> (%s · %s)" % (seo._clean(_active), seo._clean(ai
             "earnings": {"estimate": est,
                          "records": [{"month": r["month"], "orders": r["orders"],
                                       "earnings": r["earnings"]} for r in month_rows]},
+        })
+
+    def _pin_health_api(self, q):
+        """Per-niche Pinterest attribution report for the nightly n8n health
+        check: pins that drove clicks, feed niches with traffic but no pin
+        clicks (under-performers), and published (feed) niches still silent.
+        `days` limits the click window; 0 or absent means all time."""
+        try:
+            days = int((q.get("days") or ["90"])[0])
+        except (TypeError, ValueError):
+            days = 90
+        if days > 0:
+            since = (datetime.datetime.utcnow() -
+                     datetime.timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+            since_clause = " AND created_at >= ?"
+        else:
+            since = None
+            since_clause = ""
+        with _lock:
+            conn = _db()
+            pin_sql = (
+                "SELECT slug, COUNT(*) c, MAX(created_at) last FROM clicks "
+                "WHERE source IN ('pinterest','pin')" + since_clause +
+                " GROUP BY slug")
+            all_sql = (
+                "SELECT slug, COUNT(*) c, MAX(created_at) last FROM clicks " +
+                ("WHERE 1=1" + ("" if not since_clause else " AND created_at >= ?")) +
+                " GROUP BY slug")
+            pin_rows = conn.execute(
+                pin_sql, (since,) if since_clause else ()).fetchall()
+            all_rows = conn.execute(
+                all_sql, (since,) if since_clause else ()).fetchall()
+            pinnable = [r["keyword"] for r in conn.execute(
+                "SELECT keyword, products FROM niches").fetchall()
+                if (r["products"] or "").strip() not in ("", "[]", "{}")]
+            conn.close()
+        pin = {r["slug"]: (r["c"], r["last"]) for r in pin_rows}
+        allc = {r["slug"]: (r["c"], r["last"]) for r in all_rows}
+        report, pinned_hits, traffic_no_pin, published_silent = [], [], [], []
+        for kw in pinnable:
+            pc, plc = pin.get(kw, (0, None))
+            tc, tlc = allc.get(kw, (0, None))
+            row = {"slug": kw, "pin_clicks": pc, "total_clicks": tc,
+                   "last_pin_click": plc, "last_click": tlc}
+            report.append(row)
+            if pc:
+                pinned_hits.append(row)
+            elif tc:
+                traffic_no_pin.append(row)
+            else:
+                published_silent.append(row)
+        pinned_hits.sort(key=lambda r: r["pin_clicks"], reverse=True)
+        traffic_no_pin.sort(key=lambda r: r["total_clicks"], reverse=True)
+        published_silent.sort(key=lambda r: r["slug"])
+        return self._send(200, {
+            "ok": True,
+            "days": days,
+            "counts": {
+                "published_pinnable": len(pinnable),
+                "pinned_with_clicks": len(pinned_hits),
+                "traffic_without_pins": len(traffic_no_pin),
+                "silent": len(published_silent),
+                "pin_clicks": sum(r["pin_clicks"] for r in pinned_hits),
+            },
+            "pinned_hits": pinned_hits[:100],
+            "traffic_no_pin": traffic_no_pin[:100],
+            "published_silent": published_silent[:100],
         })
 
     def _admin_analytics(self):

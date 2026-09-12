@@ -1,0 +1,399 @@
+{
+  "name": "Pstore: pin fan-out hub",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "Fan-out hub — one inbound webhook, many socials\n\nPOST one pin-shaped payload to the \"Inbound webhook\" URL:\n{\"title\":\"...\",\"description\":\"...\",\"link\":\"...\",\"image\":\"https://pstore-gxbv.onrender.com/og/<slug>.png\"}\n\nEach channel is gated by its flag in the \"Normalize payload\" node's TOGGLES constant:\n- Telegram photo — works today, zero approval (BotFather token only).\n- Facebook page photo — needs a Meta app + Page token; single Graph API call, no further review once your page has the publish permission.\n- Mastodon status — any instance + access token; posts text+link (cards unfurl the og image). Upgrade to media upload via /api/v2/media + binary \"Download\" node when you want the raw artwork.\n\nREALITY CHECK (make.com's multi-social posting included): X, Instagram and Threads require YOUR OWN account + app approval on EVERY tool. No workflow, n8n or Make, can post there without it. Flip this template's pattern (IF toggle -> HTTP node) to add them once each platform approves you."
+      },
+      "id": "00000000-0000-4000-8000-000000000020",
+      "name": "Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -560,
+        -320
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "pstore-fanout",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000021",
+      "name": "Inbound webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.2,
+      "position": [
+        -340,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Accept any pin-shaped payload, normalise it, and attach per-channel\n// enable switches. Flip a flag to true once that channel is set up.\nconst TOGGLES = { telegram: true, facebook: false, mastodon: false };\n\nconst out = [];\nfor (const it of $input.all()) {\n  const j = it.json ?? {};\n  out.push({ json: {\n    title: String(j.title ?? j.name ?? 'pstore pick'),\n    description: String(j.description ?? j.caption ?? ''),\n    link: String(j.link ?? j.pin_url ?? j.url ?? ''),\n    image: String(j.image ?? j.image_url ?? j.media ?? ''),\n    ...TOGGLES,\n  }});\n}\nreturn out;"
+      },
+      "id": "00000000-0000-4000-8000-000000000022",
+      "name": "Normalize payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -140,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "a1bb3125-90fd-4c2a-b5c8-75ab49e6be49",
+              "leftValue": "={{ $json.telegram }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000024",
+      "name": "Telegram on?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        120,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cd82ed02-7990-47e4-b0e8-27483adcfa04",
+              "leftValue": "={{ $json.facebook }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000025",
+      "name": "Facebook on?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        120,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c9e3a906-d8e6-45c1-a158-f86eb01de21e",
+              "leftValue": "={{ $json.mastodon }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000026",
+      "name": "Mastodon on?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        120,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendPhoto",
+        "chatId": "CHAT_ID_CHANGE_ME",
+        "photo": "={{ $json.image }}",
+        "caption": "={{ $json.title + '\\n\\n' + $json.description + '\\n\\n' + $json.link }}",
+        "additionalFields": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000027",
+      "name": "Telegram photo",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        360,
+        60
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "pstore fan-out bot"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 20000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v20.0/PAGE_ID_CHANGE_ME/photos",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "url",
+              "value": "={{ $json.image }}"
+            },
+            {
+              "name": "link",
+              "value": "={{ $json.link }}"
+            },
+            {
+              "name": "message",
+              "value": "={{ $json.title + '\\n\\n' + $json.description }}"
+            },
+            {
+              "name": "access_token",
+              "value": "PAGE_TOKEN_CHANGE_ME"
+            }
+          ]
+        },
+        "options": {
+          "redirect": {
+            "followRedirects": true,
+            "maxRedirects": 2
+          },
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000028",
+      "name": "Facebook page photo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        360,
+        200
+      ],
+      "retryOnFail": false,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://MASTODON_INSTANCE_CHANGE_ME/api/v1/statuses",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ status: $json.title + '\\n\\n' + $json.description + '\\n\\n' + $json.image + '\\n\\n' + $json.link }) }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "redirect": {
+            "followRedirects": true,
+            "maxRedirects": 2
+          },
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000029",
+      "name": "Mastodon status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        360,
+        340
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "Mastodon token (Authorization: Bearer <token>)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 20000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {},
+      "id": "00000000-0000-4000-8000-000000000030",
+      "name": "Fan-out done",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        560,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "Inbound webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize payload": {
+      "main": [
+        [
+          {
+            "node": "Telegram on?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Facebook on?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mastodon on?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram on?": {
+      "main": [
+        [
+          {
+            "node": "Telegram photo",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fan-out done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Facebook on?": {
+      "main": [
+        [
+          {
+            "node": "Facebook page photo",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fan-out done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mastodon on?": {
+      "main": [
+        [
+          {
+            "node": "Mastodon status",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fan-out done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram photo": {
+      "main": [
+        [
+          {
+            "node": "Fan-out done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Facebook page photo": {
+      "main": [
+        [
+          {
+            "node": "Fan-out done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mastodon status": {
+      "main": [
+        [
+          {
+            "node": "Fan-out done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

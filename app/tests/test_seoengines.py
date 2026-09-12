@@ -627,6 +627,34 @@ class TestSeoengineServer(unittest.TestCase):
         self.assertIn("RSS &amp; Pinterest pins", page)
         self.assertIn("/admin/rss", page)
 
+    def test_pin_health_api(self):
+        # per-niche Pinterest attribution report backing the n8n health check
+        st, _, body = self._raw("GET", "/api/pin-health", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        d = json.loads(body)
+        self.assertTrue(d["ok"])
+        for key in ("pinned_hits", "traffic_no_pin", "published_silent"):
+            self.assertIn(key, d)
+            self.assertIsInstance(d[key], list)
+        self.assertIn("counts", d)
+        self.assertIn("published_pinnable", d["counts"])
+        self.assertGreaterEqual(d["counts"]["published_pinnable"], 1)
+        for row in d["pinned_hits"]:
+            self.assertIn("slug", row)
+            self.assertGreaterEqual(row["pin_clicks"], 1)
+            self.assertGreaterEqual(row["total_clicks"], row["pin_clicks"])
+
+    def test_pin_health_api_days_param(self):
+        st, _, body = self._raw("GET", "/api/pin-health?days=0", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        d = json.loads(body)
+        self.assertEqual(d["days"], 0)
+
+    def test_pin_health_api_requires_auth(self):
+        st, _, body = self._raw("GET", "/api/pin-health")
+        self.assertEqual(st, 401)
+        self.assertIn(b"unauthorized", body)
+
     def test_seoengines_api_get(self):
         st, _, body = self._raw("GET", "/api/seoengines", cookie=self.cookie)
         self.assertEqual(st, 200)

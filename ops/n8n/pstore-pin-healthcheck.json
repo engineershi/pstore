@@ -1,0 +1,249 @@
+{
+  "name": "Pstore: nightly pin health check",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "Pstore pin health check\n\nEvery night 09:30 UTC it logs into pstore (cookie auth) and pulls /api/pin-health?days=90 — the per-niche Pinterest attribution report — then alerts on Telegram when niches came up empty.\n\nSetup:\n1. Replace ADMIN_EMAIL_CHANGE_ME / ADMIN_PASSWORD_CHANGE_ME in the \"Login\" node with the pstore admin credentials.\n2. Create a bot with @BotFather, paste its token into the \"pstore alerts bot\" Telegram credential and set CHAT_ID in the alert node.\n3. Activate. Optional: add an EmailSend node in place of (or after) Telegram if you prefer email alerts.\n\nThe report splits every feed (published) niche into:\n- pinned_hits — a pin actually drove a click (healthy),\n- traffic_no_pin — the niche gets traffic but never attributed from pinterest,\n- published_silent — in the feed, zero clicks at all (probably not pinned yet).\nMisses are listed so you can re-pin or re-check the board."
+      },
+      "id": "00000000-0000-4000-8000-000000000010",
+      "name": "Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -520,
+        -260
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 9,
+              "triggerAtMinute": 30
+            }
+          ]
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000011",
+      "name": "Nightly 09:30 UTC",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -320,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://pstore-gxbv.onrender.com/admin/login",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"email\":\"ADMIN_EMAIL_CHANGE_ME\",\"password\":\"ADMIN_PASSWORD_CHANGE_ME\",\"next\":\"\"}",
+        "options": {
+          "sendCookies": true,
+          "redirect": {
+            "followRedirects": true,
+            "maxRedirects": 2
+          },
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          },
+          "putOutputIn": "singleObject"
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000012",
+      "name": "Login to pstore",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -120,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://pstore-gxbv.onrender.com/api/pin-health?days=90",
+        "sendBody": false,
+        "options": {
+          "sendCookies": true,
+          "redirect": {
+            "followRedirects": true,
+            "maxRedirects": 2
+          },
+          "response": {
+            "response": {
+              "responseFormat": "autodetect"
+            }
+          },
+          "putOutputIn": "singleObject"
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000013",
+      "name": "Fetch pin health",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        80,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Turn the /api/pin-health payload into one alert (or an all-clear).\nconst d = $json.json ?? {};\nconst counts = d.counts ?? {};\nconst noPin = (d.traffic_no_pin ?? []).slice(0, 15);\nconst silent = (d.published_silent ?? []).slice(0, 15);\n\nif (!(d.published_silent ?? []).length && !(d.traffic_no_pin ?? []).length) {\n  return [{ json: { alert: '', needsAttention: false } }];\n}\n\nconst lines = ['pstore pin health (' + (d.days ?? '-') + 'd)'];\nlines.push(\n  'pin clicks: ' + (counts.pin_clicks ?? 0),\n  'pinned & clicked: ' + (counts.pinned_with_clicks ?? 0),\n  'traffic, never from a pin: ' + (counts.traffic_without_pins ?? 0),\n  'feed niches silent: ' + (counts.silent ?? 0),\n);\nif (noPin.length) {\n  lines.push('— got clicks but no pin source:');\n  for (const r of noPin) lines.push('• ' + r.slug + ' (clicks ' + r.total_clicks + ')');\n}\nif (silent.length) {\n  lines.push('— in the feed, zero clicks (not pinned yet?):');\n  for (const r of silent) lines.push('• ' + r.slug);\n}\nif ((d.counts ? {}.toString.call(d.counts) : true)) {\n  const listed = noPin.length + silent.length;\n  const total = (counts.traffic_without_pins ?? 0) + (counts.silent ?? 0);\n  if (listed < total) lines.push('… +' + (total - listed) + ' more: see /api/pin-health');\n}\nreturn [{ json: { alert: lines.join('\\n'), needsAttention: true } }];"
+      },
+      "id": "00000000-0000-4000-8000-000000000014",
+      "name": "Summarize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        280,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "4d172c56-c5d4-4238-931b-4c6825115f7e",
+              "leftValue": "={{ $json.needsAttention }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000015",
+      "name": "Anything silent?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "CHAT_ID_CHANGE_ME",
+        "text": "={{ $json.alert }}",
+        "additionalFields": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000016",
+      "name": "Alert on Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        680,
+        60
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "pstore alerts bot"
+        }
+      },
+      "retryOnFail": false,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {},
+      "id": "00000000-0000-4000-8000-000000000017",
+      "name": "All clear",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        680,
+        -120
+      ]
+    }
+  ],
+  "connections": {
+    "Nightly 09:30 UTC": {
+      "main": [
+        [
+          {
+            "node": "Login to pstore",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Login to pstore": {
+      "main": [
+        [
+          {
+            "node": "Fetch pin health",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch pin health": {
+      "main": [
+        [
+          {
+            "node": "Summarize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarize": {
+      "main": [
+        [
+          {
+            "node": "Anything silent?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anything silent?": {
+      "main": [
+        [
+          {
+            "node": "Alert on Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "All clear",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}
