@@ -259,6 +259,17 @@ def _chapters():
             "share card for the newest saved niches — the fastest way to put eyeballs "
             "on pages search engines haven't indexed yet.")
         doc.paragraph(
+            "Publishing needs no paid router. pstore posts each kit natively to the "
+            "platforms whose keys are pasted on the Keys page (/keys): Pinterest "
+            "(OAuth 2.0 board-app token, plus an optional board name), X (OAuth 1.0a "
+            "app + access keys), Facebook (page token) and LinkedIn (user token) — "
+            "no n8n, Zapier or paid glue. Platforms without keys fall back to "
+            "pstore's own webhook outlet at POST /api/social/webhook: it accepts any "
+            "kit payload (copy + tracked link + platform + share cards), posts it "
+            "natively with one retry and records every attempt, so nothing is silently "
+            "dropped. Set the SOCIAL_WEBHOOK env var to that URL (or any "
+            "Make/Zapier URL) and the whole publishing loop runs in-house for free.")
+        doc.paragraph(
             "Every review card on a live page carries a 'Track price' button. A "
             "visitor who clicks it becomes a subscriber AND a price-watcher; the "
             "moment that product genuinely drops, the daily email pass sends them a "

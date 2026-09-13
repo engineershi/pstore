@@ -3,6 +3,15 @@
 Self-hosted, unlimited, zero per-run cost. Three imported workflows, one
 credential convention.
 
+> **2026 update — n8n is now optional.** pstore ships its own free router at
+> `POST /api/social/webhook` (`app/server.py` → `_social_webhook`). Point the
+> `SOCIAL_WEBHOOK` env var at `https://<your-pstore>/api/social/webhook` (or any
+> Make/Zapier URL) and pstore fans kits out **natively** via the keys pasted on
+> `/admin/apikeys` — Pinterest, X, Facebook and LinkedIn for free, with one
+> retry, recorded honestly in `social_posts`, no Node.js box and no budget. The
+> n8n flows below stay as the reference only for platforms without a native
+> backend yet (Instagram, Threads) and fancier out-of-band scheduling.
+
 ## Files
 - `pstore-rss-to-pinterest.json` — the main workflow: watches
   `https://pstore-gxbv.onrender.com/rss.xml`, pins each new niche to Pinterest.

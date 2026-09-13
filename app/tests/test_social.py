@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import indexnow
 import mailer
 import market_engine
+import publish
 import security
 import server
 import seo
@@ -627,6 +628,102 @@ class TestSocialSuite(unittest.TestCase):
         res = json.loads(data)
         self.assertEqual(st, 200)
         self.assertFalse(res.get("webhook"))
+
+    def test_webhook_endpoint_is_public_and_records_skipped_draft(self):
+        """POST /api/social/webhook needs no login (it is the zero-cost router
+        scheduled publishing + external tools fire) and, with no platform creds,
+        honestly records the kit as a draft row instead of dropping it."""
+        st, _, _, data = self._raw(
+            "/api/social/webhook", "POST",
+            body=json.dumps({"platform": "Pinterest", "slug": "keto-snacks",
+                             "name": "Keto Snacks", "body": "Great keto picks",
+                             "link": "https://example.com/lp/keto-snacks"}))
+        self.assertEqual(st, 200)
+        res = json.loads(data)
+        self.assertEqual(res["platform"], "Pinterest")
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["via"], "skipped")
+        with server._lock:
+            conn = server._db()
+            rows = conn.execute(
+                "SELECT status FROM social_posts WHERE slug='keto-snacks' AND "
+                "platform='Pinterest' AND utm_content='webhook:Pinterest'"
+            ).fetchall()
+            conn.close()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "draft")
+
+    def test_webhook_endpoint_requires_platform_and_slug(self):
+        st, _, _, data = self._raw(
+            "/api/social/webhook", "POST",
+            body=json.dumps({"platform": "Pinterest"}))
+        self.assertEqual(st, 400)
+        st2, _, _, _ = self._raw("/api/social/webhook", "POST", body=b"not-json")
+        self.assertEqual(st2, 400)
+
+    def test_webhook_endpoint_posts_natively_with_creds(self):
+        """With Pinterest keys pasted on /admin/apikeys the webhook posts the
+        kit through the native gateway and flips the recorded row to published."""
+        saved = publish._post
+        server._set_setting("social.key.pinterest.token", "tok-abc")
+        try:
+            calls = []
+
+            def fake_post(url, payload, headers, timeout=15):
+                calls.append(url)
+                return 200, {"id": "555666"}
+
+            publish._post = fake_post
+            st, _, _, data = self._raw(
+                "/api/social/webhook", "POST",
+                body=json.dumps({"platform": "Pinterest", "slug": "keto-snacks",
+                                 "board_id": "1212", "name": "Keto",
+                                 "body": "Keto picks",
+                                 "link": "https://example.com/x",
+                                 "image": "https://example.com/i.png"}))
+            self.assertEqual(st, 200)
+            res = json.loads(data)
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["via"], "native")
+            self.assertEqual(len(calls), 1)
+            with server._lock:
+                conn = server._db()
+                row = conn.execute(
+                    "SELECT status FROM social_posts WHERE slug='keto-snacks' AND "
+                    "platform='Pinterest'").fetchone()
+                conn.close()
+            self.assertEqual(row["status"], "published")
+        finally:
+            publish._post = saved
+            server._set_setting("social.key.pinterest.token", "")
+
+    def test_webhook_endpoint_retries_once_on_transient_failure(self):
+        saved = publish._post
+        server._set_setting("social.key.pinterest.token", "tok-abc")
+        try:
+            calls = []
+
+            def flaky_post(url, payload, headers, timeout=15):
+                calls.append(url)
+                if len(calls) == 1:
+                    return 0, {}
+                return 200, {"id": "777888"}
+
+            publish._post = flaky_post
+            st, _, _, data = self._raw(
+                "/api/social/webhook", "POST",
+                body=json.dumps({"platform": "Pinterest", "slug": "keto-snacks",
+                                 "board_id": "9", "name": "Keto",
+                                 "body": "Keto picks",
+                                 "link": "https://example.com/x",
+                                 "image": "https://example.com/i.png"}))
+            self.assertEqual(st, 200)
+            res = json.loads(data)
+            self.assertTrue(res["ok"])
+            self.assertEqual(len(calls), 2)
+        finally:
+            publish._post = saved
+            server._set_setting("social.key.pinterest.token", "")
 
     def test_ui_saved_webhook_activates_after_restart(self):
         """A webhook saved on /admin/apikeys must actually fire after a

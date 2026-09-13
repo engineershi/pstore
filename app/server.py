@@ -3887,6 +3887,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._track_click()
             if parsed.path == "/api/pageview":
                 return self._page_view()
+            if parsed.path == "/api/social/webhook":
+                return self._social_webhook()
             if parsed.path.startswith("/api/public/"):
                 return self._send(405, {"error": "method not allowed",
                                         "hint": "public API is read-only"})
@@ -7350,6 +7352,82 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
             return self._send(400, {"error": "unknown platform"})
         data = self._social_publish_keyword(keyword, platform)
         return None if data is None else self._send(200, data)
+
+    def _social_webhook(self):
+        """POST /api/social/webhook — pstore's own free publishing router, the
+        zero-cost n8n replacement. Accepts one post-kit payload (the same shape
+        _webhook_payload emits) and posts it natively to the platform with the
+        keys pasted on /admin/apikeys, retrying once on a transient failure.
+        Public on purpose: this is the URL scheduled publishing and external
+        tools fire. Without keys the kit is recorded as a draft (honest
+        'skipped') so payloads are never silently dropped."""
+        body = self._body()
+        if not isinstance(body, dict):
+            return self._send(400, {"error": "json body required"})
+        platform = str(body.get("platform") or "").strip()
+        slug = str(body.get("slug") or "").strip()
+        if not platform or not slug:
+            return self._send(400, {"error": "platform and slug required"})
+        board_id = str(body.get("board_id") or "").strip()
+        if board_id and not board_id.isdigit():
+            board_id = ""
+        kit = {
+            "platform": platform,
+            "slug": slug,
+            "keyword": (str(body.get("keyword") or "").strip()
+                        or slug.replace("-", " ")),
+            "name": str(body.get("name") or "").strip(),
+            "body": str(body.get("body") or "").strip(),
+            "link": str(body.get("link") or "").strip(),
+            "image": str(body.get("image") or "").strip(),
+            "image_png": (str(body.get("image_png") or "").strip()
+                          or social.og_image_png_url(seo.BASE_URL, slug)),
+            "board_id": board_id,
+        }
+        results = _publish_native([kit])
+        res = results[0] if results else {"ok": False, "via": "error",
+                                          "message": "no result"}
+        if not res.get("ok") and res.get("via") == "native":
+            time.sleep(1.0)
+            results = _publish_native([kit])
+            res = results[0] if results else res
+        self._record_social_webhook(kit, res)
+        return self._send(200, {"ok": res.get("ok"), "platform": platform,
+                                "via": res.get("via") or "error",
+                                "message": res.get("message") or ""})
+
+    def _record_social_webhook(self, kit, res):
+        """Upsert one social_posts row for a webhook-delivered kit so the admin
+        log and stats stay honest: 'published' when the native post went out,
+        'draft' otherwise. Recorded, never dropped."""
+        slug = kit["slug"]
+        platform = kit["platform"]
+        status = "published" if res.get("ok") else "draft"
+        now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        with _lock:
+            try:
+                conn = _db()
+                row = conn.execute(
+                    "SELECT id FROM social_posts WHERE lower(slug)=? AND "
+                    "utm_content=? AND platform=?",
+                    (slug, "webhook:" + platform, platform)).fetchone()
+                if row:
+                    conn.execute(
+                        "UPDATE social_posts SET status=?, published_at=?, "
+                        "name=?, body=?, link=? WHERE id=?",
+                        (status, now if status == "published" else None,
+                         kit["name"], kit["body"], kit["link"], row["id"]))
+                else:
+                    conn.execute(
+                        "INSERT INTO social_posts (slug, keyword, platform, name, "
+                        "body, link, utm_content, status, published_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?)",
+                        (slug, kit["keyword"], platform, kit["name"], kit["body"],
+                         kit["link"], "webhook:" + platform, status,
+                         now if status == "published" else None))
+                conn.commit()
+            finally:
+                conn.close()
 
     def _social_publish_keyword(self, keyword, platform="all"):
         """Upsert published kits for one niche (all platforms or one) and fire
