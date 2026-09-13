@@ -1,0 +1,6 @@
+FROM n8nio/n8n:stable
+ENV N8N_HOST=0.0.0.0 \
+    N8N_PORT=5678 \
+    N8N_SECURE_COOKIE=false \
+    N8N_RUNNERS_ENABLED=false
+EXPOSE 5678
