@@ -886,6 +886,12 @@ input[type="checkbox"] { accent-color: var(--accent); }
 /* Centered numeric cells for tables. */
 table.plain td.ct, table.plain th.ct, .ct { text-align: right; }
 
+/* Saved-niches tables (refresh page): the keyword is *text*, not a count, so it
+   must sit flush left under its heading instead of n8n/right-aligning like the
+   numeric cells; products column stays centred for a tidy grid. */
+table.plain td.kw { text-align: left; }
+table.plain td.np { text-align: center; }
+
 /* Keep the recipient picker chips tidy and on-brand. */
 .chipsrow {
   max-height: 240px;

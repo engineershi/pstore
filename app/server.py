@@ -8432,7 +8432,7 @@ $("u-search").addEventListener("input",()=>{{
                 else:
                     when += ' <span class="badge" style="background:#e6ffe8;color:#1e8e3e">fresh</span>'
             rows_html += (
-                "<tr class='%s'><td class='ct'>%s</td><td>%d</td><td>%s</td>"
+                "<tr class='%s'><td class='ct kw'>%s</td><td class='np'>%d</td><td>%s</td>"
                 "<td><button class='mini' data-kw=\"%s\">Refresh now</button></td></tr>"
                 % ("top" if stale else "", seo._clean(kw), len(prods), when,
                    seo._clean(kw)))
