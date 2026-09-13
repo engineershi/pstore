@@ -202,6 +202,11 @@ def _chapters():
             "urgency, (5) follow-up and review request. Each email carries your tagged "
             "Amazon link.")
         doc.paragraph(
+            "Every email is sent as a clean, brand-styled HTML template with a "
+            "plain-text twin: a bold headline, organised sub-headings, and an "
+            "Amazon-style product card (share-card image, star rating, orange price "
+            "and a direct buy CTA), so your mail looks as tidy as the review pages.")
+        doc.paragraph(
             "A brand-new opt-in gets an immediate welcome email (email #1 of the "
             "sequence) the moment they subscribe: it greets them by name and attaches "
             "the niche's free PDF guide right away, so the lead magnet lands in their "
@@ -684,7 +689,7 @@ def render_admin_manual(nav_html, totop_html):
 <p>It is persuasion-engineered (Suby + Cialdini): live-data social proof, scarcity counters, an honest disclosure and a reciprocity offer — every Amazon link tagged with your affiliate code.</p>
 
 <h3 id="s4">7 · Step 4 — Send the 5-part buyer sequence</h3>
-<p>Every subscriber enters a 5-email sequence from the top pick: hook → social proof → objections → soft urgency → follow-up + review. Each carries your tagged Amazon link.</p>
+<p>Every subscriber enters a 5-email sequence from the top pick: hook → social proof → objections → soft urgency → follow-up + review. Each carries your tagged Amazon link. Every mail is a clean brand-styled HTML email with a plain-text twin: bold headline, organised sub-headings, and an Amazon-style product card (share-card image, ⭐ rating, orange price, buy CTA) so it reads as beautifully as the review pages.</p>
 <p>Review cards add a <b>“Track price”</b> button: a click turns a visitor into a subscriber <i>and</i> a price-watcher. The daily email pass then sends watchers a personal “price just dropped” alert with a tracked check-price link the moment their product actually goes on sale — a transactional capture that sells at the same time. Every capture also shows a <b>referral link</b> (“share the guide, you both win”), and the referrer is credited once in the subscribers table.</p>
 <p><a class="tooltag" href="/admin/emails">📨 Email Studio</a> is the one place to compose and send mail: pick any niche, segment (hot/warm/cold/converted/inactive) or a typed address list, choose a sequence step, converted follow-up, re-engage or a fully custom subject + body, then deliver <b>now</b> or <b>schedule a UTC slot</b>. A live preview shows exactly what lands in the inbox.</p>
 <ul class="step-list">

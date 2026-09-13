@@ -172,6 +172,176 @@ def render_body(mail, to_name="there", site_name=STORE_NAME, email="", tracked_l
     return body
 
 
+def _fill_mail(mail, to_name="there", site_name=STORE_NAME, email=""):
+    """Fill the {{placeholders}} shared by the plain-text and HTML renderers."""
+    body = mail.get("body") or ""
+    if body.startswith("Subject:"):
+        body = body.split("\n\n", 1)[-1]
+    greeted = _guess_first_name(email, to_name, fallback="there")
+    body = body.replace("{{first_name}}", greeted).replace("{first_name}", greeted) \
+               .replace("{{your_name}}", site_name or STORE_NAME) \
+               .replace("{your_name}", site_name or STORE_NAME)
+    return body
+
+
+def _price_text(item):
+    try:
+        import amazon
+        return "%s%0.2f" % (amazon.currency_symbol((item or {}).get("currency") or "USD"),
+                            (item or {}).get("price"))
+    except Exception:
+        return None
+
+
+def _email_sections(body, tracked_link=""):
+    """Convert a plain-text marketing body into well-organised HTML: short lines
+    become bold sub-headings, bullet lists stay lists, every URL is clickable
+    (and rewritten to the tracked link when one is provided)."""
+    e = _html.escape
+    blocks = [b for b in (body or "").split("\n\n") if (b or "").strip()]
+    out = []
+    for block in blocks:
+        lines = [ln for ln in block.split("\n") if (ln or "").strip()]
+        joined = block.strip()
+        bullets = [ln for ln in lines if re.match(r"^\s*(?:[•\-*]|\d{1,2}[\.\)])\s", ln)]
+        interactive = len(bullets) == len(lines) and len(lines) > 1 and bullets
+        label = re.match(r"^([^.:?!\n]{2,42}):", joined)
+        is_heading = (len(joined) <= 64 and "://" not in joined
+                      and (joined[-1:] in (":", "?") or joined[-1:] == ".")
+                      and not joined.lower().startswith(("hi ", "subject:", "dear ")))
+        def _link(m):
+            href = tracked_link or m.group(0)
+            return '<a href="%s" style="color:#e8600c;font-weight:700;text-decoration:none">%s</a>' % (
+                e(href), e((m.group(0)[m.group(0).find("://") + 3:])[:64]))
+        if label and not label.group(0).lower().startswith(("http", "hi ")):
+            lead, rest = joined.split(":", 1)
+            rest_html = re.sub(r"https?://\S+", _link, e(rest.strip()))
+            out.append('<h3 style="margin:20px 0 6px;font-size:16px;letter-spacing:-.2px;'
+                       'color:#191b26;font-weight:800">%s</h3>'
+                       '<p style="margin:0 0 14px;font-size:15px;line-height:1.65;color:#3a3f4b">%s</p>'
+                       % (e(lead.strip()), rest_html))
+        elif interactive:
+            items = "".join(
+                '<li style="margin:5px 0 0">%s</li>' %
+                re.sub(r"https?://\S+", _link, e(ln))
+                for ln in bullets)
+            out.append('<ul style="margin:8px 0;padding-left:20px;list-style:square">%s</ul>' % items)
+        elif is_heading:
+            out.append('<h3 style="margin:22px 0 8px;font-size:16px;letter-spacing:-.2px;'
+                       'color:#191b26;font-weight:800">%s</h3>' %
+                       re.sub(r"https?://\S+", _link, e(joined)))
+        else:
+            out.append('<p style="margin:0 0 14px;font-size:15px;line-height:1.65;color:#3a3f4b">%s</p>' %
+                       re.sub(r"https?://\S+", _link, e(joined)))
+    return "\n".join(out) if out else '<p style="margin:0;color:#3a3f4b">…</p>'
+
+
+def product_card_html(item, link_url="", image_url="", badge="", stars=0, reviews=0):
+    """One Amazon-style product card for email bodies: clean image on top, bold
+    title, ⭐ rating line, orange price, and a direct affiliate CTA. All inline
+    styles so Gmail/Outlook/Apple Mail render it the same."""
+    e = _html.escape
+    it = item or {}
+    title = market_engine._clip(it.get("title") or "", 96)
+    price = _price_text(it)
+    rating = ""
+    if stars or reviews:
+        sst = "" if not reviews else "s" if reviews != 1 else ""
+        rating = ('<div style="margin:7px 0 0;font-size:13px;color:#5c6b7a">'
+                  '★ <strong style="color:#191b26">%s</strong> · %s rating%s</div>' %
+                  (e(str(stars)), e("{:,}".format(reviews) if reviews else "—"), sst))
+    badge_html = ('<div style="margin:0 0 8px;font-size:11px;font-weight:800;letter-spacing:.12em;'
+                  'color:#e8600c;text-transform:uppercase">%s</div>' % e(badge)) if badge else ""
+    cta = ('<div style="margin:14px 0 0"><a href="%s" rel="nofollow sponsored noopener" '
+           'style="display:inline-block;background:#f0a41a;background-image:linear-gradient(180deg,#ffd75e,#f0a41a);'
+           'color:#111;text-decoration:none;font-weight:800;font-size:14px;'
+           'padding:10px 26px;border-radius:999px;border:1px solid #e6a700">See it on Amazon →</a></div>'
+           % e(link_url)) if link_url else ""
+    return """<div style="margin:20px 0;background:#ffffff;border:1px solid #ececf1;border-radius:16px;overflow:hidden">%s
+  <div style="padding:18px 18px 20px;text-align:left">
+    %s
+    <div style="font-size:15.5px;line-height:1.4;font-weight:700;color:#191b26;letter-spacing:-.15px">%s</div>
+    %s
+    <div style="margin-top:9px;font-size:22px;font-weight:800;color:#b12704;letter-spacing:-.4px">%s</div>
+    %s
+  </div>
+</div>""" % (
+        (('<div style="background:#fbfbfd;padding:14px;border-bottom:1px solid #f0f0f4">'
+          '<img src="%s" alt="%s" width="280" style="max-width:100%%;height:auto;border:0;display:block;margin:0 auto">'
+          '</div>' % (e(image_url), e(title))) if image_url else ""),
+        badge_html, e(title), rating,
+        (e(price) if price else '<span style="font-size:15px;color:#5c6b7a">price on Amazon</span>'),
+        cta)
+
+
+def _runner_rows(items, tracked_link=""):
+    """Compact runner-up list shown under the hero card when alternatives exist."""
+    alt = market_engine._alternate_lines(items, (market_engine.pick_for_buyers(items) or {}).get("asin") or "")
+    if not alt:
+        return ""
+    row_html = []
+    for line in alt:
+        if not (line or "").strip():
+            continue
+        row_html.append('<div style="margin:6px 0"><span style="font-size:14px;color:#3a3f4b">%s</span></div>'
+                        % re.sub(r"https?://\S+",
+                                 lambda m: '<a href="%s" style="color:#e8600c;font-weight:700;text-decoration:none">view on Amazon</a>'
+                                           % _html.escape(tracked_link or m.group(0)),
+                                 _html.escape(line)))
+    return ('<div style="margin:6px 0 0;padding:14px 18px;background:#fafafc;border-radius:12px">'
+            '<div style="font-size:11px;font-weight:800;letter-spacing:.12em;color:#9aa0ad;'
+            'text-transform:uppercase;margin-bottom:6px">Also matched</div>%s</div>'
+            % "".join(row_html))
+
+
+def render_email_html(mail, to_name="there", site_name=STORE_NAME, email="",
+                      keyword="", items=None, base_url="", tracked_link=""):
+    """Full branded HTML body for a marketing sequence/studio mail. Bold H1 from
+    the subject, bold sub-headings + paragraphs from the body, an Amazon-style
+    hero product card with the niche share-card image, runner-ups, an orange CTA
+    and an unsubscribe footer. Returns '' when nothing sensibly renderable so a
+    sender can fall back to plain text (never breaks mail)."""
+    try:
+        body = _fill_mail(mail, to_name, site_name, email)
+        subject = (mail.get("subject") or "").strip()
+        if not (body or "").strip():
+            return ""
+        inner = _email_sections(body, tracked_link)
+        pick = market_engine.pick_for_buyers(items) if items else None
+        if pick and keyword:
+            base = (base_url or site_base()).rstrip("/")
+            image = "%s/og/%s.png?v=navy3" % (base, _slug(keyword))
+            link = tracked_link or (base + "/lp/" + _slug(keyword))
+            stars = pick.get("stars") or 0
+            reviews = pick.get("reviews") or 0
+            inner += product_card_html(pick, link, image, badge="Top pick for “%s”" % keyword,
+                                       stars=stars, reviews=reviews)
+            inner += _runner_rows(items, tracked_link)
+        if tracked_link:
+            inner += ('<div style="text-align:center;margin:26px 0 4px">'
+                      '<a href="%s" style="display:inline-block;background:#e8600c;color:#ffffff;'
+                      'text-decoration:none;font-weight:700;font-size:15px;padding:13px 30px;'
+                      'border-radius:999px">Check price &amp; reviews →</a></div>'
+                      % _html.escape(tracked_link))
+        subject = subject or ("Your curated %s picks" % keyword if keyword else "From " + site_name)
+        return _brand_shell(subject, subject, inner,
+                            _footer_html(email))
+    except Exception:
+        return ""
+
+
+def _slug(s):
+    return re.sub(r"[^A-Za-z0-9]+", "-", str(s or "")).lower().strip("-")
+
+
+def _footer_html(email=""):
+    unsub = unsubscribe_url(email) if email else site_base()
+    return ('You&rsquo;re receiving this because you opted in on a %s page and asked to hear '
+            'about our curated picks. Change your mind any time: '
+            '<a href="%s" style="color:#c96a12;font-weight:700;text-decoration:none">Unsubscribe</a>.'
+            % (_html.escape(STORE_NAME), _html.escape(unsub)))
+
+
 # Test hook: tests assign _send(subject, body, to, attachments=None) -> True/False.
 # Keeping the network path behind one function means sending is fully stub-able offline.
 _send = None
@@ -239,6 +409,13 @@ def _build_message(subject, body, to, from_addr, attachments=None, pixel_url="",
         body = "%s\n\n<img src=\"%s\" width=\"1\" height=\"1\" alt=\"\" border=\"0\">" % (body, pixel_url)
     msg.attach(MIMEText(body, "plain", "utf-8"))
     if html:
+        if pixel_url:
+            html = html.replace("</body>",
+                                '<img src="%s" width="1" height="1" alt="" border="0" '
+                                'style="display:none"></body>' % _html.escape(pixel_url))
+            if "</body>" not in html:
+                html += '<img src="%s" width="1" height="1" alt="" border="0" ' \
+                        'style="display:none">' % _html.escape(pixel_url)
         msg.attach(MIMEText(html, "html", "utf-8"))
     for name, data in (attachments or []):
         part = MIMEApplication(data, _subtype="pdf")
@@ -428,6 +605,32 @@ def transactional_html(preheader, heading, paragraphs, cta_url, cta_label, footn
         "store": _esc(STORE_NAME), "pre": _esc(preheader), "head": _esc(heading),
         "paras": paras, "url": _esc(cta_url), "label": _esc(cta_label),
         "fallback": fallback, "note": note}
+
+
+def _brand_shell(preheader, heading, inner_html, footnote_html=""):
+    """Shared clean email shell (same header family as transactional mail) so
+    marketing, sequence and price-drop emails all render consistently."""
+    note = ('<div style="background:#fafafc;padding:18px 34px;border-top:1px solid #ececf1">'
+            '<p style="margin:0;font-size:12px;line-height:1.6;color:#9aa0ad">%s</p></div>'
+            % footnote_html) if footnote_html else ""
+    return """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light only"><title>%(store)s</title></head>
+<body style="margin:0;padding:0;background:#f4f4f7;font-family:-apple-system,BlinkMacSystemFont,&#39;Segoe UI&#39;,Roboto,Arial,Helvetica,sans-serif">
+<span style="display:none;max-height:0;overflow:hidden">%(pre)s</span>
+<div style="max-width:560px;margin:24px auto;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 10px 34px rgba(20,20,40,.10)">
+  <div style="background:linear-gradient(120deg,#ff7a18 0%%,#ff4e9e 55%%,#a453ff 100%%);padding:26px 34px">
+    <div style="font-size:19px;font-weight:800;color:#ffffff;letter-spacing:.2px">%(store)s</div>
+    <div style="font-size:12px;color:rgba(255,255,255,.82);margin-top:2px">America-verified product picks</div>
+  </div>
+  <div style="padding:34px 34px 28px">
+    <h1 style="margin:0 0 16px;font-size:21px;letter-spacing:-.2px;color:#191b26;font-weight:800">%(head)s</h1>
+    %(inner)s
+  </div>
+  %(note)s
+</div></body></html>""" % {
+        "store": _esc(STORE_NAME), "pre": _esc(preheader), "head": _esc(heading),
+        "inner": inner_html, "note": note}
 
 
 def verify_email_html(confirm_url, name):

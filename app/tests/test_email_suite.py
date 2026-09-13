@@ -20,6 +20,7 @@ import ebook
 import indexnow
 import mailer
 import market_engine
+import pricedrop
 import security
 import server
 import seo
@@ -1285,6 +1286,63 @@ class TestAiProviders(unittest.TestCase):
         self.assertEqual(ai.list_models("opencode", "oc-x"), ["a", "b"])
         ai._urlopen = lambda req: {"error": "bad"}
         self.assertEqual(ai.list_models("opencode", "oc-x"), [])
+
+
+class TestBrandedHtmlRenderer(unittest.TestCase):
+    """The clean Amazon-style email HTML: bold headings/subheadings, product
+    cards with image + stars + price + CTA, tracked links, unsubscribe footer.
+    Pure functions only — no network, no server, works offline."""
+
+    def _items(self):
+        return [
+            {"asin": "B0AAA", "title": "Breville Barista Express",
+             "price": 499.95, "stars": 4.6, "reviews": 1234, "currency": "USD"},
+            {"asin": "B0BBB", "title": "Philips 3200", "price": 549.0,
+             "stars": 4.5, "reviews": 840, "currency": "USD"},
+        ]
+
+    def test_sequence_html_has_bold_headings_and_card(self):
+        mail = mailer.next_email("best espresso machines", self._items(), 1)
+        html = mailer.render_email_html(mail, to_name="Jane", email="j@x.com",
+                                        keyword="best espresso machines",
+                                        items=self._items(),
+                                        base_url="https://x.com",
+                                        tracked_link="https://x.com/e/TK")
+        self.assertIn("<h1", html)                 # bold main heading from subject
+        self.assertIn("<h3", html)                 # bold sub-heading from copy
+        self.assertIn('src="https://x.com/og/best-espresso-machines.png', html)
+        self.assertIn("$499.95", html)             # price on the hero card
+        self.assertIn("\u2605", html)              # star rating
+        self.assertIn("See it on Amazon", html)
+        self.assertIn("Also matched", html)        # runner-up column
+        self.assertIn("Unsubscribe", html)         # footer
+        self.assertNotIn("{{", html)               # all placeholders filled
+        self.assertIn("https://x.com/e/TK", html)  # tracked link wins
+
+    def test_sequence_html_renders_empty_for_throwaway_mail(self):
+        self.assertEqual(mailer.render_email_html({"subject": "s", "body": "  "}), "")
+
+    def test_product_card_skips_image_when_none(self):
+        card = mailer.product_card_html(self._items()[0], link_url="https://x.com/a",
+                                        image_url="", stars=4.6, reviews=1)
+        self.assertNotIn("<img", card)
+        self.assertIn("rating", card)              # no trailing "s" for one rating
+
+    def test_sections_turn_labels_into_subheadings(self):
+        out = mailer._email_sections("My one-line take: it is the best.\n\nClick https://amzn.com/dp/B0AAA now.")
+        self.assertIn("<h3", out)
+        self.assertNotIn("https://amzn.com/dp/B0AAA</p>", out)  # URL got linked
+
+    def test_drop_email_is_branded(self):
+        e = pricedrop.drop_email([{"asin": "ABC1", "title": "Widget", "old": 100.0,
+                                   "new": 80.0, "drop": 20.0, "drop_pct": 20.0}],
+                                 base_url="https://x.com", email="j@x.com")
+        self.assertIn("Price dropped", e["subject"])
+        self.assertIn("$80.00", e["html"])
+        self.assertIn("save $20.00 / 20.0% off", e["html"])
+        self.assertIn("<h1", e["html"])
+        self.assertIn("Unsubscribe", e["html"])
+        self.assertIn("$80.00", e["text"])
 
 
 if __name__ == "__main__":

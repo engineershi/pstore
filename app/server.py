@@ -10608,7 +10608,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                 subv = subj["variant"]
             pick = market_engine.pick_for_buyers(items)
             asin = (pick or {}).get("asin") or ""
-            ready.append((sub["id"], idx, mail, sub["email"], first, kw, asin, subv, is_converted))
+            ready.append((sub["id"], idx, mail, sub["email"], first, kw, asin, subv, is_converted, items))
         seg_total = sum(1 for r in ready if r[8])
         cap = limit if limit and limit > 0 else mailer.MAX_EMAILS_PER_RUN
         target = ready[:cap] if limit and limit > 0 else ready[:mailer.MAX_EMAILS_PER_RUN]
@@ -10620,7 +10620,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                                     "converted": seg_total,
                                     "limit": cap})
         sent = errors = 0
-        for sid, idx, mail, to, to_name, kw, asin, subv, is_converted in target:
+        for sid, idx, mail, to, to_name, kw, asin, subv, is_converted, items in target:
             if sent + errors >= mailer.MAX_EMAILS_PER_RUN:
                 break
             # tracked affiliate link + open pixel so email actions are attributed
@@ -10629,6 +10629,9 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             reply_to = mailer.thread_reply_to(str(sid))
             text = mailer.render_body(mail, to_name=to_name, email=to,
                                       tracked_link=link_url)
+            html_body = mailer.render_email_html(mail, to_name=to_name,
+                                                 site_name=mailer.STORE_NAME, email=to,
+                                                 keyword=kw, items=items, tracked_link=link_url)
             attachments = None
             if idx == 1 and kw:  # hook email carries the lead-magnet PDF
                 try:
@@ -10638,7 +10641,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                 except Exception:
                     attachments = None
             if mailer.send(mail["subject"], text, to, attachments=attachments,
-                           pixel_url=pixel_url, reply_to=reply_to):
+                           pixel_url=pixel_url, reply_to=reply_to, html=html_body or None):
                 sent += 1
                 with _lock:
                     conn = _db()
@@ -10699,7 +10702,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
         return row is not None
 
     def _dispatch_one_off(self, campaign, sub, kw, asin, subject, body_text,
-                          attachments=None, pixel_on=True):
+                          attachments=None, pixel_on=True, html_body=""):
         """Send a deduped one-off campaign email to a subscriber through the same
         tracked-link pipeline as the sequence. Returns True when actually sent.
         `campaign` + subscriber + asin form the dedup key (INSERT OR IGNORE)."""
@@ -10713,7 +10716,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                                   to_name=sub.get("first_name") or "",
                                   email=sub["email"], tracked_link=link_url)
         ok = mailer.send(subject, text, sub["email"], attachments=attachments,
-                         pixel_url=pixel_url, reply_to=reply_to)
+                         pixel_url=pixel_url, reply_to=reply_to, html=html_body or "")
         if ok:
             self._log_email_send(campaign, sid, kw, asin)
         return ok
@@ -10806,13 +10809,15 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             if not niche_drops:
                 continue
             pick_asin = next((d["asin"] for d in niche_drops), "")
-            mail = pricedrop.drop_email(niche_drops, base_url=os.environ.get("PSTORE_URL", ""))
+            mail = pricedrop.drop_email(niche_drops, base_url=os.environ.get("PSTORE_URL", ""),
+                                        email=sub["email"])
             if not mail["subject"]:
                 continue
             candidates += 1
             if self._dispatch_one_off("pricedrop:" + pick_asin if pick_asin else "pricedrop",
                                       sub, kw, pick_asin,
-                                      mail["subject"], mail["text"]):
+                                      mail["subject"], mail["text"],
+                                      html_body=mail.get("html") or ""):
                 sent += 1
             else:
                 already += 1
@@ -10840,12 +10845,14 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                  "drop": next((x["drop"] for x in drops if x["asin"] == asin), 0),
                  "drop_pct": next((x["drop_pct"] for x in drops if x["asin"] == asin), 0)}
             mail = pricedrop.drop_email([d], base_url=os.environ.get("PSTORE_URL", ""),
-                                        pick_links={asin: amazon.affiliate_url(asin)})
+                                        pick_links={asin: amazon.affiliate_url(asin)},
+                                        email=sub["email"])
             if not mail["subject"]:
                 continue
             watcher_emails += 1
             if self._dispatch_one_off("pricedrop:" + asin, sub, kw, asin,
-                                      mail["subject"], mail["text"]):
+                                      mail["subject"], mail["text"],
+                                      html_body=mail.get("html") or ""):
                 sent += 1
             else:
                 already += 1
@@ -11050,7 +11057,8 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                 attachments = None
         return {"mail": mail, "asin": asin, "kw": kw, "idx": idx,
                 "campaign": "studio:%s:%s:%s" % (t, kw or "custom", idx),
-                "attachments": attachments, "converted": t == "converted"}
+                "attachments": attachments, "converted": t == "converted",
+                "items": items}
 
     def _studio_preview(self, spec):
         fake = {"kind": "custom", "id": 0, "email": "you@example.com",
@@ -11065,8 +11073,12 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             if (opts.get("tracked_links") and comp["asin"]) else ""
         text = mailer.render_body(comp["mail"], to_name="Jane",
                                   email="you@example.com", tracked_link=link_url)
+        html = mailer.render_email_html(comp["mail"], to_name="Jane",
+                                        site_name=mailer.STORE_NAME, email="you@example.com",
+                                        keyword=comp["kw"], items=comp.get("items"),
+                                        tracked_link=link_url)
         return {"ok": True, "subject": comp["mail"]["subject"], "body": text,
-                "asin": comp["asin"], "idx": comp["idx"]}
+                "html": html or None, "asin": comp["asin"], "idx": comp["idx"]}
 
     def _dispatch_studio(self, spec, recipients, dry=False):
         """Send a composed campaign to the given recipients (or count it when
@@ -11095,11 +11107,15 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             reply_to = mailer.thread_reply_to(str(cid)) if cid else ""
             text = mailer.render_body(comp["mail"], to_name=r.get("first_name") or "",
                                       email=r["email"], tracked_link=link_url)
+            html_body = mailer.render_email_html(comp["mail"], to_name=r.get("first_name") or "",
+                                                 site_name=mailer.STORE_NAME, email=r["email"],
+                                                 keyword=comp["kw"], items=comp.get("items"),
+                                                 tracked_link=link_url)
             ok = True
             if not dry:
                 ok = mailer.send(comp["mail"]["subject"], text, r["email"],
                                  attachments=comp["attachments"], pixel_url=pixel_url,
-                                 reply_to=reply_to)
+                                 reply_to=reply_to, html=html_body or "")
             if ok:
                 sent += 1
                 if not dry and dedup and r.get("kind") == "sub" and cid:

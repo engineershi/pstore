@@ -194,7 +194,7 @@ def check(rows, fresh_prices, store=None, min_drop_pct=DEFAULT_MIN_DROP_PCT,
 
 
 # ------------------------------------------------------------------ email copy
-def drop_email(drops, base_url="", pick_links=None):
+def drop_email(drops, base_url="", pick_links=None, email=""):
     """Build a 'price dropped' email body + subject from a check() result.
     `pick_links` maps an ASIN to an affiliate/check-price URL — each drop gets
     its own "Check price on Amazon" CTA (callers collapse them to a tracked
@@ -206,29 +206,44 @@ def drop_email(drops, base_url="", pick_links=None):
     text_rows = []
     for d in drops:
         link = ((pick_links or {}).get(d.get("asin")) or "") or ""
+        title = _h(d.get("title") or d.get("asin"))
+        save = _fmt(d.get("drop"))
+        pct = d.get("drop_pct") or 0
+        if link:
+            cta = ('<div style="margin:12px 0 0"><a href="%s" rel="nofollow sponsored noopener" '
+                   'style="display:inline-block;background:#f0a41a;background-image:linear-gradient(180deg,#ffd75e,#f0a41a);'
+                   'color:#111;text-decoration:none;font-weight:800;font-size:13px;'
+                   'padding:9px 22px;border-radius:999px;border:1px solid #e6a700">See it on Amazon \u2192</a></div>'
+                   % link)
+        else:
+            cta = ""
         rows.append(
-            '<li style="margin:6px 0"><strong>%s</strong> '
-            '\u2014 was %s, now <span style="color:#b12704">%s</span> '
-            '(save %s / %.1f%% off)%s</li>'
-            % (_h(d.get("title") or d.get("asin")),
-               _fmt(d.get("old")), _fmt(d.get("new")),
-               _fmt(d.get("drop")), d.get("drop_pct") or 0,
-               (' — <a href="%s" style="color:#b12704">check price</a>' % _h(link)) if link else ""))
+            '<div style="margin:0 0 14px;background:#ffffff;border:1px solid #ececf1;'
+            'border-radius:14px;padding:16px 18px">'
+            '<div style="font-size:15px;line-height:1.45;font-weight:700;color:#191b26">%s</div>'
+            '<div style="margin:10px 0 0;font-size:14px;color:#5c6b7a">Was '
+            '<s style="color:#9aa0ad">%s</s> \u2192 now '
+            '<span style="color:#b12704;font-weight:800;font-size:20px">%s</span>'
+            ' <span style="display:inline-block;background:#eef7ee;color:#16802a;font-weight:700;'
+            'font-size:12px;border-radius:999px;padding:2px 9px;margin-left:6px">save %s / %.1f%% off</span></div>'
+            '%s</div>'
+            % (title, _fmt(d.get("old")), _fmt(d.get("new")), save, pct, cta))
         text_rows.append(
             "- %s: was %s, now %s (save %s / %.1f%% off)%s"
             % (d.get("title") or d.get("asin"), _fmt(d.get("old")),
-               _fmt(d.get("new")), _fmt(d.get("drop")), d.get("drop_pct") or 0,
-               (" — check price: %s" % link) if link else ""))
-    html = (
-        '<div style="font-family:Helvetica,Arial,sans-serif;max-width:560px">'
-        '<h2 style="margin:0 0 8px">\u2697\ufe0f A price just dropped</h2>'
-        '<p>Good news \u2014 a product you&rsquo;re watching is on sale:</p>'
-        '<ul style="list-style:none;padding:0">%s</ul>'
-        '<p style="margin-top:16px">Deals like this don&rsquo;t last. '
-        '<strong>Grab it while the price holds.</strong></p>'
-        '<p style="color:#888;font-size:12px">You receive this because you asked '
-        'to hear about deals. <a href="%s">Unsubscribe</a>.</p></div>'
-        % ("".join(rows), _h(base_url)))
+               _fmt(d.get("new")), _fmt(d.get("drop")), pct,
+               (" \u2014 check price: %s" % link) if link else ""))
+    try:
+        import mailer
+        intro = ('<p style="margin:0 0 4px;font-size:15px;line-height:1.65;color:#3a3f4b">'
+                 'Good news \u2014 a product you&rsquo;re watching is on sale:</p>')
+        html = mailer._brand_shell("#deal", "A price just dropped",
+                                   intro + "".join(rows),
+                                   mailer._footer_html(email))
+    except Exception:
+        html = ("<div style=\"font-family:Helvetica,Arial,sans-serif\"><h2>\u2697\ufe0f "
+                "A price just dropped</h2><ul style=\"list-style:none;padding:0\">%s</ul></div>"
+                % "".join(rows))
     text = "A price just dropped!\n\n" + "\n".join(text_rows)
     return {"subject": subject, "html": html, "text": text, "drops": drops}
 
