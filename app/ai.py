@@ -332,6 +332,12 @@ def configure_runtime(provider, key, model="", base=""):
             "active": provider == active_provider()}
 
 
+def clear_runtime(provider):
+    """Drop a runtime-configured provider (used when the operator clears an
+    API key on /admin/apikeys). Env config is untouched and keeps working."""
+    _RUNTIME.pop(provider, None)
+
+
 def headline_and_subheadline(niche, hint=""):
     """Mind-blowing headline + subheadline for the ebook about `niche`.
 

@@ -639,16 +639,7 @@ def render_niche(keyword, niche, saved_niches=None, ab_headline=None, ab_variant
   {editorial.related_html(keyword, saved_niches) if saved_niches else ""}
 </div>
 {editorial.sticky_cta_html(keyword, best)}
-<style>
-.sticky-cta{{position:fixed;left:0;right:0;bottom:0;z-index:40;display:none;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px calc(12px + env(safe-area-inset-bottom));background:#14161a;border-top:1px solid #2a2e36;}}
-body.show-sticky .sticky-cta{{display:flex;}}
-.sticky-cta .sticky-line{{margin:0;color:#dfe3ea;font-size:13px;line-height:1.3;flex:1 1 auto;min-width:0;white-space:normal;overflow-wrap:anywhere;}}
-.sticky-cta .sticky-line b{{color:#fff;}}
-.sticky-cta .cta{{margin:0;color:#fff;text-decoration:none;font-weight:700;padding:12px 18px;border-radius:8px;white-space:nowrap;}}
-.sticky-cta .sticky-actions{{display:flex;gap:8px;flex:0 0 auto;}}
-.sticky-cta .sticky-actions .cta:first-child{{background:#1d2127;border:1px solid #2a2e36;color:#cfd6e0;}}
-.urgency{{font-size:14px;}}
-</style>
+{editorial.STICKY_CSS}
 <script>
 (function(){{
 var s=document.querySelector(".sticky-cta");var t=null;var gate=document.querySelector('[data-role="upsell"]');

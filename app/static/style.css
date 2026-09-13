@@ -653,8 +653,8 @@ body:has(.totop.show) > header:first-of-type { scroll-margin-top: 0; }
 
 /* Sticky conversion bar: reserve clearance so it never covers the site footer
    links or collides with the back-to-top pill when fully scrolled. */
-body.show-sticky footer { margin-bottom: 92px; }
-body.show-sticky .totop { bottom: 104px; }
+body.show-sticky footer { margin-bottom: 78px; }
+body.show-sticky .totop { bottom: 92px; }
 
 /* ---------- pagination ---------- */
 .pager { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 16px 0; }

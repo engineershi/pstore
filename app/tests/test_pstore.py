@@ -1296,6 +1296,74 @@ class TestRoutes(unittest.TestCase):
         self.assertIn("••••", html)
         # the four twitter OAuth sub-fields are rendered
         self.assertIn('data-tw="1"', html)
+        # the optional AI writing section is present with per-provider rows
+        self.assertIn("AI writing keys", html)
+        self.assertIn('data-aik="openai"', html)
+        self.assertIn('data-aik="opencode"', html)
+        self.assertIn('data-aik="nvidia"', html)
+        # a pasted AI key is masked, never echoed
+        server._set_setting("ai.key.opencode", "zk-super-secret")
+        st, _, _, data = self._raw("/admin/apikeys", cookie=self.cookie)
+        html2 = data.decode("utf-8", "replace")
+        self.assertNotIn("zk-super-secret", html2)
+        server._set_setting("ai.key.opencode", "")
+
+    def test_ai_settings_save_test_and_clear_roundtrip(self):
+        # The /admin/apikeys 'AI writing' section persists keys via /api/settings
+        # (survives restarts, applies immediately) and lets the operator test a
+        # key with a live chat call, then clear it again. Everything here must
+        # stay offline: stub ai._urlopen for the test request and restore the
+        # process-wide runtime + settings afterwards.
+        import ai as _ai
+        saved_runtime = dict(_ai._RUNTIME)
+        saved_urlopen = _ai._urlopen
+        saved = {f: server._get_setting("ai.key." + f) for f in _ai.PROVIDERS}
+        try:
+            _ai._RUNTIME.clear()
+            # save an OpenCode Zen key via the same payload the page posts
+            st, body = self._raw_json("/api/settings",
+                                      {"ai": {"opencode": {
+                                          "key": "zk-saved-key",
+                                          "model": "kimi-k2.5-free"}}},
+                                      cookie=self.cookie)
+            self.assertEqual(st, 200)
+            d = json.loads(body)
+            self.assertTrue(d.get("ai", {}).get("configured"))
+            self.assertEqual(d["ai"]["provider"], "opencode")
+            # persisted for the restart rehydrate path
+            self.assertEqual(server._get_setting("ai.key.opencode"), "zk-saved-key")
+            self.assertEqual(server._get_setting("ai.model.opencode"), "kimi-k2.5-free")
+            # applied to the in-memory runtime right away
+            self.assertEqual(_ai._runtime("opencode").get("key"), "zk-saved-key")
+            # a blank save must not clobber an existing key (masked fields skip)
+            st2, body2 = self._raw_json("/api/settings", {"ai": {"opencode": {}}},
+                                        cookie=self.cookie)
+            self.assertEqual(server._get_setting("ai.key.opencode"), "zk-saved-key")
+            # test endpoint: fire a tiny stubbed chat request
+            _ai._urlopen = lambda req: {"choices": [{"message": {"content": "pstore-ok"}}]}
+            stt, tbody = self._raw_json("/api/settings/test",
+                                        {"ai": {"provider": "opencode",
+                                                "key": "zk-saved-key",
+                                                "model": "kimi-k2.5-free"}},
+                                        cookie=self.cookie)
+            self.assertEqual(stt, 200)
+            td = json.loads(tbody)
+            self.assertTrue(td.get("ok"), td)
+            self.assertIn("pstore-ok", td.get("reply", ""))
+            # explicit clear via blank key empties the row and the runtime
+            stc, _ = self._raw_json("/api/settings",
+                                    {"ai": {"opencode": {"key": ""}}},
+                                    cookie=self.cookie)
+            self.assertEqual(server._get_setting("ai.key.opencode"), "")
+            self.assertEqual(server._get_setting("ai.model.opencode"), "")
+            self.assertEqual(_ai._runtime("opencode"), {})
+            self.assertFalse(_ai.configured())
+        finally:
+            _ai._urlopen = saved_urlopen
+            _ai._RUNTIME.clear()
+            _ai._RUNTIME.update(saved_runtime)
+            for f, v in saved.items():
+                server._set_setting("ai.key." + f, v)
 
     def test_ai_key_and_scraper_key_persist_to_db(self):
         # AI key survives via DB: persist, then re-init rehydrates the runtime.

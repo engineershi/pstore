@@ -145,13 +145,13 @@ def _style_css(style):
   .cd-box .num {{ font-size:clamp(26px,4vh,36px); font-weight:900; color:var(--accent); line-height:1; }}
   .cd-box .unit {{ font-size:10.5px; text-transform:uppercase; letter-spacing:1.5px; color:var(--muted); margin-top:4px; }}
   .cd-done {{ display:none; }}
-  /* sticky floating CTA */
-  .sticky-cta {{ position:fixed; left:0; right:0; bottom:0; z-index:40; padding:12px 16px 16px;
-    background:linear-gradient(180deg, transparent, var(--bg) 40%);
-    display:none; justify-content:center; }}
+  /* sticky floating CTA — compact floating pill */
+  .sticky-cta {{ position:fixed; left:50%; transform:translateX(-50%); bottom:calc(14px + env(safe-area-inset-bottom)); z-index:40; display:none; align-items:center; justify-content:center; width:max-content; max-width:calc(100% - 24px); padding:8px; border-radius:18px; background:rgba(17,19,24,.92); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); border:1px solid rgba(255,255,255,.10); box-shadow:0 12px 32px rgba(0,0,0,.38); }}
   body.show-sticky .sticky-cta {{ display:flex; }}
-  .sticky-cta .cta {{ margin:0; width:100%; max-width:520px; font-size:16px; padding:15px 22px; }}
-  body.show-sticky .wrap {{ margin-bottom: 92px; }}
+  .sticky-cta .cta {{ margin:0; display:inline-flex; align-items:center; justify-content:center; width:auto; max-width:none; border-radius:12px; padding:12px 18px; font-size:14px; white-space:nowrap; }}
+  .sticky-cta .cta:hover {{ transform:translateY(-1px); filter:brightness(1.05); }}
+  @media (max-width:380px) {{ .sticky-cta .cta {{ padding:11px 14px; font-size:13px; white-space:normal; }} }}
+  body.show-sticky .wrap {{ margin-bottom: 78px; }}
   /* reveal-on-scroll */
   .reveal {{ opacity:0; transform:translateY(14px); transition:opacity .5s ease, transform .5s ease; }}
   .reveal.in {{ opacity:1; transform:none; }}

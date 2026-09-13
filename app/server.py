@@ -368,7 +368,7 @@ _EBOOK_WARMING_LOCK = threading.Lock()
 _SOCIAL_WEBHOOK = os.environ.get("SOCIAL_WEBHOOK", "")  # optional real-posting hook
 _PNG_CACHE = {}  # slug -> raster og card bytes (pure-Python render, capped)
 OG_CACHE_DIR = os.environ.get("PSTORE_OG_CACHE") or None  # persistent /og/*.png cache
-_OG_CACHE_VERSION = "navy2"  # bump when the share-card design changes
+_OG_CACHE_VERSION = "navy3"  # bump when the share-card design changes
 
 
 def _og_cache_dir():
@@ -408,6 +408,14 @@ def _og_cache_dir():
     except Exception:
         pass
     return OG_CACHE_DIR
+
+
+def _og_card_url(slug):
+    """Public URL of one raster share card, version-tagged so feed readers and
+    RSS importers re-fetch the PNG whenever the card design changes (an
+    unchanged image URL keeps the old art even after a redesign deploys)."""
+    return (seo.BASE_URL.rstrip("/") + "/og/" + urllib.parse.quote(slug) + ".png"
+            + "?v=" + _OG_CACHE_VERSION)
 
 
 def _render_og_png(slug):
@@ -4118,6 +4126,29 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                     continue
                 if val:
                     _set_setting("social.key.twitter.%s" % f, val)
+        # Optional AI provider keys (the /admin/apikeys 'AI writing' section):
+        # persist to DB so they survive restart/redeploy and apply immediately
+        # by reconfiguring the runtime module (env vars still win at read time).
+        a = body.get("ai")
+        if isinstance(a, dict):
+            for p in ai.PROVIDERS:
+                d = a.get(p)
+                if not isinstance(d, dict):
+                    continue
+                key = str(d.get("key") or "").strip()
+                if key:
+                    model = str(d.get("model") or "").strip() or _get_setting("ai.model." + p)
+                    base = str(d.get("base") or "").strip() or _get_setting("ai.base." + p)
+                    _set_setting("ai.key." + p, key)
+                    _set_setting("ai.model." + p, model)
+                    if base:
+                        _set_setting("ai.base." + p, base)
+                    ai.configure_runtime(p, key, model, base)
+                elif "key" in d:  # explicit clear request (blank key)
+                    _set_setting("ai.key." + p, "")
+                    _set_setting("ai.model." + p, "")
+                    _set_setting("ai.base." + p, "")
+                    ai.clear_runtime(p)
         # Market-demography targeting profile (region / interest / persona).
         demo = body.get("demography")
         if isinstance(demo, dict):
@@ -4128,10 +4159,16 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         return self._send(200, self._settings())
 
     def _settings_test(self):
-        """Verifies the saved PA-API credentials against the live Product
-        Advertising API by looking up a well-known ASIN. Returns ok even before
-        the credentials really work only if we can't reach AWS (offline) — the
-        readiness flag comes from paapi.ready() either way."""
+        """Verifies credentials against the live API. PA-API looks up a sample
+        ASIN; an `ai` payload fires one tiny chat request to prove the key (and
+        model/base) work, showing model + latency on success."""
+        a = self._body().get("ai")
+        if isinstance(a, dict):
+            provider = str(a.get("provider") or "").strip().lower() or "opencode"
+            key = str(a.get("key") or "").strip() or ai.key_for(provider)
+            model = str(a.get("model") or "").strip() or ai.model_for(provider)
+            base = str(a.get("base") or "").strip()
+            return self._send(200, ai.test(provider, key, model, base))
         if not paapi.ready():
             return self._send(200, {
                 "ok": False, "provider": "paapi",
@@ -4529,7 +4566,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 "link": tagged,
                 "description": title + " — the best sellers, compared and "
                                "rated. Full guide: " + tagged,
-                "image": base + "/og/" + kw + ".png",
+                "image": _og_card_url(kw),
                 "pubdate": r["created_at"] or "",
             })
         return seo.render_rss(items)
@@ -4585,7 +4622,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 "<td><a target='_blank' rel='noopener' href='%s'>png ↗</a></td></tr>"
                 % (seo._clean(title), seo._clean(link),
                    seo._clean(r["created_at"] or "—"),
-                   base + "/og/" + kw + ".png"))
+                   _og_card_url(kw)))
             if len(item_rows) >= 40:
                 break
         rows_html = "".join(item_rows) or \
@@ -9192,6 +9229,44 @@ fresh();
             for f, lbl, ph in tw_meta)
         webhook_val = seo._clean(_get_setting("social.webhook"))
         pa_ready = "✅ ready" if pa["ready"] else "⚠️ incomplete — add the three PA-API values"
+        _ai_active = ai.active_provider()
+        if _ai_active:
+            ai_status = ('Active: <b>%s</b> · model %s' % (
+                seo._clean(ai.PROVIDERS[_ai_active]["label"]),
+                seo._clean(ai.model_for(_ai_active))))
+        else:
+            ai_status = "No AI key set — ebook/headline copy uses the built-in template fallback."
+        ai_rows = ""
+        for _p in ai.PROVIDERS:
+            _m = ai.PROVIDERS[_p]
+            ai_rows += ("""
+  <div class="sub"><h3>%s%s</h3>
+    <label>API key
+      <input type="password" name="ai_key_%s" value="%s" placeholder="%s" autocomplete="off" data-masked="1" data-aik="%s"></label>
+    <label>Model
+      <input name="ai_model_%s" value="%s" list="aimods_%s" placeholder="model id"><datalist id="aimods_%s"><option value="%s"></option></datalist></label>
+    <label>Base URL (advanced, optional)
+      <input type="url" name="ai_base_%s" value="%s" placeholder="%s"></label>
+    <div class="row">
+      <button type="button" class="btn" onclick="ai_test('%s')">Test %s</button>
+      <label class="chk"><input type="checkbox" data-aicl="%s"> Clear saved key</label>
+      <span class="msg" id="aiout_%s"></span>
+    </div>
+  </div>""" % (
+                seo._clean(_m["label"]),
+                " <span class='hint'>(free tier)</span>" if _m.get("free") else "",
+                _p, self._maskkv(_p, "ai.key." + _p), seo._clean(_m["key_hint"]), _p,
+                _p, seo._clean(_get_setting("ai.model." + _p) or _m["model"]), _p, _p,
+                seo._clean((_m["models"] or [_m["model"]])[0]),
+                _p, seo._clean(_get_setting("ai.base." + _p)), seo._clean(_m["base"]),
+                _p, seo._clean(_m["label"]), _p, _p))
+        ai_section = f"""<section class="card"><h2>🤖 AI writing keys (optional)</h2>
+<p class="hint">{ai_status}. Paste any provider's key below; the first configured one becomes active for ebook/headline copy (env <code>AI_PROVIDER</code> still wins if set). Keys persist across restarts.</p>
+<form class="cols-form" id="fai" onsubmit="return ai_save();">
+  {ai_rows}
+  <div class="row"><button class="btn">Save AI keys</button><span id="aiout" class="msg"></span></div>
+</form>
+</section>"""
         body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>API Keys — pstore</title><link rel="stylesheet" href="/style.css">
@@ -9222,6 +9297,7 @@ fresh();
   <div class="row"><button class="btn">Save social keys</button><span id="socout" class="msg"></span></div>
 </form>
 </section>
+{ai_section}
 </main>
 <footer><p>Keys are stored locally on this install; the live AWS/social account credentials never leave your instance. API keys are shown masked; only overwrite a field to change it.</p></footer>
 <script>
@@ -9262,6 +9338,35 @@ async function soc_save(){{
   }}}});
   $("socout").textContent = d && d.ok ? "Saved ✓" : ((d && d.error) || "Save failed");
   return false;
+}}
+async function ai_save(){{
+  $("aiout").textContent = "Saving…";
+  const ai = {{}};
+  document.querySelectorAll("#fai [data-aik]").forEach(el => {{
+    const p = el.dataset.aik;
+    if (el.value && el.value.indexOf("•") === -1) {{
+      const model = (document.querySelector('[name="ai_model_'+p+'"]') || {{}}).value || "";
+      const base = (document.querySelector('[name="ai_base_'+p+'"]') || {{}}).value || "";
+      ai[p] = {{key: el.value, model: model, base: base}};
+    }}
+  }});
+  document.querySelectorAll("#fai [data-aicl]").forEach(el => {{
+    if (el.checked) ai[el.dataset.aicl] = {{key: ""}};
+  }});
+  const d = await post("/api/settings", {{ai: ai}});
+  $("aiout").textContent = d && d.ok ? "Saved ✓" : ((d && d.error) || "Save failed");
+  return false;
+}}
+async function ai_test(p){{
+  const out = $("aiout_" + p);
+  out.textContent = "Testing…";
+  const key = (document.querySelector('[name="ai_key_'+p+'"]') || {{}}).value || "";
+  const model = (document.querySelector('[name="ai_model_'+p+'"]') || {{}}).value || "";
+  const base = (document.querySelector('[name="ai_base_'+p+'"]') || {{}}).value || "";
+  const d = await post("/api/settings/test", {{ai: {{provider: p, key: key, model: model, base: base}}}});
+  out.textContent = d && d.ok
+    ? ("Test ✓ " + (d.reply || "") + " · " + (d.latency_ms || 0) + "ms")
+    : ((d && d.error) || "Test failed");
 }}
 </script>
 </body></html>"""
