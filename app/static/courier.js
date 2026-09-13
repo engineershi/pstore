@@ -21,6 +21,7 @@
   /* ---- email opt-in: <form class="courier">, POST /subscribe, JSON ---- */
   document.addEventListener("submit", function (ev) {
     var form = ev.target;
+    if (form.classList && form.classList.contains("wm-form")) return;
     if (!form.classList || !form.classList.contains("courier")) return;
     ev.preventDefault();
     var email = form.querySelector("[name=email]");
