@@ -1717,7 +1717,25 @@ def _pin_drip(now=None):
     return {"on": True, "scheduled": scheduled, "niches": len(picked)}
 
 
+_DB_SCHEMA_LOCK = threading.Lock()
+_db_schema_ready = False
+
+
 def _db():
+    conn = sqlite3.connect(DB)
+    conn.row_factory = sqlite3.Row
+    global _db_schema_ready
+    if _db_schema_ready:
+        return conn
+    with _DB_SCHEMA_LOCK:
+        if _db_schema_ready:
+            return conn
+        _ensure_db_schema(conn)
+        _db_schema_ready = True
+    return conn
+
+
+def _ensure_db_schema(conn):
     conn = sqlite3.connect(DB)
     conn.row_factory = sqlite3.Row
     conn.execute("""CREATE TABLE IF NOT EXISTS niches (
@@ -1861,11 +1879,6 @@ def _db():
         conn.commit()
     except Exception:
         pass
-    try:
-        conn.execute("ALTER TABLE events ADD COLUMN country TEXT DEFAULT ''")
-        conn.commit()
-    except Exception:
-        pass
     conn.execute("""CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT
@@ -1935,6 +1948,11 @@ def _db():
     )""")
     try:
         conn.execute("ALTER TABLE events ADD COLUMN referrer TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        conn.rollback()
+    try:
+        conn.execute("ALTER TABLE events ADD COLUMN country TEXT DEFAULT ''")
         conn.commit()
     except sqlite3.OperationalError:
         conn.rollback()
