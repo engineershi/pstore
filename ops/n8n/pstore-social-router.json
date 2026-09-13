@@ -1,0 +1,850 @@
+{
+  "name": "Pstore: social posting router (6 platforms)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "SOCIAL POSTING ROUTER — point pstore's SOCIAL_WEBHOOK at the \"Inbound webhook\" URL below (POST /webhook/pstore-social). Pstore fires one webhook per published kit with the exact payload documented in app/social.py:\n\n{\"body\", \"link\", \"platform\", \"name\", \"slug\", \"keyword\", \"board\", \"image\", \"image_png\"}\n\nThis workflow normalises that payload, then routes it to every platform whose toggle is ON in the \"Normalize payload\" node's TOGGLES constant (flip a flag to true once you have that platform's credentials).\n\nWHAT EACH BRANCH POSTS (via plain HTTP Request nodes):\n- X / Twitter   -> POST /2/tweets (OAuth 2.0 user context; X now requires a paid dev app)\n- Facebook      -> POST /photos on a Page (Graph API access token)\n- LinkedIn      -> POST /v2/ugcPosts (Bearer token from a LinkedIn app)\n- Instagram     -> media container -> /media_publish (IG business + FB Graph token)\n- Pinterest     -> POST /v5/pins (OAuth2 token from your approved Pinterest app)\n- Threads       -> /threads -> /threads_publish (Threads app access token)\n\nREALITY CHECK (no tool 'gives' you extra posting accounts): X, Instagram and Threads require YOUR OWN developer app, approved per platform, on EVERY automation tool — n8n, Make or Zapier. Only Facebook, LinkedIn and Pinterest can be authenticated with a plain token. Telegram is covered by the older pstore-fanout-social.json and needs no approval."
+      },
+      "id": "00000000-0000-4000-8000-000000000001",
+      "name": "Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -900,
+        -500
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "pstore-social",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000002",
+      "name": "Inbound webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.2,
+      "position": [
+        -680,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalise the pstore kit and attach per-platform enable switches.\n// Flip a flag to true only once you have that platform's credentials.\nconst TOGGLES = { x: false, facebook: true, linkedin: true, instagram: false, pinterest: true, threads: false };\n\nconst out = [];\nfor (const it of $input.all()) {\n  const j = it.json ?? {};\n  const raw = String(j.platform ?? '').toLowerCase();\n  const key = raw.includes('twitter') || raw === 'x' ? 'x'\n    : raw.includes('facebook') ? 'facebook'\n    : raw.includes('linkedin') ? 'linkedin'\n    : raw.includes('instagram') ? 'instagram'\n    : raw.includes('pinterest') ? 'pinterest'\n    : raw.includes('threads') ? 'threads' : 'unknown';\n  out.push({ json: {\n    platform: key,\n    platformRaw: String(j.platform ?? ''),\n    body: String(j.body ?? j.title ?? ''),\n    link: String(j.link ?? ''),\n    name: String(j.name ?? j.title ?? 'pstore pick'),\n    slug: String(j.slug ?? ''),\n    keyword: String(j.keyword ?? ''),\n    board: String(j.board ?? 'Deals'),\n    image: String(j.image ?? ''),\n    image_png: String(j.image_png ?? j.image ?? ''),\n    ...TOGGLES,\n  }});\n}\nreturn out;"
+      },
+      "id": "00000000-0000-4000-8000-000000000003",
+      "name": "Normalize payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -460,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b1000000-0000-4000-8000-000000000001",
+              "leftValue": "={{ $json.x }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000004",
+      "name": "X on?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -220,
+        -320
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b1000000-0000-4000-8000-000000000002",
+              "leftValue": "={{ $json.facebook }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000005",
+      "name": "Facebook on?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -220,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b1000000-0000-4000-8000-000000000003",
+              "leftValue": "={{ $json.linkedin }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000006",
+      "name": "LinkedIn on?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b1000000-0000-4000-8000-000000000004",
+              "leftValue": "={{ $json.instagram }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000007",
+      "name": "Instagram on?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -220,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b1000000-0000-4000-8000-000000000005",
+              "leftValue": "={{ $json.pinterest }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000008",
+      "name": "Pinterest on?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -220,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b1000000-0000-4000-8000-000000000006",
+              "leftValue": "={{ $json.threads }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000009",
+      "name": "Threads on?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -220,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.twitter.com/2/tweets",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.body }) }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "redirect": {
+            "followRedirects": true,
+            "maxRedirects": 2
+          },
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "00000000-0000-4000-8000-00000000000a",
+      "name": "X post",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        40,
+        -320
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "",
+          "name": "X API (OAuth 2.0 user context)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 20000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v20.0/PAGE_ID_CHANGE_ME/photos",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "url",
+              "value": "={{ $json.image_png }}"
+            },
+            {
+              "name": "message",
+              "value": "={{ $json.body }}"
+            },
+            {
+              "name": "link",
+              "value": "={{ $json.link }}"
+            },
+            {
+              "name": "access_token",
+              "value": "PAGE_TOKEN_CHANGE_ME"
+            }
+          ]
+        },
+        "options": {
+          "redirect": {
+            "followRedirects": true,
+            "maxRedirects": 2
+          },
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "00000000-0000-4000-8000-00000000000b",
+      "name": "Facebook page photo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        40,
+        -160
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 20000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.linkedin.com/v2/ugcPosts",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ author: 'urn:li:person:URN_LI_PERSON_CHANGE_ME', lifecycleState: 'PUBLISHED', specificContent: { 'com.linkedin.ugc.ShareContent': { shareCommentary: { text: $json.body }, shareMediaCategory: 'NONE' } }, visibility: { 'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC' } }) }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "redirect": {
+            "followRedirects": true,
+            "maxRedirects": 2
+          },
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "00000000-0000-4000-8000-00000000000c",
+      "name": "LinkedIn post",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        40,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "LinkedIn token (Authorization: Bearer <token>)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 20000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v20.0/IG_USER_ID_CHANGE_ME/media",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "image_url",
+              "value": "={{ $json.image_png }}"
+            },
+            {
+              "name": "caption",
+              "value": "={{ $json.body }}"
+            },
+            {
+              "name": "access_token",
+              "value": "IG_TOKEN_CHANGE_ME"
+            }
+          ]
+        },
+        "options": {
+          "redirect": {
+            "followRedirects": true,
+            "maxRedirects": 2
+          },
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "00000000-0000-4000-8000-00000000000d",
+      "name": "IG create container",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        40,
+        160
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 20000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v20.0/IG_USER_ID_CHANGE_ME/media_publish",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "creation_id",
+              "value": "={{ $json.id }}"
+            },
+            {
+              "name": "access_token",
+              "value": "IG_TOKEN_CHANGE_ME"
+            }
+          ]
+        },
+        "options": {
+          "redirect": {
+            "followRedirects": true,
+            "maxRedirects": 2
+          },
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "00000000-0000-4000-8000-00000000000e",
+      "name": "IG publish",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        280,
+        160
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.pinterest.com/v5/pins",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ board_id: 'BOARD_ID_CHANGE_ME', title: $json.name, description: $json.body, link: $json.link, media_source: { source_type: 'image_url', url: $json.image_png } }) }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "redirect": {
+            "followRedirects": true,
+            "maxRedirects": 2
+          },
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "00000000-0000-4000-8000-00000000000f",
+      "name": "Pinterest pin",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        40,
+        320
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "",
+          "name": "Pinterest API v5 (OAuth2)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 20000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.threads.net/v1.0/THREADS_USER_ID_CHANGE_ME/threads",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "media_type",
+              "value": "IMAGE"
+            },
+            {
+              "name": "image_url",
+              "value": "={{ $json.image_png }}"
+            },
+            {
+              "name": "text",
+              "value": "={{ $json.body }}"
+            },
+            {
+              "name": "access_token",
+              "value": "THREADS_TOKEN_CHANGE_ME"
+            }
+          ]
+        },
+        "options": {
+          "redirect": {
+            "followRedirects": true,
+            "maxRedirects": 2
+          },
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000010",
+      "name": "Threads create",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        40,
+        480
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 20000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.threads.net/v1.0/THREADS_USER_ID_CHANGE_ME/threads_publish",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "creation_id",
+              "value": "={{ $json.id }}"
+            },
+            {
+              "name": "access_token",
+              "value": "THREADS_TOKEN_CHANGE_ME"
+            }
+          ]
+        },
+        "options": {
+          "redirect": {
+            "followRedirects": true,
+            "maxRedirects": 2
+          },
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000011",
+      "name": "Threads publish",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        280,
+        480
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {},
+      "id": "00000000-0000-4000-8000-000000000012",
+      "name": "Router done",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        500,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Inbound webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize payload": {
+      "main": [
+        [
+          {
+            "node": "X on?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Facebook on?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LinkedIn on?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Instagram on?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Pinterest on?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Threads on?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "X on?": {
+      "main": [
+        [
+          {
+            "node": "X post",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Router done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Facebook on?": {
+      "main": [
+        [
+          {
+            "node": "Facebook page photo",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Router done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LinkedIn on?": {
+      "main": [
+        [
+          {
+            "node": "LinkedIn post",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Router done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Instagram on?": {
+      "main": [
+        [
+          {
+            "node": "IG create container",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Router done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pinterest on?": {
+      "main": [
+        [
+          {
+            "node": "Pinterest pin",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Router done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Threads on?": {
+      "main": [
+        [
+          {
+            "node": "Threads create",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Router done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "X post": {
+      "main": [
+        [
+          {
+            "node": "Router done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Facebook page photo": {
+      "main": [
+        [
+          {
+            "node": "Router done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LinkedIn post": {
+      "main": [
+        [
+          {
+            "node": "Router done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IG create container": {
+      "main": [
+        [
+          {
+            "node": "IG publish",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pinterest pin": {
+      "main": [
+        [
+          {
+            "node": "Router done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Threads create": {
+      "main": [
+        [
+          {
+            "node": "Threads publish",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IG publish": {
+      "main": [
+        [
+          {
+            "node": "Router done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Threads publish": {
+      "main": [
+        [
+          {
+            "node": "Router done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

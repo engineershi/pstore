@@ -19,6 +19,10 @@ credential convention.
   the "Normalize payload" node's `TOGGLES` constant. Telegram photo works with
   zero approval; Facebook page photo + Mastodon status need their own tokens.
 - `pinterest-list-boards.json` — run once to discover the numeric Board ID.
+- `pstore-social-router.json` — the everything router: point pstore's
+  `SOCIAL_WEBHOOK` at this webhook and one verified package posts to **all six**
+  platforms whose toggle is ON (X, Facebook, LinkedIn, Instagram, Pinterest,
+  Threads). Uses plain HTTP Request nodes; per-platform setup below.
 
 ## Why n8n (vs Make/Pipedream)
 - Make / Pipedream: Pinterest "Create a Pin" is Premium/own-token-walled.
@@ -65,6 +69,35 @@ app approved** at `developers.pinterest.com`:
    `CHAT_ID_CHANGE_ME`, activate.
 7. Import `pstore-fanout-social.json`, flip the TOGGLES flags as each channel
    is set up, activate.
+
+## Six-platform router (`pstore-social-router.json`)
+
+Import it, copy the webhook URL from the **Inbound webhook** node, set pstore's
+`SOCIAL_WEBHOOK` env var to that URL (Render → pstore → Environment, redeploy).
+Every published kit then hits the router and fans out to the platforms whose
+flag is `true` in the **Normalize payload** node's `TOGGLES` constant.
+
+Per-platform credentials (each is YOUR own app — no tool ships these):
+
+| Branch | Node(s) | What you must supply |
+|---|---|---|
+| X / Twitter | `X post` | Paid X developer app (API v2 user context, OAuth 2.0). Free API tier cannot post — an X dev app is ~$100–200/mo. |
+| Facebook | `Facebook page photo` | Meta app + long-lived `PAGE_TOKEN_CHANGE_ME` (replace) + numeric page id in the URL. Page publish permission needed. |
+| LinkedIn | `LinkedIn post` | LinkedIn app (OAuth) w/ `w_member_social` scope; paste your `urn:li:person:offus_person...` id into `URN_LI_PERSON_CHANGE_ME`. |
+| Instagram | `IG create container` + `IG publish` | Instagram Business account connected to a Meta app; `IG_USER_ID_CHANGE_ME` + `IG_TOKEN_CHANGE_ME`. |
+| Pinterest | `Pinterest pin` | Approved Pinterest dev app → OAuth2 credential "Pinterest API v5 (OAuth2)" + numeric `BOARD_ID_CHANGE_ME` (from `pinterest-list-boards.json`). |
+| Threads | `Threads create` + `Threads publish` | Threads account in a Meta app (Threads API graduated); `THREADS_USER_ID_CHANGE_ME` + `THREADS_TOKEN_CHANGE_ME`. |
+
+Notes:
+- The `body` pstore sends already contains the UTM-tracked link, so every branch
+  posts `body` verbatim (no double-link). The PNG share card (`image_png`) is
+  attached by the visual branches (FB / IG / Pinterest / Threads).
+- Instagram + Threads post in **two steps** (create media container, then
+  publish) — the router chains them for you; a failed create never publishes.
+- **Do not double-post Pinterest**: keep either pstore's native `_post_pinterest`
+  / the bulk RSS importer, OR this branch — not all three at once.
+- X is the only branch that needs a paid developer app; skip it (`x: false`)
+  and use the older Telegram fan-out if you want a zero-approval mirror.
 
 ## Behaviour notes
 - Only-new dedup lives in n8n workflow static data (guid/link of each item).
