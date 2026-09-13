@@ -28,6 +28,7 @@ endpoints used for the visual caption; kept behind the webhook for now).
 import datetime
 import json
 import os
+import re
 import secrets
 import threading
 import urllib.parse
@@ -152,6 +153,10 @@ def _body_for(platform, kit):
     return {"body": body, "link": link, "image": kit.get("image") or "",
             "image_png": kit.get("image_png") or "",
             "board_id": str(kit.get("board_id") or ""),
+            "keyword": kit.get("keyword") or "",
+            "hashtags": kit.get("hashtags") or "",
+            "name": kit.get("name") or "",
+            "utm_content": kit.get("utm_content") or "",
             "platform": platform}
 
 
@@ -234,6 +239,49 @@ def _pint_board_id(kv):
     return board_id
 
 
+_EMOJI_RE = re.compile(
+    u"[\U0001F000-\U0001FAFF\U0001F900-\U0001F9FF\U0001FA70-\U0001FAFF"
+    u"\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u2764\u2E50]"
+)
+
+
+def _strip_emoji(s):
+    """Pinterest mangles emoji in renders and duplicate keys hash emoji, so the
+    pin title/description carry plain text (ASCII + accented letters only)."""
+    s = _EMOJI_RE.sub("", s or "")
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _pin_title(body, keyword):
+    """Keyword-first Pinterest title (<=95 chars, plain text). If the composer
+    already smokes the keyword in the first line we keep it — otherwise the
+    keyword speaks for itself so the pin is discoverable at a glance."""
+    line = _strip_emoji((body or "").split("\n", 1)[0])
+    kw = _strip_emoji(keyword or "").strip()
+    if kw and kw.lower() not in line.lower():
+        line = kw.title()[:70]
+    return line[:95] or "Best picks, ranked fresh"
+
+
+def _pin_desc(body, link, hashtags, keyword):
+    """Pinterest-friendly description (<=500 chars): plain body text, the
+    keyword fold-in on top when the composer missed it, then discovery tags and
+    the tracked link. Emoji stripped; length kept well under Pinterest's cap so
+    nothing important gets cut."""
+    text = _strip_emoji(body or "")
+    kw = _strip_emoji(keyword or "").strip()
+    if kw and kw.lower() not in text.lower():
+        text = (kw.title() + ": " + text) if text else kw.title()
+    head = text[:420]
+    tail = ""
+    if hashtags and hashtags not in head:
+        tail += hashtags[:180]
+    if link and link not in text:
+        tail += ("\n" if tail else "") + link[:200]
+    out = head + (("\n\n" + tail) if tail else "")
+    return out[:500] or ""
+
+
 def _post_pinterest(b, kv):
     tok = _pint_cred(kv)[0] or ""
     if not tok:
@@ -246,8 +294,10 @@ def _post_pinterest(b, kv):
                            "or set a board name)."}
     image = b.get("image_png") or b.get("image") or og_image(b["link"])
     payload = {
-        "title": (b["body"] or "").split("\n", 1)[0][:100],
-        "description": b["body"] or "",
+        "title": _pin_title(b["body"], b.get("keyword") or ""),
+        "description": _pin_desc(b["body"], b["link"] or "",
+                                 b.get("hashtags") or "",
+                                 b.get("keyword") or ""),
         "link": b["link"] or "",
         "board_id": board,
         "media_source": {"source_type": "image_url", "url": image},

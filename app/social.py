@@ -574,72 +574,100 @@ def _vignette(img, W, H, strength=0.13):
             img[i + 2] = int(img[i + 2] * s)
 
 
-_BG_CANVAS = None  # shared, immutable background (same for every card)
+# Variant palettes for repin-fresh cards. Each row is
+# ((gradient top, gradient bottom), soft accent (CTA body), accent (CTA core /
+# keyword / stars / brand dot)). Palette 0 keeps the classic navy + gold look;
+# variants 1+ recolor the chrome so fresh pins of the same niche look visibly
+# unique to Pinterest instead of reading as a duplicate.
+_VARIANT_PALETTES = (
+    ((13, 26, 48), (36, 58, 102), (255, 168, 74), (255, 186, 106)),  # 0 navy/gold
+    ((32, 18, 42), (74, 40, 88), (255, 150, 190), (255, 118, 170)),  # 1 rose
+    ((10, 32, 44), (20, 64, 82), (96, 216, 202), (118, 235, 200)),   # 2 teal
+    ((42, 24, 14), (90, 60, 30), (255, 200, 130), (255, 176, 106)),  # 3 amber
+    ((24, 16, 46), (56, 40, 96), (196, 168, 255), (172, 140, 246)),  # 4 violet
+)
+
+_BG_CANVAS_CACHE = {}  # palette key -> immutable shared backdrop bytes
 
 
-def _base_canvas():
-    """The calm shared backdrop: navy gradient + two soft glows + vignette,
-    plus the static brand chrome (pill, dotted divider, gold CTA button with
-    label + arrow, reassurance tag) that is identical on every card. Rendered
-    once and reused by every niche card (one bytearray copy per card), so the
-    whole pinned fleet looks pixel-identical and warms up fast."""
-    global _BG_CANVAS
-    if _BG_CANVAS is None:
-        W, H = _CANVAS
-        t0, t1 = _GRAD_CARD
-        img = bytearray(W * H * 3)
-        for y in range(H):
-            t = y / (H - 1)
-            img[y * W * 3:(y + 1) * W * 3] = bytes((
-                int(t0[0] + (t1[0] - t0[0]) * t),
-                int(t0[1] + (t1[1] - t0[1]) * t),
-                int(t0[2] + (t1[2] - t0[2]) * t))) * W
-        _glow(img, W, H, 250, 150, 520, (255, 176, 96), 0.15)
-        _glow(img, W, H, 1010, 540, 470, (86, 204, 255), 0.12)
-        _vignette(img, W, H)
+def _palette_for(variant):
+    """Palette for a variant index. Variant 0 is always the classic navy+gold
+    look; variant N cycles the four fresh palettes (never the default) so the
+    5th repin restarts the hue cycle instead of echoing the original card."""
+    palettes = _VARIANT_PALETTES
+    variant = int(variant or 0)
+    if variant == 0 or len(palettes) < 2:
+        return palettes[0]
+    return palettes[1 + (variant - 1) % (len(palettes) - 1)]
 
-        def _stamp(pts, rgb, a=1.0):
-            for (px, py) in pts:
-                if 0 <= px < W and 0 <= py < H:
-                    _blend(img, W, H, px, py, rgb, a)
 
-        # brand row — quiet, top-left
-        _dot(img, W, H, 86, 76, 6, _GOLD)
-        _stamp(_raster_text("PSTORE", 116, 58, 3, gap=2), _CREAM)
+def _base_canvas(palette=None):
+    """The calm shared backdrop: gradient + two soft glows + vignette, plus the
+    static brand chrome (pill, dotted divider, accent CTA button with label +
+    arrow, reassurance tag) that is identical on every card for a given
+    palette. Rendered once per palette and reused by every niche card (one
+    bytearray copy per card), so the pinned fleet warms up fast and repin
+    variants stay visibly distinct."""
+    p = palette or _VARIANT_PALETTES[0]
+    key = (tuple(p[0]), tuple(p[1]), tuple(p[2]), tuple(p[3]))
+    cached = _BG_CANVAS_CACHE.get(key)
+    if cached is not None:
+        return cached
+    W, H = _CANVAS
+    t0, t1, soft, accent = p
+    img = bytearray(W * H * 3)
+    for y in range(H):
+        t = y / (H - 1)
+        img[y * W * 3:(y + 1) * W * 3] = bytes((
+            int(t0[0] + (t1[0] - t0[0]) * t),
+            int(t0[1] + (t1[1] - t0[1]) * t),
+            int(t0[2] + (t1[2] - t0[2]) * t))) * W
+    _glow(img, W, H, 250, 150, 520, accent, 0.15)
+    _glow(img, W, H, 1010, 540, 470, (86, 204, 255), 0.12)
+    _vignette(img, W, H)
 
-        # fresh pill — busiest signal sits small, top-right
-        pill = "UPDATED DAILY"
-        pw = _text_width(pill, 3, gap=1) + 40
-        px0, py0, px1, py1 = 1104 - pw, 56, 1104, 96
-        _fill_round_rect(img, W, H, px0, py0, px1, py1, 20, (255, 255, 255), 0.06)
-        _ring_round_rect(img, W, H, px0, py0, px1, py1, 20, (255, 255, 255), 0.20, 2)
-        _dot(img, W, H, px0 + 18, 76, 4, _GREEN)
-        _stamp(_raster_text(pill, px0 + 36, 64, 3, gap=1), _MUTED)
+    def _stamp(pts, rgb, a=1.0):
+        for (px, py) in pts:
+            if 0 <= px < W and 0 <= py < H:
+                _blend(img, W, H, px, py, rgb, a)
 
-        # calm dotted divider
-        for x in range(100, 1106, 26):
-            _dot(img, W, H, x, 472, 3, (255, 255, 255), 0.14)
+    # brand row — quiet, top-left
+    _dot(img, W, H, 86, 76, 6, accent)
+    _stamp(_raster_text("PSTORE", 116, 58, 3, gap=2), _CREAM)
 
-        # single gold call to action — painted once, identical everywhere
-        bx0, by0, bx1, by1 = 96, 496, 706, 576
-        _fill_round_rect(img, W, H, bx0 + 3, by0 + 5, bx1 + 3, by1 + 5, 26, (8, 15, 30), 0.35)
-        _fill_round_rect(img, W, H, bx0, by0, bx1, by1, 26, _GOLD_SOFT, 1.0)
-        _fill_round_rect(img, W, H, bx0 + 8, by0 + 8, bx1 - 8, by1 - 8, 22, _GOLD, 1.0)
-        _stamp(_raster_text("FULL LIST + PRICES", 148, 532, 4, gap=1), _INK)
-        _stroke(img, W, H, 640, 536, 674, 536, _INK, 6)
-        _stroke(img, W, H, 660, 522, 674, 536, _INK, 6)
-        _stroke(img, W, H, 660, 550, 674, 536, _INK, 6)
+    # fresh pill — busiest signal sits small, top-right
+    pill = "UPDATED DAILY"
+    pw = _text_width(pill, 3, gap=1) + 40
+    px0, py0, px1, py1 = 1104 - pw, 56, 1104, 96
+    _fill_round_rect(img, W, H, px0, py0, px1, py1, 20, (255, 255, 255), 0.06)
+    _ring_round_rect(img, W, H, px0, py0, px1, py1, 20, (255, 255, 255), 0.20, 2)
+    _dot(img, W, H, px0 + 18, 76, 4, _GREEN)
+    _stamp(_raster_text(pill, px0 + 36, 64, 3, gap=1), _MUTED)
 
-        # soft reassurance, bottom-right
-        _dot(img, W, H, 822, 542, 4, _GREEN)
-        _stamp(_raster_text("RANKED FRESH", 846, 528, 3, gap=1), _MUTED)
+    # calm dotted divider
+    for x in range(100, 1106, 26):
+        _dot(img, W, H, x, 472, 3, (255, 255, 255), 0.14)
 
-        # two faint plus marks frame the composition without noise
-        for (px, py) in ((66, 258), (1134, 316)):
-            _stamp(_raster_text("+", px, py, 2, gap=0), (255, 255, 255), 0.16)
+    # single accent call to action — painted once, identical per palette
+    bx0, by0, bx1, by1 = 96, 496, 706, 576
+    _fill_round_rect(img, W, H, bx0 + 3, by0 + 5, bx1 + 3, by1 + 5, 26, (8, 15, 30), 0.35)
+    _fill_round_rect(img, W, H, bx0, by0, bx1, by1, 26, soft, 1.0)
+    _fill_round_rect(img, W, H, bx0 + 8, by0 + 8, bx1 - 8, by1 - 8, 22, accent, 1.0)
+    _stamp(_raster_text("FULL LIST + PRICES", 148, 532, 4, gap=1), _INK)
+    _stroke(img, W, H, 640, 536, 674, 536, _INK, 6)
+    _stroke(img, W, H, 660, 522, 674, 536, _INK, 6)
+    _stroke(img, W, H, 660, 550, 674, 536, _INK, 6)
 
-        _BG_CANVAS = bytes(img)
-    return _BG_CANVAS
+    # soft reassurance, bottom-right
+    _dot(img, W, H, 822, 542, 4, _GREEN)
+    _stamp(_raster_text("RANKED FRESH", 846, 528, 3, gap=1), _MUTED)
+
+    # two faint plus marks frame the composition without noise
+    for (px, py) in ((66, 258), (1134, 316)):
+        _stamp(_raster_text("+", px, py, 2, gap=0), (255, 255, 255), 0.16)
+
+    _BG_CANVAS_CACHE[key] = bytes(img)
+    return _BG_CANVAS_CACHE[key]
 
 
 def _text_width(s, scale, gap=0):
@@ -658,22 +686,26 @@ def _wrap(s, limit):
     return (lines[:2] or [""]) if lines else [""]
 
 
-def og_png(slug, keyword, title, stars, reviews):
+def og_png(slug, keyword, title, stars, reviews, variant=0):
     """Raster 1200x630 share card — the PNG that Pinterest and the OG crawlers
-    see. Calm navy chrome from the shared canvas plus per-niche content: gold
-    keyword label, one headline, and gold-star trust proof. Pure stdlib."""
+    see. Calm chrome from the shared canvas plus per-niche content: accent
+    keyword label, one headline, and accent trust proof. `variant` (>=1) bakes
+    in a distinct palette (plus a small REPIN mark) so fresh pins of an already
+    pinned niche are visibly unique to Pinterest. Pure stdlib."""
     W, H = _CANVAS
-    img = bytearray(_base_canvas())
+    palette = _palette_for(variant)
+    accent = palette[3]
+    img = bytearray(_base_canvas(palette))
 
     def _stamp(pts, rgb, a=1.0):
         for (px, py) in pts:
             if 0 <= px < W and 0 <= py < H:
                 _blend(img, W, H, px, py, rgb, a)
 
-    # keyword — gold label, the niche the card is about
+    # keyword — accent label, the niche the card is about
     kw = (keyword or slug or "niche").replace("-", " ").upper()
     kw_t = kw if len(kw) <= 30 else kw[:29] + "..."
-    _stamp(_raster_text(kw_t, 96, 122, 4, gap=2), _GOLD)
+    _stamp(_raster_text(kw_t, 96, 122, 4, gap=2), accent)
 
     # headline — cool white, calm line spacing, at most two soft-wrapped lines
     lines = _wrap(title or "Best picks, ranked", 32)
@@ -683,7 +715,7 @@ def og_png(slug, keyword, title, stars, reviews):
             ln = ln[:31] + "..."
         _stamp(_raster_text(ln, 96, 208 + i * 50, 5, gap=1), _WHITE)
 
-    # trust row — gold stars + proof number (or a check for top-rated)
+    # trust row — accent stars + proof number (or a check for top-rated)
     y_star = 392
     if stars:
         try:
@@ -691,15 +723,19 @@ def og_png(slug, keyword, title, stars, reviews):
         except (TypeError, ValueError):
             _s = 0.0
         for i in range(3):
-            _star(img, W, H, 108 + i * 52, y_star, 17, _GOLD)
+            _star(img, W, H, 108 + i * 52, y_star, 17, accent)
         pr = "%.1f" % _s
         if isinstance(reviews, (int, float)) and reviews:
             pr += " · %d REVIEWS" % int(reviews)
         _stamp(_raster_text(pr.upper(), 300, 372, 4, gap=1), _BODY)
     else:
-        _stroke(img, W, H, 102, 384, 118, 400, _GOLD, 7)
-        _stroke(img, W, H, 118, 400, 148, 368, _GOLD, 7)
+        _stroke(img, W, H, 102, 384, 118, 400, accent, 7)
+        _stroke(img, W, H, 118, 400, 148, 368, accent, 7)
         _stamp(_raster_text("TOP RATED PICKS", 176, 372, 4, gap=1), _BODY)
+
+    # repin watermark — small, under the fresh pill, so variant pins are traceable
+    if variant:
+        _stamp(_raster_text("REPIN %d" % variant, 1010, 118, 3, gap=1), _MUTED)
 
     rows = (bytes(img[i:i + W * 3]) for i in range(0, len(img), W * 3))
     return _png_encode(W, H, rows)

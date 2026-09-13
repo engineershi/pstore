@@ -117,12 +117,24 @@ class TestSocialSuite(unittest.TestCase):
     def setUp(self):
         security.SUBSCRIBE_LIMITER.clear("sub|" + self.IPKEY)
         security.TRACK_LIMITER.clear("trk|" + self.IPKEY)
+        self._saved_warm = server._warm_og_png
+        server._warm_og_png = self._noop_warm  # no background ~4s PNG renders in tests
         with server._lock:
             conn = server._db()
             conn.execute("DELETE FROM clicks")
             conn.execute("DELETE FROM social_posts")
             conn.commit()
             conn.close()
+
+    def tearDown(self):
+        server._warm_og_png = self._saved_warm
+
+    @staticmethod
+    def _noop_warm(*a, **k):
+        """Background og-PNG warming is stubbed in tests: each render is ~4s of
+        pure-Python CPU, enough to starve the single sandbox core and make
+        unrelated HTTP tests time out."""
+        return None
 
     def _api(self, q="keto snacks"):
         st, _, ctype, data = self._raw("/api/social?keyword=" + urllib.parse.quote(q),
@@ -823,6 +835,187 @@ class TestSocialSuite(unittest.TestCase):
         finally:
             server._set_setting("social.amplify.max_runs", "2")
             server._set_setting("social.amplify.min_age_hours", "24")
+
+    def _drip_token(self, token):
+        """Paste/clear the Pinterest token for the drip (returns prev for restore)."""
+        prev = server._get_setting("social.key.pinterest.token")
+        server._set_setting("social.key.pinterest.token", token)
+        return prev
+
+    def _drip_settings(self):
+        """Capture drip settings (token, daily, min_gap, marker) for restore."""
+        return {k: server._get_setting(k) for k in (
+            "social.key.pinterest.token", "social.drip.daily",
+            "social.drip.min_gap_days", "social.drip.last", "social.drip")}
+
+    def _restore_drip_settings(self, saved):
+        for k, v in saved.items():
+            server._set_setting(k, v)
+
+    def test_drip_schedules_fresh_pins_for_unpinned_niches(self):
+        import datetime as _dt
+        saved = self._drip_settings()
+        now = _dt.datetime(2026, 9, 13, 10, 0, 0)
+        try:
+            server._set_setting("social.key.pinterest.token", "pin-token")
+            server._set_setting("social.drip.daily", "50")
+            server._set_setting("social.drip.last", "2000-01-01")
+            res = server._pin_drip(now=now)
+            self.assertTrue(res["on"])
+            self.assertFalse(res.get("need_token"))
+            self.assertGreaterEqual(res["scheduled"], 1)
+            self.assertEqual(server._get_setting("social.drip.last"),
+                             now.strftime("%Y-%m-%d"))
+            with server._lock:
+                c = server._db()
+                rows = c.execute(
+                    "SELECT slug, keyword, status, scheduled_at FROM social_posts "
+                    "WHERE platform='Pinterest' AND status='scheduled'").fetchall()
+                c.close()
+            pins = {r["slug"]: r for r in rows}
+            self.assertGreaterEqual(len(pins), 1)
+            for slug, r in pins.items():
+                self.assertEqual(r["status"], "scheduled")
+                hr = int(str(r["scheduled_at"]).split(" ")[1].split(":")[0])
+                self.assertIn(hr, server.SOCIAL_PEAK_SLOTS)
+        finally:
+            self._restore_drip_settings(saved)
+
+    def test_drip_respects_min_gap_days(self):
+        import datetime as _dt
+        saved = self._drip_settings()
+        now = _dt.datetime(2026, 9, 13, 10, 0, 0)
+        yesterday = "2026-09-12 08:00:00"
+        try:
+            server._set_setting("social.key.pinterest.token", "pin-token")
+            server._set_setting("social.drip.daily", "50")
+            server._set_setting("social.drip.min_gap_days", "30")
+            server._set_setting("social.drip.last", "2000-01-01")
+            # every saved niche already has a recent Pinterest pin -> all gated
+            with server._lock:
+                c = server._db()
+                kws = [r["keyword"] for r in
+                       c.execute("SELECT keyword FROM niches ORDER BY id").fetchall()]
+                for i, kw in enumerate(kws):
+                    c.execute(
+                        "INSERT INTO social_posts (slug, keyword, platform, name, body, "
+                        "link, utm_content, status, published_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (server.seo._slugify(kw), kw, "Pinterest", "pin", "b",
+                         "http://x/lp/%s" % server.seo._slugify(kw),
+                         "drip-gap-%d" % i, "published", yesterday))
+                c.commit()
+                c.close()
+            res = server._pin_drip(now=now)
+            self.assertTrue(res["on"])
+            self.assertEqual(res["scheduled"], 0)
+            self.assertNotIn("need_token", res)
+        finally:
+            self._restore_drip_settings(saved)
+
+    def test_drip_runs_once_per_day(self):
+        import datetime as _dt
+        saved = self._drip_settings()
+        now = _dt.datetime(2026, 9, 13, 10, 0, 0)
+        try:
+            server._set_setting("social.key.pinterest.token", "pin-token")
+            server._set_setting("social.drip.daily", "5")
+            server._set_setting("social.drip.last", "2000-01-01")
+            first = server._pin_drip(now=now)
+            self.assertGreaterEqual(first["scheduled"], 1)
+            second = server._pin_drip(now=now)
+            self.assertEqual(second["scheduled"], 0)
+            self.assertEqual(second.get("already"), now.strftime("%Y-%m-%d"))
+        finally:
+            self._restore_drip_settings(saved)
+
+    def test_drip_requires_pinterest_token(self):
+        import datetime as _dt
+        saved = self._drip_settings()
+        now = _dt.datetime(2026, 9, 13, 10, 0, 0)
+        try:
+            server._set_setting("social.key.pinterest.token", "")
+            server._set_setting("social.drip.last", "2000-01-01")
+            res = server._pin_drip(now=now)
+            self.assertTrue(res["on"])
+            self.assertTrue(res.get("need_token"))
+            self.assertEqual(res["scheduled"], 0)
+        finally:
+            self._restore_drip_settings(saved)
+
+    def test_drip_rotates_caption_variant_and_repin_image(self):
+        import datetime as _dt
+        saved = self._drip_settings()
+        now = _dt.datetime(2026, 9, 13, 10, 0, 0)
+        try:
+            server._set_setting("social.key.pinterest.token", "pin-token")
+            server._set_setting("social.drip.daily", "50")
+            server._set_setting("social.drip.min_gap_days", "1")
+            server._set_setting("social.drip.last", "2000-01-01")
+            self._raw("/api/captions/save", "POST",
+                      body=json.dumps({"slug": "keto-snacks", "variants": [
+                          {"platform": "Pinterest", "variant": 1,
+                           "caption": "Caption One", "enabled": True},
+                          {"platform": "Pinterest", "variant": 2,
+                           "caption": "Caption Two", "enabled": True},
+                      ]}), cookie=self.cookie)
+            # one prior pin means the next caption is the 2nd variant
+            with server._lock:
+                c = server._db()
+                c.execute(
+                    "INSERT INTO social_posts (slug, keyword, platform, name, body, link, "
+                    "utm_content, status, published_at) VALUES ('keto-snacks','keto snacks',"
+                    "'Pinterest','pin','b','http://x/lp/keto','seed-c1','published',"
+                    "'2026-09-10 08:00:00')")
+                c.commit()
+                c.close()
+            res = server._pin_drip(now=now)
+            self.assertGreaterEqual(res["scheduled"], 1)
+            with server._lock:
+                c = server._db()
+                row = c.execute(
+                    "SELECT body, link, utm_content, status FROM social_posts "
+                    "WHERE platform='Pinterest' AND slug='keto-snacks' "
+                    "AND status='scheduled' ORDER BY id DESC LIMIT 1").fetchone()
+                c.close()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["status"], "scheduled")
+            self.assertEqual(row["body"], "Caption Two")
+            self.assertTrue(row["utm_content"].endswith("-c2"))
+            self.assertIn("utm_content=%s" % row["utm_content"], row["link"])
+        finally:
+            self._restore_drip_settings(saved)
+            with server._lock:
+                c = server._db()
+                c.execute("DELETE FROM social_captions WHERE slug='keto-snacks' "
+                          "AND lower(platform)='pinterest'")
+                c.commit()
+                c.close()
+
+    def test_og_variant_png_renders_distinct_look(self):
+        st, _, ctype, base = self._raw("/og/keto-snacks.png")
+        self.assertEqual(st, 200)
+        self.assertEqual("image/png", (ctype or "").split(";")[0])
+        st2, _, ctype2, var = self._raw("/og/keto-snacks.png.v1")
+        self.assertEqual(st2, 200)
+        self.assertEqual("image/png", (ctype2 or "").split(";")[0])
+        self.assertNotEqual(base, var)
+        self.assertGreater(len(var), 0)
+
+    def test_drip_endpoint_requires_admin_and_runs(self):
+        saved = self._drip_settings()
+        try:
+            st, _, _, _ = self._raw("/api/social/drip", "POST", body=b"{}")
+            self.assertEqual(st, 401)
+            server._set_setting("social.key.pinterest.token", "pin-token")
+            server._set_setting("social.drip.last", "2000-01-01")
+            st2, _, _, data = self._raw("/api/social/drip", "POST",
+                                        body=b"{}", cookie=self.cookie)
+            self.assertEqual(st2, 200)
+            res = json.loads(data)
+            self.assertTrue(res.get("ok"))
+            self.assertIn("scheduled", res)
+        finally:
+            self._restore_drip_settings(saved)
 
 
     def _seed_caption_variants(self, platform="Twitter / X"):

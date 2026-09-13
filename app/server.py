@@ -367,6 +367,7 @@ _EBOOK_WARMING = set()  # keywords currently being warmed in the background
 _EBOOK_WARMING_LOCK = threading.Lock()
 _SOCIAL_WEBHOOK = os.environ.get("SOCIAL_WEBHOOK", "")  # optional real-posting hook
 _PNG_CACHE = {}  # slug -> raster og card bytes (pure-Python render, capped)
+_OG_RENDER_SEM = threading.BoundedSemaphore(2)  # never more than 2 renders at once
 OG_CACHE_DIR = os.environ.get("PSTORE_OG_CACHE") or None  # persistent /og/*.png cache
 _OG_CACHE_VERSION = "navy3"  # bump when the share-card design changes
 
@@ -418,11 +419,12 @@ def _og_card_url(slug):
             + "?v=" + _OG_CACHE_VERSION)
 
 
-def _render_og_png(slug):
+def _render_og_png(slug, variant=0):
     """Render one raster share card (real niche card, favicon, or the generic
-    brand fallback) as PNG bytes, or None. Pure function shared by the request
-    handler and the background prewarmer so /og/<slug>.png never has to render
-    on the request path in steady state."""
+    brand fallback) as PNG bytes, or None. `variant` >=1 bakes in a distinct
+    palette (+ REPIN watermark) so fresh pins skip Pinterest's duplicate filter.
+    Pure function shared by the request handler and the background prewarmer so
+    /og/<slug>.png never has to render on the request path in steady state."""
     try:
         if slug == "favicon":
             try:
@@ -443,43 +445,50 @@ def _render_og_png(slug):
                 title = (pick or {}).get("title") or ("Best " + r["keyword"])
                 stars = (pick or {}).get("stars")
                 reviews = (pick or {}).get("reviews")
-                return social.og_png(slug, r["keyword"], title, stars, reviews)
+                return social.og_png(slug, r["keyword"], title, stars, reviews, variant)
             except Exception:
                 continue
         try:
             return social.og_png(slug, slug.replace("-", " ").title() or "Niche",
-                                 "Best picks, ranked fresh", None, None)
+                                 "Best picks, ranked fresh", None, None, variant)
         except Exception:
             return None
     except Exception:
         return None
 
 
-def _cache_og_png_card(slug):
+def _cache_og_png_card(slug, variant=0):
     """Render + persist one share card to disk and memory. Idempotent and
-    synchronous so callers (handler, prewarmer, tests) get deterministic state."""
-    card = _render_og_png(slug)
-    if card is None:
-        return None
-    try:
-        path = os.path.join(_og_cache_dir(), "%s.png" % slug)
-        with open(path, "wb") as f:
-            f.write(card)
-    except Exception:
-        pass
-    with _lock:
-        if len(_PNG_CACHE) >= 48:
-            try:
-                _PNG_CACHE.pop(next(iter(_PNG_CACHE)))
-            except Exception:
-                pass
-        _PNG_CACHE[slug] = card
-    return card
+    synchronous so callers (handler, prewarmer, tests) get deterministic state.
+    Variant cards live at <slug>-v<N>.png next to the base card. Renders are
+    queued through a small semaphore so bursts (a drip sweep, a bulk blitz)
+    warm cards one-at-a-time instead of pegging the CPU with N parallel
+    pure-Python pixel loops."""
+    with _OG_RENDER_SEM:
+        card = _render_og_png(slug, variant)
+        if card is None:
+            return None
+        try:
+            path = os.path.join(_og_cache_dir(), "%s-v%s.png" % (slug, variant)
+                                if variant else "%s.png" % slug)
+            with open(path, "wb") as f:
+                f.write(card)
+        except Exception:
+            pass
+        key = slug if not variant else "%s#v%s" % (slug, variant)
+        with _lock:
+            if len(_PNG_CACHE) >= 48:
+                try:
+                    _PNG_CACHE.pop(next(iter(_PNG_CACHE)))
+                except Exception:
+                    pass
+            _PNG_CACHE[key] = card
+        return card
 
 
-def _warm_og_png(slug):
+def _warm_og_png(slug, variant=0):
     """Kick a background render+cache for one share card (niche save/refresh)."""
-    threading.Thread(target=lambda: _cache_og_png_card(slug), daemon=True).start()
+    threading.Thread(target=lambda: _cache_og_png_card(slug, variant), daemon=True).start()
 
 
 def _prewarm_og_pngs():
@@ -835,6 +844,7 @@ def _webhook_payload(kit):
         "name": kit.get("name") or "",
         "slug": slug,
         "keyword": keyword,
+        "hashtags": kit.get("hashtags") or "",
         "board": board,
         "image": image,
         "image_png": image_png,
@@ -1410,6 +1420,10 @@ def _social_flush_loop(interval=60, amplify=True):
                 _auto_amplify_winners()
             except Exception:
                 pass
+        try:
+            _pin_drip()
+        except Exception:
+            pass
 
 
 def _auto_amplify_winners(now=None):
@@ -1510,6 +1524,188 @@ def _auto_amplify_winners(now=None):
     except Exception:
         pass
     return {"requeued": requeued, "winners": winners_out, "queue": queue, "on": on}
+
+
+def _drip_state(slug):
+    """How much Pinterest traction one slug already has: (pin count, most recent
+    Pinterest post datetime or None, clicks earned by that slug's pins)."""
+    try:
+        with _lock:
+            conn = _db()
+            row = conn.execute(
+                "SELECT COUNT(*) c, MAX(published_at) last FROM social_posts "
+                "WHERE lower(slug)=? AND platform='Pinterest'",
+                (slug.lower(),)).fetchone()
+            clicks = conn.execute(
+                "SELECT COUNT(*) c FROM clicks WHERE lower(slug)=? AND content IN "
+                "(SELECT utm_content FROM social_posts WHERE lower(slug)=? "
+                " AND platform='Pinterest' AND utm_content!='')",
+                (slug.lower(), slug.lower())).fetchone()["c"]
+            conn.close()
+    except Exception:
+        return 0, None, 0
+    last = None
+    if row and row["last"]:
+        try:
+            last = datetime.datetime.strptime(row["last"], "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            last = None
+    return (row["c"] if row else 0), last, (clicks or 0)
+
+
+def _valid_captions(slug, platform):
+    """Enabled, non-empty caption variants for one slug+platform (drip fodder)."""
+    try:
+        with _lock:
+            conn = _db()
+            rows = conn.execute(
+                "SELECT variant, caption FROM social_captions "
+                "WHERE lower(slug)=? AND lower(platform)=? AND enabled=1 "
+                "AND caption IS NOT NULL AND caption != '' ORDER BY variant ASC",
+                (slug.lower(), platform.lower())).fetchall()
+            conn.close()
+    except Exception:
+        return []
+    return [{"variant": int(r["variant"] or 0), "caption": r["caption"]} for r in rows]
+
+
+def _next_peak_slots(now, count):
+    """The next `count` distinct peak-hour datetimes strictly after `now`
+    (slots cycle per day so a multi-pin drip spreads across engagement hours,
+    and the horizon widens when more than a handful of pins are queued)."""
+    slots = sorted(SOCIAL_PEAK_SLOTS)
+    out = []
+    cur = now
+    for _ in range(max(count, 0)):
+        found = None
+        for d in range(0, max(count, 1) + 1):
+            for h in slots:
+                cand = (now + datetime.timedelta(days=d)) \
+                    .replace(hour=h, minute=0, second=0, microsecond=0)
+                if cand > cur and (found is None or cand < found):
+                    found = cand
+        if found is None:
+            found = cur + datetime.timedelta(hours=1)
+        out.append(found)
+        cur = found
+    return out
+
+
+def _schedule_drip_pin(c, at):
+    """Queue one Pinterest fresh-pin for a niche: caption variant rotated against
+    how many pins it already has, a fresh tracked code, and a distinct repin
+    image (variant .v<N> palette). Idempotent per utm_content. Returns True when
+    a row was scheduled."""
+    slug = c["slug"]
+    kits = social.post_kits(c["keyword"], c["items"], seo.BASE_URL, slug=slug)
+    pk = next((k for k in kits if (k.get("platform") or "") == "Pinterest"), None)
+    if pk is None:
+        return False
+    base_code = (pk.get("utm_content") or social.short_code()) or social.short_code()
+    code = base_code
+    variant = 0
+    body = pk["body"]
+    variants = _valid_captions(slug, "Pinterest")
+    if variants:
+        v = variants[c["count"] % len(variants)]
+        variant = int(v["variant"] or 0)
+        body = v["caption"]
+        code = "%s-c%s" % (base_code, variant)
+    link = social.track_link(seo.BASE_URL, slug, "Pinterest", code)
+    image_png = social.og_image_png_url(seo.BASE_URL, slug)
+    if variant:
+        image_png = "%s.v%s" % (image_png, variant)
+    name = pk.get("name") or "Pinterest pin (keyword-rich)"
+    try:
+        with _lock:
+            conn = _db()
+            exist = conn.execute(
+                "SELECT id FROM social_posts WHERE lower(slug)=? AND utm_content=? "
+                "AND lower(platform)=?",
+                (slug.lower(), code, "pinterest")).fetchone()
+            if exist:
+                conn.execute(
+                    "UPDATE social_posts SET status='scheduled', scheduled_at=?, "
+                    "name=?, body=?, link=?, keyword=? WHERE id=?",
+                    (at, name, body, link, c["keyword"], exist["id"]))
+            else:
+                conn.execute(
+                    "INSERT INTO social_posts (slug, keyword, platform, name, body, link, "
+                    "utm_content, status, scheduled_at) VALUES (?,?,?,?,?,?,?, 'scheduled', ?)",
+                    (slug, c["keyword"], "Pinterest", name, body, link, code, at))
+            conn.commit()
+            conn.close()
+    except Exception:
+        return False
+    try:
+        _warm_og_png(slug, variant)
+    except Exception:
+        pass
+    return True
+
+
+def _pin_drip(now=None):
+    """The Pinterest fresh-pin drip: every day, schedule fresh pins (new copy +
+    a visibly different repin image) for niches that Pinterest has never seen or
+    that are about to go stale — so the account posts regularly with unique
+    content instead of echoing suppressed duplicates.
+
+    Feature gate: `social.drip` unset (or 1/on/true/yes) => on; explicitly
+    0/off/false => disabled. When no Pinterest token is configured the drip
+    stays quiet (`need_token`). Tunable settings:
+      * social.drip.daily        — pins per sweep (default 6, max 50),
+      * social.drip.min_gap_days — min days between two pins of one niche
+                                   (default 2, so a niche is re-pinned at most
+                                   every other day),
+    Runs at most once per calendar day (`social.drip.last` marker). Returns
+    {"on": ..., "scheduled": n, "need_token": bool, ...}."""
+    now = now or datetime.datetime.utcnow()
+    gate = _get_setting("social.drip")
+    if gate != "" and str(gate).strip().lower() not in ("1", "on", "true", "yes"):
+        return {"on": False, "scheduled": 0, "need_token": False}
+    token = _get_setting("social.key.pinterest.token", "") \
+        or _get_setting("social.key.pinterest.access_token", "")
+    if not token:
+        return {"on": True, "scheduled": 0, "need_token": True}
+    try:
+        daily = int(_get_setting("social.drip.daily") or 6)
+    except (TypeError, ValueError):
+        daily = 6
+    daily = max(1, min(daily, 50))
+    try:
+        min_gap_days = float(_get_setting("social.drip.min_gap_days") or 2.0)
+    except (TypeError, ValueError):
+        min_gap_days = 2.0
+    today = now.strftime("%Y-%m-%d")
+    if str(_get_setting("social.drip.last") or "") == today:
+        return {"on": True, "scheduled": 0, "already": today}
+    cands = []
+    for n in _niches_rows():
+        slug = seo._slugify(n.get("keyword") or "")
+        if not slug or not n.get("products"):
+            continue
+        count, last, clicks = _drip_state(slug)
+        if count and last is not None and \
+                (now - last).total_seconds() / 86400.0 < min_gap_days:
+            continue
+        cands.append({"slug": slug, "keyword": n["keyword"], "items": n["products"],
+                      "count": count, "clicks": clicks, "created": n.get("created_at") or ""})
+    # unpinned niches first (oldest first — they've waited longest for their
+    # first pin); then proven click-winners (clicks desc). Note: clicks are 0
+    # for unpinned niches so the tie-break stays on created.
+    cands.sort(key=lambda c: (1 if c["count"] else 0, -c["clicks"],
+                              c["created"] or ""))
+    picked = cands[:daily]
+    ats = _next_peak_slots(now, len(picked))
+    scheduled = 0
+    for c, at in zip(picked, ats):
+        try:
+            if _schedule_drip_pin(c, at):
+                scheduled += 1
+        except Exception:
+            continue
+    _set_setting("social.drip.last", today)
+    return {"on": True, "scheduled": scheduled, "niches": len(picked)}
 
 
 def _db():
@@ -3676,6 +3872,9 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             ogpng = re.match(r"^/og/([a-z0-9-]+)\.png$", path)
             if ogpng:
                 return self._og_image_png(ogpng.group(1))
+            ogpv = re.match(r"^/og/([a-z0-9-]+)\.png\.v(\d+)$", path)
+            if ogpv:
+                return self._og_image_png(ogpv.group(1), int(ogpv.group(2)))
             go = re.match(r"^/go/([A-Z0-9]{10})$", path)
             if go:
                 return self._go(go.group(1))
@@ -3937,6 +4136,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._social_blitz()
             if parsed.path == "/api/social/amplify":
                 return self._social_amplify()
+            if parsed.path == "/api/social/drip":
+                return self._social_drip()
             if parsed.path == "/api/social/topics":
                 return self._social_topics()
             if parsed.path == "/api/tools/launch":
@@ -7216,23 +7417,26 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
         self.wfile.write(fallback)
         return None
 
-    def _og_image_png(self, slug):
-        """Raster 1200x630 share card at /og/<slug>.png — the same layout as the
-        SVG card but a real PNG so Pinterest/Twitter/Facebook render it. Served
-        from the persistent disk cache first, then memory, then rendered — so a
-        request never blocks on the pure-Python render cost in steady state.
+    def _og_image_png(self, slug, variant=0):
+        """Raster 1200x630 share card at /og/<slug>.png (or the repin-fresh
+        variant /og/<slug>.png.v<N>) — the same layout as the SVG card but a
+        real PNG so Pinterest/Twitter/Facebook render it. Served from the
+        persistent disk cache first, then memory, then rendered — so a request
+        never blocks on the pure-Python render cost in steady state.
         /og/favicon.png renders the small brand icon instead."""
         card = None
+        fname = "%s.png" % slug if not variant else "%s-v%s.png" % (slug, variant)
         try:
-            with open(os.path.join(_og_cache_dir(), "%s.png" % slug), "rb") as f:
+            with open(os.path.join(_og_cache_dir(), fname), "rb") as f:
                 card = f.read()
         except Exception:
             pass
+        key = slug if not variant else "%s#v%s" % (slug, variant)
         if card is None:
             with _lock:
-                card = _PNG_CACHE.get(slug)
+                card = _PNG_CACHE.get(key)
         if card is None:
-            card = _cache_og_png_card(slug)
+            card = _cache_og_png_card(slug, variant)
         if card is None:
             return self._send(404, {"error": "og image not found"})
         self.send_response(200)
@@ -7625,6 +7829,18 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
             val = "1" if body.get("enable") else "0"
             _set_setting("social.amplify", val)
         res = _auto_amplify_winners()
+        return self._send(200, dict(res, ok=True))
+
+    def _social_drip(self):
+        """Manual trigger for the Pinterest fresh-pin drip (POST
+        /api/social/drip), so an owner can queue fresh pins on demand instead of
+        waiting for the daily daemon sweep. Also toggles the feature via a JSON
+        `enable` flag."""
+        body = self._body()
+        if "enable" in body:
+            val = "1" if body.get("enable") else "0"
+            _set_setting("social.drip", val)
+        res = _pin_drip()
         return self._send(200, dict(res, ok=True))
 
     def _auto_amplify(self, now=None):

@@ -259,6 +259,19 @@ def _chapters():
             "share card for the newest saved niches — the fastest way to put eyeballs "
             "on pages search engines haven't indexed yet.")
         doc.paragraph(
+            "Because Pinterest suppresses duplicate pins (same image + link + copy), "
+            "the fresh-pin drip ('Run drip', or automatically at peak hours every "
+            "day) is the pstore answer to a cold-start account: each pass schedules "
+            "fresh, keyword-rich pins for niches Pinterest has never seen and for "
+            "proven click-winners, rotating the caption variants from the Social "
+            "page AND painting a visibly different repin image (alternate palettes "
+            "at /og/<slug>.png.v<N>) so nothing reads as a re-upload. Every pin "
+            "keeps its own tracked link, so drip performance lands in Analytics per "
+            "unique code. Tunables live in the settings table: social.drip.daily "
+            "(default 6), social.drip.min_gap_days (default 2) and social.drip "
+            "(0/off disables the feature); the drip needs a Pinterest token on the "
+            "Keys page and does nothing until one is pasted.")
+        doc.paragraph(
             "Publishing needs no paid router. pstore posts each kit natively to the "
             "platforms whose keys are pasted on the Keys page (/keys): Pinterest "
             "(OAuth 2.0 board-app token, plus an optional board name), X (OAuth 1.0a "

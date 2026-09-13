@@ -3,6 +3,7 @@ import json
 import unittest
 
 import publish
+import social
 
 
 class FakeResp:
@@ -141,6 +142,37 @@ class TestNativeScaffold(Base):
         by = {r["platform"]: r for r in out}
         self.assertEqual(by["Twitter / X"]["via"], "skipped")
         self.assertEqual(by["Pinterest"]["via"], "native")
+
+    def test_pinterest_payload_is_seo_copy(self):
+        self._ok()
+        kit = self._kit("Pinterest")
+        kit["keyword"] = "keto snacks"
+        kit["hashtags"] = social.hashtags("keto snacks")
+        res = publish.post_to("Pinterest", kit,
+                              self._keys({("pinterest", "token"): "PIN"}))
+        self.assertTrue(res["ok"])
+        payload = self.requests[-1][1]
+        self.assertIn("keto snacks", payload["title"].lower())
+        self.assertIn("#", payload["description"])
+        self.assertIn("utm_content=ab", payload["description"])
+        self.assertLessEqual(len(payload["title"]), 100)
+        self.assertLessEqual(len(payload["description"]), 500)
+
+    def test_pin_title_prefers_keyword_when_body_misses_it(self):
+        title = publish._pin_title(
+            "See our top list of picks for the best gadget by far today",
+            "best gadgets")
+        self.assertTrue(title.lower().startswith("best gadgets"))
+        self.assertLessEqual(len(title), 95)
+
+    def test_pin_copy_strips_emoji(self):
+        title = publish._pin_title("Amazing pick \U0001F680", "")
+        self.assertEqual(title, "Amazing pick")
+        desc = publish._pin_desc("Great deals \U0001F600",
+                                 "https://x/lp/a", "#BestPicks", "keto")
+        self.assertNotIn("\U0001F600", desc)
+        self.assertIn("#BestPicks", desc)
+        self.assertLessEqual(len(desc), 500)
 
     def test_http_error_reports_not_ok_not_raises(self):
         def fake(url, payload_, headers, timeout=15):
