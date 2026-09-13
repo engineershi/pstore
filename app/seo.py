@@ -734,18 +734,21 @@ def render_topic(term, parent_keyword, niche, parent_slug, style_pack=None):
     return head + body + _footer()
 
 
-def indexable_urls(saved_niches, base_url=None):
+def indexable_urls(saved_niches, base_url=None, saved_topics=None):
     """Absolute URLs that belong in the sitemap + IndexNow submissions.
 
     Mirrors render_sitemap() but returns ready-to-submit absolute URLs.
+    saved_topics: iterable of (parent_slug, slug) for built long-tail pages.
     """
     base = (base_url or BASE_URL).rstrip("/")
-    urls = [base + "/"]
+    urls = [base + "/", base + "/blog"]
     for page in STATIC_PAGES:
         urls.append(base + "/" + page)
     for n in (saved_niches or []):
         urls.append(base + "/n/" + _slugify(n["keyword"]))
         urls.append(base + "/lp/" + _slugify(n["keyword"]))
+    for p_slug, t_slug in (saved_topics or []):
+        urls.append("%s/n/%s/%s" % (base, p_slug, t_slug))
     return urls
 
 
@@ -905,7 +908,7 @@ def render_robots():
             f"Disallow: /admin\nDisallow: /tool\nDisallow: /keys\n"
             f"Disallow: /dashboard\nDisallow: /api/\nDisallow: /e/\n"
             f"Disallow: /e/o\nDisallow: /social/\nDisallow: /_gated/\n"
-            f"Disallow: /og/\n"
+            f"Allow: /og/*.png\nDisallow: /og/\n"
             f"Sitemap: {BASE_URL}/sitemap.xml\n").encode("utf-8")
 
 

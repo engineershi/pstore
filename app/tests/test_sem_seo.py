@@ -487,6 +487,59 @@ class TestSemSeoSite(unittest.TestCase):
         self.assertIn("/n/%s" % slug, xml)
         self.assertIn("<lastmod>", xml)
 
+    def test_sitemap_lastmod_tracks_niche_refresh(self):
+        kw = None
+        with server._lock:
+            conn = server._db()
+            row = conn.execute(
+                "SELECT keyword FROM niches WHERE products IS NOT NULL "
+                "AND TRIM(products) NOT IN ('', '[]', '{}') "
+                "ORDER BY id LIMIT 1").fetchone()
+            conn.close()
+        if row:
+            kw = row["keyword"]
+        created = False
+        if not kw:
+            kw = "lastmod test niche"
+            with server._lock:
+                conn = server._db()
+                conn.execute("INSERT INTO niches (keyword, market, products) VALUES (?,?,?)",
+                             (kw, "com", json.dumps(
+                                 [{"asin": "B0LAST", "title": "T", "reviews": 1,
+                                   "stars": 4, "price": 1.0, "currency": "USD",
+                                   "url": "https://www.amazon.com/dp/B0LAST"}])))
+                conn.commit()
+                conn.close()
+            created = True
+        slug = seo._slugify(kw)
+        with server._lock:
+            conn = server._db()
+            saved = conn.execute(
+                "SELECT updated_at FROM niches WHERE keyword=?", (kw,)).fetchone()
+            conn.execute("UPDATE niches SET updated_at=? WHERE keyword=?",
+                         ("2026-09-09 10:11:12", kw))
+            conn.commit()
+            conn.close()
+        try:
+            st, _, _, body = self._raw("GET", "/sitemap.xml")
+            self.assertEqual(st, 200)
+            xml = body.decode("utf-8", "replace")
+            m = re.search(r"<loc>.*?/n/%s</loc>\s*<lastmod>([^<]+)"
+                          % re.escape(slug), xml)
+            self.assertTrue(m, "expected a lastmod entry for /n/%s" % slug)
+            self.assertEqual(m.group(1), "2026-09-09")
+        finally:
+            with server._lock:
+                conn = server._db()
+                up = None if not saved or saved["updated_at"] is None \
+                    else saved["updated_at"]
+                conn.execute("UPDATE niches SET updated_at=? WHERE keyword=?",
+                             (up, kw))
+                if created:
+                    conn.execute("DELETE FROM niches WHERE keyword=?", (kw,))
+                conn.commit()
+                conn.close()
+
     # --- Crawler robustness (GSC sitemap 404 + HEAD 501 fixes) ---------------
     def test_sitemap_and_robots_tolerate_slash_and_case(self):
         kw = self._pick_niche()

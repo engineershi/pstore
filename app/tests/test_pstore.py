@@ -445,9 +445,18 @@ class TestSEO(unittest.TestCase):
         urls = seo.indexable_urls([{"keyword": "keto snacks"}], "https://pstore.example")
         self.assertIn("https://pstore.example/n/keto-snacks", urls)
         self.assertIn("https://pstore.example/lp/keto-snacks", urls)
+        self.assertIn("https://pstore.example/blog", urls)
+        urls = seo.indexable_urls([{"keyword": "keto snacks"}], "https://pstore.example",
+                                  saved_topics=[("keto-snacks", "keto-bars")])
+        self.assertIn("https://pstore.example/n/keto-snacks/keto-bars", urls)
 
     def test_robots(self):
-        self.assertIn(b"Sitemap:", seo.render_robots())
+        rob = seo.render_robots()
+        self.assertIn(b"Sitemap:", rob)
+        # /og/*.png share cards (Pinterest/twitter image fetch, RSS enclosures)
+        # must NOT be swallowed by the bare /og/ disallow rule.
+        self.assertIn(b"Allow: /og/*.png", rob)
+        self.assertIn(b"Disallow: /og/", rob)
 
 
 REAL_CARD_HTML = """
@@ -657,6 +666,38 @@ class TestRoutes(unittest.TestCase):
         payload = json.loads(body)
         self.assertEqual(payload["key"], indexnow.key())
         self.assertGreaterEqual(payload["url_count"], 1)
+
+    def test_indexnow_submission_covers_topics_and_lp_and_blog(self):
+        base = seo.BASE_URL.rstrip("/")
+        with server._lock:
+            conn = server._db()
+            conn.execute("INSERT OR IGNORE INTO topics (parent_slug, term, slug) "
+                         "VALUES (?,?,?)", ("keto-snacks", "keto bars", "keto-bars"))
+            conn.commit()
+            conn.close()
+        captured = {}
+        saved = indexnow._post
+        indexnow._post = (lambda url, payload, timeout=20:
+                          captured.update(payload) or 200)
+        try:
+            st, body = self._raw_json("/api/indexnow", {"urls": []},
+                                      cookie=self.cookie)
+        finally:
+            indexnow._post = saved
+            with server._lock:
+                conn = server._db()
+                conn.execute("DELETE FROM topics WHERE parent_slug=? AND slug=?",
+                             ("keto-snacks", "keto-bars"))
+                conn.commit()
+                conn.close()
+        self.assertEqual(st, 200)
+        submitted = {u for u in (captured.get("urlList") or [])}
+        self.assertIn("%s/n/keto-snacks/keto-bars" % base, submitted,
+                      "topic long-tail page must be submitted to IndexNow")
+        self.assertIn("%s/lp/keto-snacks" % base, submitted,
+                      "landing page must be submitted to IndexNow")
+        self.assertIn("%s/blog" % base, submitted,
+                      "/blog must be submitted to IndexNow")
 
     def test_sitemap_xml(self):
         st, ctype, body = self._get("/sitemap.xml")

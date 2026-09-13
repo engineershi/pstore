@@ -1015,6 +1015,15 @@ def _niches_rows():
              "created_at": r["created_at"] or ""} for r in rows]
 
 
+def _all_topic_pairs():
+    """(parent_slug, slug) pairs for every built long-tail (/n/<p>/<term>) page."""
+    with _lock:
+        conn = _db()
+        rows = conn.execute("SELECT parent_slug, slug FROM topics").fetchall()
+        conn.close()
+    return [(r["parent_slug"], r["slug"]) for r in rows]
+
+
 def _fire_indexnow_urls(paths):
     """Module-level fire-and-forget IndexNow submit (mirror of the handler's
     _fire_indexnow). Never blocks, never raises."""
@@ -4438,20 +4447,23 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         threading.Thread(target=lambda: indexnow.submit_urls(urls), daemon=True).start()
 
     def _push_indexnow(self, keyword):
-        """Fire-and-forget IndexNow submit so a brand-new /n/ page is crawled
-        in minutes instead of waiting for a sitemap re-crawl. When Google is
-        connected, the same page is sent a URL-inspection crawl request and the
-        sitemap is submitted once per day. Never blocks and never raises."""
+        """Fire-and-forget IndexNow submit so a brand-new /n/ page (and its
+        /lp/ landing page) are crawled in minutes instead of waiting for a
+        sitemap re-crawl. When Google is connected, the pages are sent a
+        URL-inspection crawl request and the sitemap is submitted once per day.
+        Never blocks and never raises."""
         try:
             slug = seo._slugify(keyword)
         except Exception:
             slug = "niche"
         url = "/n/" + slug
-        self._fire_indexnow([url])
+        urls = [url, "/lp/" + slug]
+        self._fire_indexnow(urls)
         try:
             base = (seo.BASE_URL or "").rstrip("/")
             if base:
-                webmasters.inspect_new(base + url)
+                for u in urls:
+                    webmasters.inspect_new(base + u)
                 webmasters.gsc_submit_sitemap_daily()
         except Exception:
             pass
@@ -4699,7 +4711,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         with _lock:
             conn = _db()
             nrows = conn.execute(
-                "SELECT keyword, created_at, products FROM niches").fetchall()
+                "SELECT keyword, created_at, updated_at, products FROM niches").fetchall()
             conn.close()
         live = set()
         for r in nrows:
@@ -4712,7 +4724,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 kw = seo._slugify(r["keyword"])
             except Exception:
                 kw = "niche"
-            lm = (r["created_at"] or "")[:10] or "2026-08-28"
+            lm = (r["updated_at"] or r["created_at"] or "")[:10] or "2026-08-28"
             entries.append((f"/n/{kw}", lm))
             entries.append((f"/lp/{kw}", lm))
             live.add(kw)
@@ -5223,7 +5235,8 @@ document.addEventListener("click", function (e) {{
     # ------------------------------------------------------------------ marketing tools
     def _all_urls(self, extra=None):
         """Absolute site URLs that should be indexed (sitemap set + extras)."""
-        urls = seo.indexable_urls(self._all_niches())
+        urls = seo.indexable_urls(self._all_niches(),
+                                  saved_topics=_all_topic_pairs())
         for u in (extra or []):
             if str(u).startswith("http"):
                 urls.append(str(u))

@@ -30,12 +30,25 @@ def saved_niches(db_path):
              "products": json.loads(r["products"] or "[]")} for r in rows]
 
 
+def saved_topics(db_path):
+    """(parent_slug, slug) pairs for every built long-tail page."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute("SELECT parent_slug, slug FROM topics").fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    return [(r["parent_slug"], r["slug"]) for r in rows]
+
+
 def main():
     db_path = os.environ.get("PSTORE_DB", "app/pstore.db")
     if not os.path.exists(db_path):
         print("no db at %s -- skipping ping (exit 0)" % db_path)
         return 0
-    urls = seo.indexable_urls(saved_niches(db_path), base_url=BASE)
+    urls = seo.indexable_urls(saved_niches(db_path), base_url=BASE,
+                              saved_topics=saved_topics(db_path))
     ok, message = indexnow.submit_urls(urls, base_url=BASE)
     print("%s (%d urls)" % (message, len(urls)))
     if ok:
