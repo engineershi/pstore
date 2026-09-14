@@ -10815,15 +10815,42 @@ document.addEventListener("click", async function(e){{
 
         Per-subscriber columns:
           opens        - distinct sequence emails opened
-          clicks       - distinct outbound email click-throughs (any link)
+          clicks    - distinct outbound email click-throughs (any link)
           clicked_asin - 1 if any of those click-throughs carried a product ASIN
                          (= conversion intent) so the CONVERTED bucket is real
-          sent         - how many sequence emails were delivered to this lead"""
+          sent         - how many sequence emails were delivered to this lead
+          referred_by  - ref token that first brought this lead in
+          referrer_email - that token's owner (the subscriber who shared)
+          referrals    - how many leads THIS subscriber has brought in
+
+        Top-level `referral` summarizes the whole share-link loop exactly
+        (independent of `limit`): referred_total, credits issued, active
+        referrers, and the top referrers by leads-in."""
         kw = (keyword or "").strip().lower()
+        ref = {"referred_total": 0, "credits": 0, "referrers": 0, "top": []}
         with _lock:
             conn = _db()
+            ref_row = conn.execute(
+                "SELECT COUNT(*) AS referred_total FROM subscribers "
+                "WHERE referred_by IS NOT NULL AND referred_by!=''").fetchone()
+            cred_row = conn.execute(
+                "SELECT COALESCE(SUM(referrals),0) AS credits, "
+                "SUM(CASE WHEN referrals>0 THEN 1 ELSE 0 END) AS referrers "
+                "FROM subscribers").fetchone()
+            ref["referred_total"] = int(ref_row["referred_total"] or 0)
+            ref["credits"] = int(cred_row["credits"] or 0)
+            ref["referrers"] = int(cred_row["referrers"] or 0)
+            top = conn.execute(
+                "SELECT email, first_name, keyword, referrals FROM subscribers "
+                "WHERE referrals>0 ORDER BY referrals DESC, id DESC LIMIT 8").fetchall()
+            ref["top"] = [{"email": r["email"], "first_name": r["first_name"] or "",
+                           "keyword": r["keyword"] or "",
+                           "referrals": int(r["referrals"] or 0)} for r in top]
             sql = ("SELECT s.id, s.email, s.first_name, s.keyword, s.unsubscribed, "
                    "s.confirmed, "
+                   "s.referred_by, s.referrals, "
+                   "(SELECT r.email FROM subscribers r WHERE r.ref_token=s.referred_by) "
+                   "AS referrer_email, "
                    "(SELECT COUNT(*) FROM email_events e WHERE e.subscriber_id=s.id "
                    " AND e.type='open') AS opens, "
                    "(SELECT COUNT(*) FROM clicks c WHERE c.source='email' "
@@ -10839,7 +10866,9 @@ document.addEventListener("click", async function(e){{
             sql += " ORDER BY s.id DESC LIMIT ?"
             rows = [dict(r) for r in conn.execute(sql, args + (limit,))]
             conn.close()
-        return segments.build_report(rows)
+        report = segments.build_report(rows)
+        report["referral"] = ref
+        return report
 
     def _subscriber_segment(self, sid):
         """Lifecycle segment for ONE subscriber (mirrors _segments_payload): uses
@@ -10880,6 +10909,46 @@ document.addEventListener("click", async function(e){{
         rep = self._segments_payload()
         counts = rep["counts"]
         stats = rep.get("stats", {})
+        ref = rep.get("referral", {})
+        ref_tiles = ('<div class="stat-tile"><b>%d</b><span>Referred leads</span></div>'
+                     '<div class="stat-tile"><b>%d</b><span>Credits issued</span></div>'
+                     '<div class="stat-tile"><b>%d</b><span>Active referrers</span></div>'
+                     % (ref.get("referred_total", 0), ref.get("credits", 0),
+                        ref.get("referrers", 0)))
+        topt = "".join(
+            '<tr><td>%s</td><td>%s</td><td class="ct">%d</td></tr>'
+            % (seo._clean(t.get("email") or ""), seo._clean(t.get("keyword") or ""),
+               t.get("referrals") or 0)
+            for t in ref.get("top", [])) or (
+            '<tr><td colspan="3" class="hint">No share links have converted yet — '
+            'the refer-a-friend card on every signup points here.</td></tr>')
+        lead_rows = []
+        for seg in ("hot", "warm", "cold", "converted", "inactive"):
+            for m in rep["segments"].get(seg, []):
+                if m.get("referrer_email"):
+                    lead_rows.append(m)
+                if len(lead_rows) >= 15:
+                    break
+            if len(lead_rows) >= 15:
+                break
+        leads_t = "".join(
+            '<tr><td>%s</td><td>%s</td><td>%s</td></tr>'
+            % (seo._clean(m.get("email") or ""), seo._clean(m.get("keyword") or ""),
+               seo._clean(m.get("referrer_email") or ""))
+            for m in lead_rows) or (
+            '<tr><td colspan="3" class="hint">No referred leads yet.</td></tr>')
+        refcard = ('<section class="card"><h2>🔗 Referral channel</h2>'
+                   '<p class="hint">Share links: every signup hands the subscriber a '
+                   '?ref= link, and a lead that arrives on it credits the referrer '
+                   '(first link wins — never themselves) and mails them early access '
+                   'to the next guide. Watch the loop here.</p>'
+                   '<div class="table-wrap"><table><thead><tr><th>Referrer</th>'
+                   '<th>Niche</th><th class="ct">Leads brought</th></tr></thead>'
+                   '<tbody>%s</tbody></table></div>'
+                   '<h3 style="margin-top:14px;font-size:14px">Latest referred leads</h3>'
+                   '<div class="table-wrap"><table><thead><tr><th>Lead</th>'
+                   '<th>Niche</th><th>Referred by</th></tr></thead><tbody>%s</tbody></table>'
+                   '</div></section>') % (topt, leads_t)
         def seg_card(name, label, color):
             members = rep["segments"].get(name, [])
             rows = "".join(
@@ -10930,10 +10999,11 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
 <div class="stat-tile"><b>{counts.get('warm',0)}</b><span>Warm</span></div>
 <div class="stat-tile"><b>{counts.get('cold',0)}</b><span>Cold</span></div>
 <div class="stat-tile"><b>{counts.get('converted',0)}</b><span>Converted</span></div>
+{ref_tiles}
 <div class="stat-tile"><b>{rep.get('hot_share',0)}%</b><span>Hot share</span></div>
 </div>
 <p class="hint">Attribution: opens via email open-pixel; clicks via tracked /e/ outbound links (referrer=&lt;subscriber&gt;|&lt;index&gt;). Next-best email angle per segment is shown under each bucket.</p></section>
-{hot}{warm}{cold}{converted}{inactive}
+{hot}{warm}{cold}{converted}{inactive}{refcard}
 <section class="card"><h2>🚀 Act on segments</h2>
 <p class="hint">Push the right next email per group — ownership-button triggered, deduped so nobody gets spammed.</p>
 <button class="warm" onclick="reengage()">📨 Re-engage cold leads</button>

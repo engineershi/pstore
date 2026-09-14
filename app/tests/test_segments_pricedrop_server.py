@@ -196,6 +196,36 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
         self.assertIn(b"Lead lifecycle", body)
         self.assertIn(b"hot@x", body)
 
+    def test_admin_segments_surfaces_referrals(self):
+        """The operator sees the referral loop on /admin/segments: a summary
+        (referred leads, credits, active referrers), the top referrers, and each
+        referred lead resolved back to the subscriber who shared the link."""
+        self._seed()
+        with server._lock:
+            conn = server._db()
+            conn.execute("UPDATE subscribers SET ref_token='rrffffff00000001' "
+                         "WHERE email='hot@x'")
+            conn.execute("UPDATE subscribers SET referrals=1 WHERE email='hot@x'")
+            conn.execute("UPDATE subscribers SET referred_by='rrffffff00000001' "
+                         "WHERE email='warm@x'")
+            conn.commit()
+            conn.close()
+        st, ct, body = self._raw("/api/segments", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        data = json.loads(body)
+        self.assertEqual(data["referral"]["referred_total"], 1)
+        self.assertEqual(data["referral"]["credits"], 1)
+        self.assertEqual(data["referral"]["referrers"], 1)
+        self.assertEqual(data["referral"]["top"][0]["email"], "hot@x")
+        warm = [m for m in data["segments"]["warm"] if m["email"] == "warm@x"]
+        self.assertEqual(warm[0]["referrer_email"], "hot@x")
+        self.assertEqual(warm[0]["referred_by"], "rrffffff00000001")
+        st, ct, page = self._raw("/admin/segments", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        self.assertIn(b"Referral channel", page)
+        self.assertIn(b"Referred leads", page)
+        self.assertIn(b"Latest referred leads", page)
+
     def test_pricedrop_api_watched(self):
         self._seed()
         st, ct, body = self._raw("/api/pricedrop", cookie=self.cookie)
