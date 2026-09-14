@@ -380,6 +380,7 @@
     card.classList.add("show");
     nudgeShown = true;
     try { sessionStorage.setItem("pstore_nudged", "1"); } catch (e) {}
+    beacon("nudge");
   }
   function nudgeAllowed() {
     /* public SEO content pages only — never admin/api/social */

@@ -705,6 +705,160 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
                         "Published today by platform"):
             self.assertIn(section, html)
 
+    def test_system_payload_wave_b_stats_present(self):
+        """Wave B surface: sub_interests + AB matchups in queues, lead-gate
+        subscribes + nudge impressions in the funnel — all derived offline."""
+        self._seed()
+        with server._lock:
+            conn = server._db()
+            conn.execute(
+                "INSERT INTO sub_interests (subscriber_id, keyword, sent_index) "
+                "VALUES (?,?,0)", (1, "green tea"))
+            conn.execute(
+                "INSERT INTO niche_variants (slug, variant, headline, enabled) "
+                "VALUES ('keto snacks','ab-1','Keto picks 2026',1)")
+            conn.execute(
+                "INSERT INTO niche_variants (slug, variant, headline, enabled) "
+                "VALUES ('keto snacks','ab-2','The keto pantry list',1)")
+            conn.execute(
+                "INSERT INTO subscribers (email, keyword, source, confirmed, unsubscribed, sent_index) "
+                "VALUES ('gate@x','keto snacks','niche-gate',1,0,0)")
+            conn.commit()
+            conn.close()
+        st, ct, body = self._raw("/api/system", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        data = json.loads(body)
+        q = data["queues"]
+        self.assertIn("sub_interests", q)
+        self.assertGreaterEqual(q["sub_interests"], 1)
+        self.assertIn("ab_matchups", q)
+        self.assertGreaterEqual(q["ab_matchups"], 1)
+        f = data["funnel"]
+        self.assertIn("gate_subs_today", f)
+        self.assertIn("gate_subs_7d", f)
+        self.assertIn("gate_rate", f)
+        self.assertIn("nudge_today", f)
+        self.assertGreaterEqual(f["gate_subs_today"], 1)
+
+    def test_system_api_route_telemetry_records_last_and_latency(self):
+        """Every API route now carries its live state: last-seen time + last
+        latency, so the console can show data-fetch + response health."""
+        before = dict(server._API_STATS)
+        try:
+            self._raw("/api/system", cookie=self.cookie)
+            st, ct, body = self._raw("/api/system", cookie=self.cookie)
+            data = json.loads(body)
+            routes = {r["path"]: r for r in data["api"]["routes"]}
+            row = routes["/api/system"]
+            self.assertGreaterEqual(row["hits"], 2)
+            self.assertTrue(row.get("last"))
+            self.assertIn("UTC", row["last"])
+            self.assertIsNotNone(row.get("last_ms"))
+            self.assertGreaterEqual(data["api"]["live_count"], 1)
+            self.assertIn("live_count", data["api"])
+        finally:
+            server._API_STATS.clear()
+            server._API_STATS.update(before)
+
+    def test_system_config_exposes_wave_b_toogles(self):
+        """The config panel now reports the price-drop auto mode, the A/B
+        auto-enroll flag and the social webhook health snapshot."""
+        saved_auto = server._get_setting("pricedrop.auto", "1")
+        saved_interval = server._get_setting("pricedrop.auto_interval", "6")
+        try:
+            server._set_setting("pricedrop.auto", "0")
+            server._set_setting("pricedrop.auto_interval", "12")
+            st, ct, body = self._raw("/api/system", cookie=self.cookie)
+            self.assertEqual(st, 200)
+            cfg = json.loads(body)["config"]
+            self.assertFalse(cfg["price_drop_auto"])
+            self.assertEqual(cfg["price_drop_interval_hours"], 12)
+            self.assertTrue(cfg["ab_autoenroll"])
+            self.assertIn("webhook_health", cfg)
+            for k in ("last", "last_ok", "last_fail", "ok", "fail", "err"):
+                self.assertIn(k, cfg["webhook_health"])
+        finally:
+            server._set_setting("pricedrop.auto", saved_auto)
+            server._set_setting("pricedrop.auto_interval", saved_interval)
+
+    def test_pricedrop_config_api_saves_auto_mode(self):
+        """POST /api/pricedrop/config flips the watcher between manual-only and
+        automatic (interval persisted), and the admin page exposes the toggle."""
+        saved_auto = server._get_setting("pricedrop.auto", "1")
+        saved_interval = server._get_setting("pricedrop.auto_interval", "6")
+        try:
+            st, ct, body = self._raw(
+                "/api/pricedrop/config", "POST",
+                body=b'{"auto":"0","interval_hours":12}', cookie=self.cookie)
+            self.assertEqual(st, 200)
+            d = json.loads(body)
+            self.assertTrue(d["ok"])
+            self.assertFalse(d["auto"])
+            self.assertEqual(d["interval_hours"], 12)
+            self.assertEqual(server._get_setting("pricedrop.auto"), "0")
+            st, ct, body = self._raw("/api/pricedrop/state", cookie=self.cookie)
+            self.assertEqual(st, 200)
+            sd = json.loads(body)
+            self.assertFalse(sd["auto"])
+            self.assertEqual(sd["interval_hours"], 12)
+            self.assertIn("state", sd)
+            st, ct, body = self._raw("/admin/pricedrop", cookie=self.cookie)
+            self.assertEqual(st, 200)
+            html = body.decode("utf-8", "replace")
+            self.assertIn('id="auto-on"', html)
+            self.assertIn('id="auto-hrs"', html)
+            self.assertIn("saveCfg", html)
+            self.assertIn("Watcher mode", html)
+        finally:
+            server._set_setting("pricedrop.auto", saved_auto)
+            server._set_setting("pricedrop.auto_interval", saved_interval)
+
+    def test_system_wh_broken_webhook_surfaces_issue(self):
+        """A configured-but-dead webhook (e.g. an expired free trial) must stop
+        reporting clean: the console shows the last POST error and an issue."""
+        saved_hook = server._SOCIAL_WEBHOOK
+        saved_setting = server._get_setting("social.webhook", "")
+        saved_native = dict(server._API_STATS)
+        with server._WEBHOOK_LOCK:
+            saved_stats = dict(server._WEBHOOK_STATS)
+        try:
+            server._set_setting("social.webhook", "https://expired.example/hook")
+            server._SOCIAL_WEBHOOK = ""
+            with server._WEBHOOK_LOCK:
+                server._WEBHOOK_STATS.clear()
+                server._WEBHOOK_STATS.update({
+                    "last": 123.0, "last_ok": 0.0, "last_fail": 123.0,
+                    "ok": 0, "fail": 2, "err": "HTTP Error 410: Gone"})
+            st, ct, body = self._raw("/api/system", cookie=self.cookie)
+            self.assertEqual(st, 200)
+            data = json.loads(body)
+            cfg = data["config"]
+            self.assertTrue(cfg["webhook"])
+            self.assertEqual(cfg["webhook_health"]["fail"], 2)
+            blob = " ".join(data["issues"]).lower()
+            self.assertIn("webhook", blob)
+            self.assertIn("not responding", blob)
+            self.assertIn("expired", blob)
+        finally:
+            server._set_setting("social.webhook", saved_setting)
+            server._SOCIAL_WEBHOOK = saved_hook
+            with server._WEBHOOK_LOCK:
+                server._WEBHOOK_STATS.clear()
+                server._WEBHOOK_STATS.update(saved_stats)
+            server._API_STATS.clear()
+            server._API_STATS.update(dict(saved_native))
+
+    def test_courier_js_reports_nudge_impressions(self):
+        """courier.js must beacon a 'nudge' event the moment the MME-5
+        exit/scroll nudge is shown, so the console funnel can count them."""
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "static", "courier.js")
+        with open(path, "r", encoding="utf-8") as fh:
+            js = fh.read()
+        self.assertIn('beacon("nudge")', js)
+        self.assertIn("showNudge", js)
+        self.assertIn('setItem("pstore_nudged", "1")', js)
+
 
 if __name__ == "__main__":
     unittest.main()

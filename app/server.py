@@ -397,20 +397,35 @@ _INDEXNOW_LAST = {"last": 0.0, "urls": 0, "err": ""}
 _FEED_LOCK = threading.Lock()
 _FEED_CHECK = {"t": 0.0, "busy": False, "base": "", "rss": "", "sitemap": "", "robots": ""}
 
+# --- social webhook health ----------------------------------------------------
+# Every SOCIAL_WEBHOOK POST records its outcome here so the console (and the
+# /admin/social page) can show whether genuine posting is actually working vs.
+# silently dead (e.g. a third-party free trial that ended and now rejects the
+# URL). Written from both the timer-loop and HTTP-request fire paths.
+_WEBHOOK_LOCK = threading.Lock()
+_WEBHOOK_STATS = {"last": 0.0, "last_ok": 0.0, "last_fail": 0.0,
+                  "ok": 0, "fail": 0, "err": ""}
 
-def _tally_api(path, code):
-    """Record one dispatched response for the console's API-health panel."""
+
+def _tally_api(path, code, latency_ms=None):
+    """Record one dispatched response for the console's API-health panel (hits,
+    status buckets, last-seen time and last latency so every API shows its live
+    state — including the data-fetch routes)."""
     try:
         path = (path or "").split("?")[0]
         if not path or path.startswith("/static") or "/style.css" in path:
             return
         bucket = "%dxx" % (code // 100)
+        now = time.time()
         with _API_LOCK:
             r = _API_STATS.setdefault(path[:120],
                                       {"hits": 0, "2xx": 0, "3xx": 0, "4xx": 0,
-                                       "5xx": 0})
+                                       "5xx": 0, "last": 0.0, "last_ms": None})
             r["hits"] += 1
             r[bucket] += 1
+            r["last"] = now
+            if latency_ms is not None:
+                r["last_ms"] = round(float(latency_ms), 1)
             while len(_API_STATS) > _MAX_API_ROUTES:
                 del _API_STATS[next(iter(_API_STATS))]
     except Exception:
@@ -926,6 +941,119 @@ def _refresh_all_worker(kws):
             pass
 
 
+# ---- price-drop machine (shared by the manual button and the auto loop) ------
+def _pricedrop_store():
+    """PriceStore rooted next to the active sqlite DB so tests stay hermit and
+    the repo isn't polluted with a stray pricedrops.json. NEVER let it write
+    over DB itself: use a sibling <db>_pricedrops.json."""
+    base = DB
+    if base.startswith("/tmp"):
+        base = os.path.join(os.path.dirname(base),
+                            os.path.splitext(os.path.basename(base))[0] + "_pricedrops.json")
+    elif base.endswith(".db") or base.endswith(".sqlite"):
+        base = os.path.splitext(base)[0] + "_pricedrops.json"
+    return pricedrop.PriceStore(base)
+
+
+def _watched_products_rows():
+    """Flatten every saved niche's product list into unique ASIN rows with
+    title + last-known price (seeds pricedrop baselines). Module-level so the
+    auto loop can run without an HTTP handler handy."""
+    seen = {}
+    for n in _niches_rows():
+        for item in (n.get("products") or []):
+            asin = str(item.get("asin") or "").strip().upper()
+            if not asin:
+                continue
+            if asin not in seen:
+                seen[asin] = {"asin": asin, "title": item.get("title"),
+                              "price": item.get("price")}
+    return list(seen.values())
+
+
+def _pricedrop_scan(rows, min_pct):
+    """Background re-scrape worker (shared by the manual button and the auto
+    loop): polls update the persisted _PRICEDROP_STATE_KEY state so the admin
+    page can paint progress instead of waiting on a blocking HTTP call.
+    Never raises."""
+    store = _pricedrop_store()
+    fresh = {}
+    checked = 0
+    error = ""
+    try:
+        for row in rows:
+            asin = str(row.get("asin") or "").strip().upper()
+            if not asin:
+                continue
+            try:
+                items, _src = amazon.search(asin, top=1)
+                if items and items[0].get("price") is not None:
+                    fresh[asin] = items[0].get("price")
+            except Exception:
+                pass
+            checked += 1
+            _set_setting(_PRICEDROP_STATE_KEY, json.dumps({
+                "running": True, "status": "scanning", "checked": checked,
+                "total": len(rows), "drops": [], "last_run": "",
+                "error": ""}))
+    except Exception as e:
+        error = str(e)[:160]
+    try:
+        result = pricedrop.check(rows, fresh, store=store, min_drop_pct=min_pct)
+        result["checked"] = checked
+    except Exception as e:
+        result = {"drops": [], "tracked": 0, "checked": checked}
+        error = error or str(e)[:160]
+    from datetime import datetime as _dt
+    _set_setting(_PRICEDROP_STATE_KEY, json.dumps({
+        "running": False, "status": "done", "checked": checked,
+        "total": len(rows), "drops": result.get("drops") or [],
+        "last_run": _dt.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "error": error}))
+    _beat("pricedrop", ok=not error, err=error)
+
+
+def _pricedrop_auto_hours():
+    """Operator-set auto-scan cycle in hours (default 6, min half an hour)."""
+    try:
+        return max(0.5, float(_get_setting("pricedrop.auto_interval", "6") or 6))
+    except (TypeError, ValueError):
+        return 6.0
+
+
+def _pricedrop_auto_loop():
+    """Daemon that runs the price-drop scanner on an operator-controlled cycle
+    (default every 6h) whenever pricedrop.auto=1. Manual Run/Send stay fully
+    independent — a manual run is never pre-empted while one is in flight."""
+    while True:
+        time.sleep(60)
+        try:
+            if _get_setting("pricedrop.auto", "1") != "1":
+                continue
+            try:
+                data = json.loads(_get_setting(_PRICEDROP_STATE_KEY, "{}") or "{}") or {}
+            except Exception:
+                data = {}
+            if data.get("running"):
+                continue
+            hb = _HEARTBEATS.get("pricedrop-auto") or {}
+            if hb.get("last") and time.time() - hb["last"] < _pricedrop_auto_hours() * 3600:
+                continue
+            rows = _watched_products_rows()
+            if not rows:
+                _beat("pricedrop-auto", True)
+                continue
+            _set_setting(_PRICEDROP_STATE_KEY, json.dumps({
+                "running": True, "status": "scanning", "checked": 0,
+                "total": len(rows), "drops": [], "last_run": "", "error": ""}))
+            threading.Thread(
+                target=_pricedrop_scan,
+                args=(rows, pricedrop.DEFAULT_MIN_DROP_PCT), daemon=True).start()
+            _beat("pricedrop-auto", True)
+        except Exception as exc:
+            _beat("pricedrop-auto", False, str(exc))
+
+
 def _publish_key_getter():
     """Wire the persisted social API keys (from the /admin/apikeys settings KV)
     into the native posting gateway. Maps the composer's (platform, field) into
@@ -1009,6 +1137,22 @@ def _pinterest_board(keyword):
     return name[:60]
 
 
+def _webhook_record(ok, err=""):
+    """Record one SOCIAL_WEBHOOK POST outcome for the console's webhook-health
+    panel. A stopped URL (e.g. an expired third-party free trial) bumps fail and
+    keeps the last error so the UI stops pretending posting is 'live'."""
+    with _WEBHOOK_LOCK:
+        _WEBHOOK_STATS["last"] = time.time()
+        if ok:
+            _WEBHOOK_STATS["ok"] += 1
+            _WEBHOOK_STATS["last_ok"] = time.time()
+            _WEBHOOK_STATS["err"] = ""
+        else:
+            _WEBHOOK_STATS["fail"] += 1
+            _WEBHOOK_STATS["last_fail"] = time.time()
+            _WEBHOOK_STATS["err"] = str(err or "POST failed")[:200]
+
+
 def _webhook_fire(kits):
     """Module-level, background, fire-and-forget SOCIAL_WEBHOOK POST for each
     kit (used by the timer loop; the HTTP handler uses its own instance method
@@ -1018,6 +1162,7 @@ def _webhook_fire(kits):
         return
 
     def fire():
+        failed = ""
         for kit in kits:
             try:
                 req = urllib.request.Request(
@@ -1026,8 +1171,9 @@ def _webhook_fire(kits):
                     headers={"Content-Type": "application/json"}, method="POST")
                 with urllib.request.urlopen(req, timeout=10) as resp:
                     resp.read()
-            except Exception:
-                continue
+            except Exception as exc:
+                failed = failed or str(exc)[:160]
+        _webhook_record(not failed, failed)
     threading.Thread(target=fire, daemon=True).start()
 
 
@@ -2696,8 +2842,14 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             self._head_only = False
 
+    def _latency(self):
+        start = getattr(self, "_req_start", None)
+        if not start:
+            return None
+        return (time.time() - start) * 1000.0
+
     def _send(self, code, body, ctype="application/json; charset=utf-8"):
-        _tally_api(getattr(self, "path", ""), code)
+        _tally_api(getattr(self, "path", ""), code, self._latency())
         data = body if isinstance(body, bytes) else json.dumps(body).encode("utf-8")
         data = _stamp_style_version(data, ctype)
         self.send_response(code)
@@ -2735,7 +2887,7 @@ class Handler(BaseHTTPRequestHandler):
                              % (age, edge_age))
         else:
             self.send_header("Cache-Control", "public, max-age=%d" % age)
-        _tally_api(getattr(self, "path", ""), 200)
+        _tally_api(getattr(self, "path", ""), 200, self._latency())
         self.end_headers()
         if not getattr(self, "_head_only", False):
             self.wfile.write(data)
@@ -4299,7 +4451,14 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             return ""
         return "%s://%s" % (scheme, host)
 
+    def _latency(self):
+        start = getattr(self, "_req_start", None)
+        if not start:
+            return None
+        return (time.time() - start) * 1000.0
+
     def do_GET(self):
+        self._req_start = time.time()
         mailer.set_site_base(self._site_base())
         if self._prelim_guard() is None:
             return
@@ -4478,6 +4637,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._segments_api()
             if path == "/api/pricedrop":
                 return self._pricedrop_api()
+            if path == "/api/pricedrop/state":
+                return self._pricedrop_state_api()
             if path == "/admin/apikeys":
                 return self._admin_apikeys(q)
             if path == "/admin/opportunities":
@@ -4612,6 +4773,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             self._send(500, {"error": str(e)})
 
     def do_POST(self):
+        self._req_start = time.time()
         mailer.set_site_base(self._site_base())
         if self._prelim_guard() is None:
             return
@@ -4740,6 +4902,10 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._pricedrop_run()
             if parsed.path == "/api/pricedrop/send":
                 return self._send(200, self._pricedrop_send())
+            if parsed.path == "/api/pricedrop/config":
+                return self._pricedrop_config()
+            if parsed.path == "/api/pricedrop/state":
+                return self._pricedrop_state_api()
             if parsed.path == "/api/segments/reengage":
                 return self._send(200, self._reengage_cold())
             if parsed.path == "/api/subjects/save":
@@ -8149,6 +8315,7 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
             return
 
         def fire():
+            failed = ""
             for kit in kits:
                 try:
                     req = urllib.request.Request(
@@ -8157,8 +8324,9 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
                         headers={"Content-Type": "application/json"}, method="POST")
                     with urllib.request.urlopen(req, timeout=10) as resp:
                         resp.read()
-                except Exception:
-                    continue
+                except Exception as exc:
+                    failed = failed or str(exc)[:160]
+            _webhook_record(not failed, failed)
         threading.Thread(target=fire, daemon=True).start()
 
     def _social_publish(self):
@@ -8544,11 +8712,26 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
             published, stats = self._social_db(keyword, slug, kits)
         else:
             kits, published, stats, slug = [], [], {}, ""
-        webhook_state = ("<b>Configured</b> — publishing also fires your <code>SOCIAL_WEBHOOK</code>."
-                         if self._webhook_url() else
-                         "Not set — one click here flips the post to <b>published</b> and shows the "
-                         "copy-ready kit to paste anywhere. Set <code>SOCIAL_WEBHOOK</code> to also "
-                         "POST <code>{body, link, platform}</code> to Zapier/Make for real posting.")
+        if self._webhook_url():
+            with _WEBHOOK_LOCK:
+                _wh = dict(_WEBHOOK_STATS)
+            if _wh.get("fail") and (_wh.get("last_fail") or 0) >= (_wh.get("last_ok") or 0):
+                webhook_state = ("<b style='color:#c00'>Configured but NOT responding</b> — the last "
+                                 "POST to your webhook failed: <code>%s</code>. Posts already marked "
+                                 "published stay live, but nothing new is going out (e.g. a free trial "
+                                 "that ended). Check the URL on <code>/admin/apikeys</code>."
+                                 % seo._clean((_wh.get("err") or "no response")[:120]))
+            elif _wh.get("last"):
+                webhook_state = ("<b>Configured &amp; working</b> — last POST to your webhook "
+                                 "succeeded, so publishing also fires <code>SOCIAL_WEBHOOK</code> for "
+                                 "real posting.")
+            else:
+                webhook_state = ("<b>Configured</b> — publishing also fires your <code>SOCIAL_WEBHOOK</code> "
+                                 "(no POST has been attempted yet).")
+        else:
+            webhook_state = ("Not set — one click here flips the post to <b>published</b> and shows the "
+                             "copy-ready kit to paste anywhere. Set <code>SOCIAL_WEBHOOK</code> to also "
+                             "POST <code>{body, link, platform}</code> to Zapier/Make for real posting.")
         kit_cards = []
         for kit in kits:
             hashing = stats.get(kit["utm_content"]) or 0
@@ -11417,6 +11600,8 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             content_hours = max(1, int(float(_get_setting("content.loop_hours") or 24) or 24))
         except (TypeError, ValueError):
             content_hours = 24
+        pd_auto = _get_setting("pricedrop.auto", "1") == "1"
+        pd_hours = _pricedrop_auto_hours()
         cadence = {
             "http": ("HTTP server", 60),
             "content": ("Daily content engine (pages + kits)", content_hours * 3600),
@@ -11425,8 +11610,10 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             "inbox": ("IMAP reply polling", 60),
             "refresh": ("Niche auto-refresh", max(_REFRESH_INTERVAL_SEC or 0, 300)),
             "autosend": ("Sequence autosend check", 1800),
+            "pricedrop-auto": ("Price-drop watcher (auto scan)", int(pd_hours * 3600)),
         }
-        # pricedrop is trigger-driven (manual button), so it has no fixed cadence.
+        # pricedrop has two lives: a manual button (run state) and the auto loop
+        # (pricedrop-auto heartbeat). Both are folded into healths/schedule below.
 
         def health(name):
             h = _HEARTBEATS.get(name) or {}
@@ -11437,6 +11624,9 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                 status, detail = "disabled", "auto-refresh disabled (REF interval is 0)"
             elif name == "content" and not _content_enabled():
                 status, detail = "disabled", "content engine disabled (content.enabled=0)"
+            elif name == "pricedrop-auto" and not pd_auto:
+                status, detail = "disabled", ("auto scans off (pricedrop.auto=0) — "
+                                              "use the Run button on /admin/pricedrop")
             elif h.get("last_err", 0) > (h.get("last_ok") or 0):
                 status = "error"
             elif h.get("last"):
@@ -11468,6 +11658,13 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             emails_today = cnt("SELECT COUNT(*) FROM sent_emails WHERE sent_at >= date('now')")
             pricewatch = cnt("SELECT COUNT(*) FROM pricewatch")
             niches = cnt("SELECT COUNT(*) FROM niches")
+            sub_interests = cnt("SELECT COUNT(*) FROM sub_interests")
+            try:
+                ab_matchups = cnt(
+                    "SELECT COUNT(*) FROM (SELECT slug FROM niche_variants "
+                    "WHERE enabled=1 GROUP BY slug HAVING COUNT(*)>=2)")
+            except Exception:
+                ab_matchups = 0
             db_size = os.path.getsize(DB) if os.path.exists(DB) else 0
             db_wal = 0
             for suffix in ("-wal", "-shm"):
@@ -11491,6 +11688,12 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             clicks_total = cnt("SELECT COUNT(*) FROM clicks")
             referrers = cnt("SELECT COUNT(*) FROM subscribers WHERE referrals>0")
             referred_total = cnt("SELECT COALESCE(SUM(referrals),0) FROM subscribers")
+            gate_subs_today = cnt("SELECT COUNT(*) FROM subscribers WHERE "
+                                  "source LIKE '%-gate' AND created_at >= date('now')")
+            gate_subs_7d = cnt("SELECT COUNT(*) FROM subscribers WHERE "
+                               "source LIKE '%-gate' AND created_at >= datetime('now','-7 days')")
+            nudge_today = cnt("SELECT COUNT(*) FROM events WHERE name='nudge' "
+                              "AND created_at >= date('now')")
             published_per = [dict(r) for r in conn.execute(
                 "SELECT platform, COUNT(*) c FROM social_posts "
                 "WHERE status='published' AND published_at >= date('now') "
@@ -11527,7 +11730,8 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                    "social": health("social"), "outbox": health("outbox"),
                    "inbox": health("inbox"), "refresh": health("refresh"),
                    "autosend": health("autosend"),
-                   "pricedrop": {"name": "pricedrop", "label": "Price-drop watcher",
+                   "pricedrop-auto": health("pricedrop-auto"),
+                   "pricedrop": {"name": "pricedrop", "label": "Price-drop run",
                                  "status": "disabled" if pd["status"] == "idle" and not pd["running"]
                                            else "error" if pd.get("error") else "ok",
                                  "detail": pd.get("error") or ""}}
@@ -11573,8 +11777,14 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             issues.append("SMTP not configured — email sends are refused (set SMTP_HOST/USER/PASSWORD)")
         if not ai.configured():
             issues.append("AI not configured — ebook/headline copy uses deterministic templates")
+        with _WEBHOOK_LOCK:
+            wh_stats = dict(_WEBHOOK_STATS)
         if not (_SOCIAL_WEBHOOK or _get_setting("social.webhook")) and not native_keys:
             issues.append("No social destination configured — posts stay queued (set a webhook or native keys)")
+        if _SOCIAL_WEBHOOK or _get_setting("social.webhook"):
+            if not native_keys and wh_stats["fail"] and wh_stats["last_fail"] >= wh_stats["last_ok"]:
+                issues.append("Social webhook not responding — last POST failed: %s "
+                              "(it may have expired / trial ended)" % (wh_stats["err"] or "no response"))
         if native_keys:
             platforms = sorted({k.split(".")[2] if len(k.split(".")) > 2 else k
                                 for k in native_keys})
@@ -11590,10 +11800,13 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
         # ---- API health (per-route response tally from the dispatch layer) ----
         with _API_LOCK:
             api_routes = [{"path": k, "hits": v["hits"], "2xx": v["2xx"],
-                           "3xx": v["3xx"], "4xx": v["4xx"], "5xx": v["5xx"]}
+                           "3xx": v["3xx"], "4xx": v["4xx"], "5xx": v["5xx"],
+                           "last": human(v.get("last") or 0),
+                           "last_ms": v.get("last_ms")}
                           for k, v in sorted(_API_STATS.items(),
                                              key=lambda kv: kv[1]["hits"],
                                              reverse=True)[:16]]
+            api_live = sum(1 for v in _API_STATS.values() if v.get("last"))
         api_total = sum(r["hits"] for r in api_routes)
         api_errors = [r["path"] for r in api_routes if r["5xx"] > 0]
         if api_errors:
@@ -11626,12 +11839,15 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                 "social_scheduled": social_scheduled,
                 "social_publishing": social_publishing, "social_stuck": social_stuck,
                 "social_published_today": social_published_today,
-                "subscribers": subs_total, "clicks_today": clicks_today,
+                "subscribers": subs_total, "sub_interests": sub_interests,
+                "ab_matchups": ab_matchups,
+                "clicks_today": clicks_today,
                 "emails_today": emails_today, "pricewatch": pricewatch,
                 "niches": niches,
             },
             "api": {
                 "routes": api_routes, "total_hits": api_total,
+                "live_count": api_live,
                 "errors": api_errors,
             },
             "discovery": {
@@ -11657,6 +11873,10 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                 "subs_today": subs_today, "views_today": views_today,
                 "opens_today": opens_today, "email_clicks_today": email_clicks_today,
                 "referrers": referrers, "referred_total": referred_total,
+                "gate_subs_today": gate_subs_today, "gate_subs_7d": gate_subs_7d,
+                "gate_rate": (round(100.0 * gate_subs_today / views_today, 1)
+                              if views_today else 0.0),
+                "nudge_today": nudge_today,
                 "published_per_platform": published_per,
                 "clicks_source_today": clicks_source_today,
                 "clicks_source_7d": clicks_source_7d,
@@ -11674,8 +11894,13 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                 "smtp": mailer.configured(), "ai": ai.configured(),
                 "inbound": mailer.inbound_configured(),
                 "autosend_hours": autosend_state.get("hours") or _AUTOSEND_HOURS,
+                "autosend_on": autosend_state.get("status") != "disabled",
                 "social_destination": social_dest,
                 "webhook": bool(_SOCIAL_WEBHOOK or _get_setting("social.webhook")),
+                "webhook_health": dict(wh_stats),
+                "price_drop_auto": pd_auto,
+                "price_drop_interval_hours": pd_hours,
+                "ab_autoenroll": True,
             },
             "threads": threads,
             "issues": issues,
@@ -11711,6 +11936,8 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             '<div class="stat-tile"><b>%d</b><span>Social stuck</span></div>'
             '<div class="stat-tile"><b>%d</b><span>Published today</span></div>'
             '<div class="stat-tile"><b>%d</b><span>Subscribers live</span></div>'
+            '<div class="stat-tile"><b>%d</b><span>Sub-interests</span></div>'
+            '<div class="stat-tile"><b>%d</b><span>A/B matchups</span></div>'
             '<div class="stat-tile"><b>%d</b><span>Clicks today</span></div>'
             '<div class="stat-tile"><b>%d</b><span>Emails today</span></div>'
             '<div class="stat-tile"><b>%d</b><span>Price watches</span></div>'
@@ -11719,6 +11946,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                q.get("outbox_stuck", 0), q.get("social_scheduled", 0),
                q.get("social_publishing", 0), q.get("social_stuck", 0),
                q.get("social_published_today", 0), q.get("subscribers", 0),
+               q.get("sub_interests", 0), q.get("ab_matchups", 0),
                q.get("clicks_today", 0), q.get("emails_today", 0),
                q.get("pricewatch", 0), q.get("niches", 0)))
         issues_html = "".join('<li class="bad">%s</li>' % seo._clean(i)
@@ -11726,11 +11954,27 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             '<li class="good">All systems nominal.</li>'
         qb = rep.get("db", {})
         cfg = rep.get("config", {})
+        wh = cfg.get("webhook_health") or {}
+        if cfg.get("webhook"):
+            wh_last = wh.get("last") or 0
+            if wh.get("fail") and (wh.get("last_fail") or 0) >= (wh.get("last_ok") or 0):
+                wh_row = ('<span class="no">failing</span> <i>last POST: %s</i>'
+                          % seo._clean((wh.get("err") or "")[:90]))
+            elif wh_last:
+                wh_row = ('<span class="yes">working</span> <i>last POST ok</i>')
+            else:
+                wh_row = '<span class="yes">set</span> <i>(no POSTs yet)</i>'
+        else:
+            wh_row = "not set"
+        webhook_td = ("<td>%s <i>(webhook)</i></td>" % wh_row)
         cfg_rows = (
             '<tr><td>SMTP</td><td class="%s">%s</td></tr>'
             '<tr><td>AI copy</td><td class="%s">%s</td></tr>'
             '<tr><td>Email inbound</td><td class="%s">%s</td></tr>'
-            '<tr><td>Social destination</td><td>%s%s</td></tr>'
+            '<tr><td>Social destination</td><td>%s</td></tr>'
+            '<tr><td>Social webhook</td>%s</tr>'
+            '<tr><td>Price-drop watcher</td>%s</tr>'
+            '<tr><td>A/B auto-enroll</td><td class="yes">on — every money page gets a headline matchup</td></tr>'
             '<tr><td>Sequence hours</td><td>%s UTC</td></tr>'
             '<tr><td>DB size</td><td>%s MB (+%s WAL)</td></tr>'
             % ("yes" if cfg.get("smtp") else "no",
@@ -11740,7 +11984,11 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                "yes" if cfg.get("inbound") else "no",
                "IMAP polling" if cfg.get("inbound") else "replies likely lost",
                seo._clean(cfg.get("social_destination") or "none"),
-               (" (webhook set)" if cfg.get("webhook") else ""),
+               webhook_td,
+               ('<td class="%s">%s</td>'
+                % ("yes" if cfg.get("price_drop_auto") else "no",
+                   ("auto scan every %sh" % cfg.get("price_drop_interval_hours"))
+                   if cfg.get("price_drop_auto") else "manual only — Run button")),
                ",".join(str(h) for h in (cfg.get("autosend_hours") or [])) or "off",
                qb.get("mb", 0), qb.get("wal_bytes", 0)))
         thr_rows = "".join(
@@ -11754,10 +12002,15 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
         api = rep.get("api", {})
         api_rows = "".join(
             '<tr><td>%s</td><td class="ct">%s</td><td class="ct">%s</td>'
-            '<td class="ct">%s</td><td class="ct">%s</td><td class="ct %s">%s</td></tr>'
+            '<td class="ct">%s</td><td class="ct">%s</td><td class="ct %s">%s</td>'
+            '<td class="ct">%s</td><td class="ct">%s</td></tr>'
             % (seo._clean(r["path"]), r["hits"], r["2xx"], r["3xx"], r["4xx"],
-               "no" if r["5xx"] else "", r["5xx"])
-            for r in api.get("routes", [])) or "<tr><td colspan='6' class='hint'>No responses tracked yet (the tally starts once traffic hits the dispatcher).</td></tr>"
+               "no" if r["5xx"] else "", r["5xx"],
+               r.get("last") or "—",
+               ("%sms" % r["last_ms"]) if r.get("last_ms") is not None else "—")
+            for r in api.get("routes", [])) or "<tr><td colspan='8' class='hint'>No responses tracked yet (the tally starts once traffic hits the dispatcher).</td></tr>"
+        api_last_hint = ("%d of %d tracked APIs answered with a live response (last seen + latency below)"
+                         % (api.get("live_count", 0), len(api.get("routes", []))))
         # ---- discovery / indexing / search engines ----
         disc = rep.get("discovery", {})
         eng_flag = lambda b: '<span class="%s">%s</span>' % ("yes" if b else "no",
@@ -11819,14 +12072,18 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             '<div class="stat-tile"><b>%s</b><span>Pageviews today</span></div>'
             '<div class="stat-tile"><b>%s</b><span>Email opens today</span></div>'
             '<div class="stat-tile"><b>%s</b><span>Email clicks today</span></div>'
-            '<div class="stat-tile"><b>%s</b><span>Referrers</span></div>'
-            '<div class="stat-tile"><b>%s</b><span>Referred leads</span></div>'
+            '<div class="stat-tile"><b>%s</b><span>Lead-gate subs today</span></div>'
+            '<div class="stat-tile"><b>%s%%</b><span>Gate conversion (7d: %d)</span></div>'
+            '<div class="stat-tile"><b>%s</b><span>Nudges shown today</span></div>'
+            '<div class="stat-tile"><b>%s</b><span>Referral leads</span></div>'
             '<div class="stat-tile"><b>%s</b><span>Price-drop hits</span></div>'
             '<div class="stat-tile"><b>%s</b><span>Est. mo. earnings</span></div>'
             % (fun.get("subs_today", 0), fun.get("views_today", 0),
                fun.get("opens_today", 0), fun.get("email_clicks_today", 0),
-               fun.get("referrers", 0), fun.get("referred_total", 0),
-               fun.get("pricewatch_drops", 0), est_amt or "—"))
+               fun.get("gate_subs_today", 0), fun.get("gate_rate", 0),
+               fun.get("gate_subs_7d", 0), fun.get("nudge_today", 0),
+               fun.get("referred_total", 0), fun.get("pricewatch_drops", 0),
+               est_amt or "—"))
         body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>System console — pstore</title><link rel="stylesheet" href="/style.css">
@@ -11866,8 +12123,8 @@ stay <b>IDLE</b>. Redrawn automatically every 4s.</p>
 <tbody id="sched">{sched}</tbody></table></div></section>
 <section class="card"><h2>🗃 Queues &amp; counters</h2>
 <div class="stat-tiles" id="queues">{queue_tiles}</div></section>
-<section class="card"><h2>🛡 API health <span class="hint">(responses tallied live by path — 5xx turns a row red)</span></h2>
-<div class="table-wrap"><table><thead><tr><th>Route</th><th class="ct">Hits</th><th class="ct">2xx</th><th class="ct">3xx</th><th class="ct">4xx</th><th class="ct">5xx</th></tr>
+<section class="card"><h2>🛡 API health <span class="hint">({api_last_hint})</span></h2>
+<div class="table-wrap"><table><thead><tr><th>Route</th><th class="ct">Hits</th><th class="ct">2xx</th><th class="ct">3xx</th><th class="ct">4xx</th><th class="ct">5xx</th><th class="ct">Last seen</th><th class="ct">Lat</th></tr>
 </thead><tbody id="api-routes">{api_rows}</tbody></table></div></section>
 <section class="card"><h2>🧭 Indexing &amp; search engines</h2>
 <div class="features" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">
@@ -11935,7 +12192,8 @@ async function tick(){{
     (d.api&&d.api.routes||[]).forEach(function(x){{
       a2+='<tr><td>'+esc(x.path)+'</td><td class="ct">'+x.hits+'</td><td class="ct">'+
         x['2xx']+'</td><td class="ct">'+x['3xx']+'</td><td class="ct">'+x['4xx']+
-        '</td><td class="ct '+(x['5xx']?'no':'')+'">'+x['5xx']+'</td></tr>';
+        '</td><td class="ct '+(x['5xx']?'no':'')+'">'+x['5xx']+'</td><td class="ct">'+
+        (x.last||'—')+'</td><td class="ct">'+(x.last_ms!=null?x.last_ms+'ms':'—')+'</td></tr>';
     }});
     if(a2) document.getElementById('api-routes').innerHTML = a2;
   }}catch(e){{document.getElementById('stamp').textContent='⚠ live refresh failed: '+e;}}
@@ -11951,30 +12209,14 @@ database — no log parsing. If a card stays STALE, the worker has stopped beati
 
     # ------------------------------------------------------------------ price drops
     def _price_store(self):
-        """PriceStore rooted next to the active sqlite DB so tests stay hermit
-        and the repo isn't polluted with a stray pricedrops.json. NEVER let it
-        write over DB itself: use a sibling <db>_pricedrops.json."""
-        base = DB
-        if base.startswith("/tmp"):
-            base = os.path.join(os.path.dirname(base),
-                                os.path.splitext(os.path.basename(base))[0] + "_pricedrops.json")
-        elif base.endswith(".db") or base.endswith(".sqlite"):
-            base = os.path.splitext(base)[0] + "_pricedrops.json"
-        return pricedrop.PriceStore(base)
+        """PriceStore rooted next to the active sqlite DB — shared with the
+        auto loop via the module-level _pricedrop_store()."""
+        return _pricedrop_store()
 
     def _watched_products(self):
-        """Flatten every saved niche's product list into unique ASIN rows with
-        title + last-known price (seeds pricedrop baselines)."""
-        seen = {}
-        for n in self._all_niches():
-            for item in (n.get("products") or []):
-                asin = str(item.get("asin") or "").strip().upper()
-                if not asin:
-                    continue
-                if asin not in seen:
-                    seen[asin] = {"asin": asin, "title": item.get("title"),
-                                  "price": item.get("price")}
-        return list(seen.values())
+        """Flatten every saved niche's product list into unique ASIN rows (see
+        module-level _watched_products_rows, shared with the auto loop)."""
+        return _watched_products_rows()
 
     def _pricedrop_api(self):
         store = self._price_store()
@@ -12001,43 +12243,9 @@ database — no log parsing. If a card stays STALE, the worker has stopped beati
         return state
 
     def _pricedrop_worker(self, rows, min_pct):
-        """Background re-scrape: polls update the persisted state so the admin
-        page can paint progress instead of waiting on a blocking HTTP call."""
-        store = self._price_store()
-        fresh = {}
-        checked = 0
-        error = ""
-        try:
-            for row in rows:
-                asin = str(row.get("asin") or "").strip().upper()
-                if not asin:
-                    continue
-                try:
-                    items, _src = amazon.search(asin, top=1)
-                    if items and items[0].get("price") is not None:
-                        fresh[asin] = items[0].get("price")
-                except Exception:
-                    pass
-                checked += 1
-                _set_setting(_PRICEDROP_STATE_KEY, json.dumps({
-                    "running": True, "status": "scanning", "checked": checked,
-                    "total": len(rows), "drops": [], "last_run": "",
-                    "error": ""}))
-        except Exception as e:
-            error = str(e)[:160]
-        try:
-            result = pricedrop.check(rows, fresh, store=store, min_drop_pct=min_pct)
-            result["checked"] = checked
-        except Exception as e:
-            result = {"drops": [], "tracked": 0, "checked": checked}
-            error = error or str(e)[:160]
-        from datetime import datetime as _dt
-        _set_setting(_PRICEDROP_STATE_KEY, json.dumps({
-            "running": False, "status": "done", "checked": checked,
-            "total": len(rows), "drops": result.get("drops") or [],
-            "last_run": _dt.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-            "error": error}))
-        _beat("pricedrop", ok=not error, err=error)
+        """Background re-scrape (instance shim → module-level _pricedrop_scan,
+        shared with the auto loop). Never raises."""
+        return _pricedrop_scan(rows, min_pct)
 
     def _pricedrop_run(self):
         """Re-scrape current prices for every ranked ASIN and flag real drops
@@ -12070,6 +12278,35 @@ database — no log parsing. If a card stays STALE, the worker has stopped beati
         return self._send(200, {"started": True, "running": True,
                                 "total": len(rows)})
 
+    def _pricedrop_config(self):
+        """POST /api/pricedrop/config — flip the watcher between manual-only and
+        automatic (auto scans every pricedrop.auto_interval hours)."""
+        body = self._body() or {}
+        auto = str(body.get("auto", "")).strip().lower() in ("1", "on", "true", "yes")
+        interval = body.get("interval_hours")
+        if interval not in (None, ""):
+            try:
+                interval = max(0.5, float(interval))
+            except (TypeError, ValueError):
+                interval = None
+        if interval is not None:
+            _set_setting("pricedrop.auto_interval", ("%g" % interval))
+        _set_setting("pricedrop.auto", "1" if auto else "0")
+        return self._send(200, {"ok": True, "auto": auto,
+                                "interval_hours": _pricedrop_auto_hours()})
+
+    def _pricedrop_state_api(self):
+        """GET /api/pricedrop/state — watcher config + last auto/manual heartbeat
+        so the console and pricedrop page share one source of truth."""
+        pd = self._price_run_state()
+        return self._send(200, {
+            "ok": True,
+            "auto": _get_setting("pricedrop.auto", "1") == "1",
+            "interval_hours": _pricedrop_auto_hours(),
+            "last_run": pd.get("last_run"),
+            "state": pd,
+        })
+
     def _admin_pricedrop(self, q):
         js = (
             "async function runCheck(){const m=document.querySelector('#msg');const out=document.querySelector('#out');\n"
@@ -12096,7 +12333,19 @@ database — no log parsing. If a card stays STALE, the worker has stopped beati
             "m.textContent='Checking + pushing\u2026';let r,d;"
             "try{r=await fetch('/api/pricedrop/send',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});d=await r.json();}"
             "catch(e){m.textContent='\u2717 Could not reach the server.';return;}\n"
-            "m.textContent=(r.ok?'\u2713 Emailed '+(d.sent||0)+' hot/converted leads':'')+' (already sent '+(d.already_sent||0)+')';}")
+            "m.textContent=(r.ok?'\u2713 Emailed '+(d.sent||0)+' hot/converted leads':'')+' (already sent '+(d.already_sent||0)+')';}\n"
+            "async function loadCfg(){const c=document.querySelector('#cfg');if(!c)return;\n"
+            "let d;try{const r=await fetch('/api/pricedrop/state');d=await r.json();}catch(e){return;}\n"
+            "document.querySelector('#auto-on').checked=!!d.auto;\n"
+            "document.querySelector('#auto-hrs').value=(d.interval_hours||6);\n"
+            "document.querySelector('#cfg-status').textContent=d.auto?('Auto scan every '+(d.interval_hours||6)+'h'+(d.last_run?' \u2014 last run '+d.last_run:'')):'Manual only \u2014 use the buttons below.';\n"
+            "}\n"
+            "async function saveCfg(){const m=document.querySelector('#cfg-status');m.textContent='Saving\u2026';\n"
+            "const body=JSON.stringify({auto:document.querySelector('#auto-on').checked?'1':'0',interval_hours:document.querySelector('#auto-hrs').value});\n"
+            "let r,d;try{r=await fetch('/api/pricedrop/config',{method:'POST',headers:{'Content-Type':'application/json'},body});d=await r.json();}\n"
+            "catch(e){m.textContent='\u2717 Could not save.';return;}\n"
+            "m.textContent=(r.ok?'\u2713 Saved \u2014 auto '+(d.auto?'ON':'OFF')+' every '+(d.interval_hours||6)+'h':'\u2717 '+((d&&d.error)||'failed'));}\n"
+            "loadCfg();")
         store = self._price_store()
         allb = store.all()
         rows = "".join(
@@ -12121,6 +12370,16 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
 <p class="tagline">Watch ranked products, flag real price declines, and push a scarcity 'buy now' email + banner.</p></div>
 {self._admin_nav('pricedrop')}</header>
 <main>
+<section class="card"><h2>⚙ Watcher mode</h2>
+<p class="hint">Auto mode re-scrapes every watched price on a schedule so deals get flagged without you clicking. Manual buttons below stay available either way.</p>
+<div class="actions" role="group" aria-label="Watcher configuration">
+<label class="sw"><input type="checkbox" id="auto-on"><span class="sl"></span></label>
+<span>Automatic price-drop scans</span>
+<input id="auto-hrs" type="number" min="0.5" step="0.5" value="6" style="width:84px;padding:8px 10px;border:1px solid var(--inputs-bd);border-radius:8px">
+<span>hours apart</span>
+<button class="warm" onclick="saveCfg()">💾 Save watcher settings</button>
+</div>
+<p id="cfg-status" class="msg"></p></section>
 <section class="card"><h2>🏷 Watched prices</h2>
 <p class="hint">Baselines are stored on first sight. A drop of &ge; {pricedrop.DEFAULT_MIN_DROP_PCT}% and &ge; ${pricedrop.DEFAULT_MIN_DROP_ABS} counts as a real deal.</p>
 <table><thead><tr><th>ASIN</th><th class="ct">Baseline</th></tr></thead><tbody>{rows}</tbody></table>
@@ -14796,6 +15055,10 @@ def main():
         threading.Thread(target=_auto_refresh_loop, daemon=True).start()
         print("niche auto-refresh: every %ds, stale after %dm, %d/cycle"
               % (_REFRESH_INTERVAL_SEC, _REFRESH_STALE_MIN, _REFRESH_MAX_PER_CYCLE))
+    threading.Thread(target=_pricedrop_auto_loop, name="pricedrop-auto", daemon=True).start()
+    print("price-drop watcher: auto mode %s, scan every %.1fh (pricedrop.auto / pricedrop.auto_interval)"
+          % ("ON" if _get_setting("pricedrop.auto", "1") == "1" else "OFF",
+             _pricedrop_auto_hours()))
     threading.Thread(target=_content_loop, name="content-engine", daemon=True).start()
     print("daily content engine: running every %dh (pages+kits, leaders first)"
           % max(1, int(float(_get_setting("content.loop_hours") or 24) or 24)))

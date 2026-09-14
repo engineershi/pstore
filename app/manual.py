@@ -346,6 +346,7 @@ def _chapters():
             ("Search engines /admin/seoengines", "GSC, Yandex, Bing"),
             ("A/B headlines /admin/variants", "auto-enrolled tests"),
             ("Refresh /admin/refresh", "auto + manual re-mine"),
+            ("System console /admin/system", "automation health + live APIs"),
             ("Users & roles /admin/users", "accounts + function matrix"),
             ("Public pages /n, /lp, sitemap", "the ranked site"),
             ("Inbox (Email Studio)", "replies via tagged Reply-To"),
@@ -494,6 +495,30 @@ def _chapters():
         doc.text("Thank you for running it.", doc.margin_x, doc.y - 12, 12, (45, 40, 52), bold=True)
         doc.page_break()
 
+    def c15(doc, num, label, blurb):
+        doc.chapter(num, label, blurb)
+        doc.paragraph(
+            "The System console (/admin/system) shows every automation's heartbeat, "
+            "its schedule and queue counts in real time. API health now carries a live "
+            "last-seen time and latency per route — so data fetch endpoints show "
+            "honestly rather than going unmonitored — and a tweet of every tracked "
+            "API's state redraws automatically every few seconds.")
+        doc.paragraph(
+            "Wave B queues add sub-interests, A/B matchups, lead-gate subscribes, "
+            "gate conversion rate and nudge impressions so the email + capture "
+            "machine is visible at a glance.")
+        doc.two_col([
+            ("SMTP", "Yes / No"),
+            ("AI copy", "Yes / No"),
+            ("Price-drop watcher", "Auto every Nh or manual"),
+            ("A/B auto-enroll", "On for every saved niche"),
+            ("Social webhook", "Working or last POST error"),
+            ("DB size", "Live MB + WAL"),
+        ])
+        doc.pullquote("If a card stays STALE, the worker has stopped beating; "
+                      "fix the root cause and the system recovers itself.")
+        doc.page_break()
+
     return [
         (1, "Money machine in a box", "What pstore is, and the loop it runs", c1),
         (2, "Run the four phases", "The mental model that drives every niche", c2),
@@ -509,7 +534,8 @@ def _chapters():
         (12, "Team access and roles", "Accounts, confirmation, permissions", c11),
         (13, "Inbox and conversations", "Replies, threads, IMAP", c12),
         (14, "Highest-form playbook", "Habits, checklist, tick-box run", c13),
-        (15, "About the founder", "The engineer who built it from scratch", c14),
+        (15, "System console & automation health", "Heartbeats, queues, live APIs", c15),
+        (16, "About the founder", "The engineer who built it from scratch", c14),
     ]
 
 
@@ -569,6 +595,7 @@ def render_admin_manual(nav_html, totop_html):
         a("/admin/seo", "🔍 SEO audit", "indexability"),
         a("/admin/opportunities", "🪴 Grow", "daily content engine"),
         a("/admin/refresh", "📡 Refresh", "auto + manual"),
+        a("/admin/system", "🖥 System console", "health + live APIs"),
         a("/admin/variants", "⚗️ A/B headlines", "auto-enrolled tests"),
         a("/admin", "🗺 All pages", "hub"),
     ])
@@ -676,6 +703,7 @@ def render_admin_manual(nav_html, totop_html):
   <a href="#audience">16 · Audience &amp; geo</a>
   <a href="#look">17 · Look &amp; feel</a>
   <a href="#founder">18 · About the founder</a>
+  <a href="#console">19 · System console</a>
 </nav>
 
 <h3 id="what">1 · What pstore is</h3>
@@ -737,7 +765,7 @@ def render_admin_manual(nav_html, totop_html):
 
 <h3 id="s4">7 · Step 4 — Send the 5-part buyer sequence</h3>
 <p>Every subscriber enters a 5-email sequence from the top pick: hook → social proof → objections → soft urgency → follow-up + review. Each carries your tagged Amazon link. Every mail is a clean brand-styled HTML email with a plain-text twin: bold headline, organised sub-headings, and an Amazon-style product card (share-card image, ⭐ rating, orange price, buy CTA) so it reads as beautifully as the review pages.</p>
-<p>Review cards add a <b>“Track price”</b> button: a click turns a visitor into a subscriber <i>and</i> a price-watcher. The daily email pass then sends watchers a personal “price just dropped” alert with a tracked check-price link the moment their product actually goes on sale — a transactional capture that sells at the same time. Every capture also shows a <b>referral link</b> (“share the guide, you both win”), and the referrer is credited once in the subscribers table.</p>
+<p>Review cards add a <b>“Track price”</b> button: a click turns a visitor into a subscriber <i>and</i> a price-watcher. The <a class="tooltag" href="/admin/pricedrop">🛒 Price-drop engine</a> then flags real drops against stored baselines — and it runs <b>automatic</b> too: flip <i>Automatic price-drop scans</i> to <b>ON</b> on that page (default, every 6 hours; set your own interval) and the watcher re-scrapes and emails the daily email pass's watchers a personal “price just dropped” alert with a tracked check-price link the moment their product actually goes on sale — a transactional capture that sells at the same time. Keep the manual <b>Run check</b> / <b>Email hot + converted leads</b> buttons whenever you want an instant push. Every capture also shows a <b>referral link</b> (“share the guide, you both win”), and the referrer is credited once in the subscribers table.</p>
 <p><a class="tooltag" href="/admin/emails">📨 Email Studio</a> is the one place to compose and send mail: pick any niche, segment (hot/warm/cold/converted/inactive) or a typed address list, choose a sequence step, converted follow-up, re-engage or a fully custom subject + body, then deliver <b>now</b> or <b>schedule a UTC slot</b>. A live preview shows exactly what lands in the inbox.</p>
 <ul class="step-list">
 <li>Pick recipients with the checkboxes, or type any address(es) — one per line; the count updates live.</li>
@@ -849,6 +877,15 @@ def render_admin_manual(nav_html, totop_html):
 <li><b>Email</b> — <a href="mailto:salahuddinhabibisah@gmail.com">salahuddinhabibisah@gmail.com</a>.</li>
 <li><b>Phone</b> — +234 803 9177 353.</li>
 <li>Every feature exists because it earns its keep in the money loop: opt-in-only email, honest attribution, disclosed affiliate links, and fresh pricing. Run the loop well and the software quietly prints the smallest, tidiest commissions a machine can make.</li>
+</ul>
+
+<h3 id="console">19 · System console — every automation, every live API</h3>
+<p>The <a class="tooltag" href="/admin/system">🖥 System console</a> is the machine's cockpit: every background worker's heartbeat, its schedule and its queue counts, drawn from the live process — no log parsing.</p>
+<ul class="step-list">
+<li><b>Automation health</b> — each worker (HTTP, content engine, social scheduler, outbox, inbox, auto-refresh, autosend, price-drop watcher) beats after every tick; a beat older than ~3 cycles turns <b>STALE</b>, a failing tick flips the card <b>ERROR</b> with its last error. Auto mode for the <a class="tooltag" href="/admin/pricedrop">🛒 Price-drop watcher</a> shows here too, including how often it scans.</li>
+<li><b>API health — live per route</b> — every API answers with a tallied row: hits, status buckets (2xx/3xx/4xx/5xx), <b>last seen</b> and <b>last latency</b>, so you can tell at a glance which endpoint is hot, slow, or erroring (data fetch included). The page redraws every 4 seconds.</li>
+<li><b>Wave B counters</b> — the queue tiles now include <b>sub-interests</b> (per-keyword email interest rows) and <b>A/B matchups</b> (niches with live headline variants), and the funnel shows <b>lead-gate subscribes</b> (with today's <b>gate conversion rate</b>) and <b>nudges shown</b> — the MME-5 exit/scroll card reports itself the moment it appears.</li>
+<li><b>Social webhook health</b> — the config panel shows whether your <code>SOCIAL_WEBHOOK</code> endpoint is genuinely working or silently dead. If the last POST failed (a free trial that ended, a vanished URL), the console raises an issue and <a class="tooltag" href="/admin/social">📣 Social</a> says <i>Configured but NOT responding</i> instead of pretending everything is live.</li>
 </ul>
 </section>
 </div>
