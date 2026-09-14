@@ -1097,6 +1097,124 @@ class TestSocialSuite(unittest.TestCase):
         finally:
             server._set_setting("ab.captions_min_clicks", "")
 
+    # ------------------------------------------- batch 2: attribution truth
+
+    def test_click_channel_maps_every_platform_key(self):
+        u = server._click_channel
+        for s in ("twitter", "facebook", "linkedin", "instagram",
+                  "pinterest", "threads", "pin", "x"):
+            self.assertEqual(u(s), "social", s)
+        self.assertEqual(u("email"), "email")
+        for s in ("page", "niche", "landing", "organic", "coupon", ""):
+            self.assertEqual(u(s), "organic", s)
+
+    def test_track_records_channel_and_rendered_tag(self):
+        with server._lock:
+            conn = server._db()
+            conn.execute("DELETE FROM clicks")
+            conn.commit()
+            conn.close()
+        st, _, _, _ = self._raw(
+            "/api/track", "POST",
+            body=json.dumps({"slug": "keto-snacks", "source": "instagram",
+                             "content": "zzz99", "asin": "B0KETO1234",
+                             "tag": "peterm-20"}))
+        self.assertEqual(st, 200)
+        with server._lock:
+            conn = server._db()
+            row = conn.execute(
+                "SELECT source, channel, tag FROM clicks ORDER BY id DESC LIMIT 1").fetchone()
+            conn.close()
+        self.assertEqual(row["source"], "instagram")
+        self.assertEqual(row["channel"], "social")
+        self.assertEqual(row["tag"], "peterm-20")
+
+    def test_organic_site_click_gets_organic_channel(self):
+        st, _, _, _ = self._raw(
+            "/api/track", "POST",
+            body=json.dumps({"slug": "keto-snacks", "source": "page"}))
+        self.assertEqual(st, 200)
+        with server._lock:
+            conn = server._db()
+            row = conn.execute(
+                "SELECT channel FROM clicks ORDER BY id DESC LIMIT 1").fetchone()
+            conn.close()
+        self.assertEqual(row["channel"], "organic")
+
+    def test_social_funnel_counts_platform_sources(self):
+        """Historic dead query: WHERE source='social' matched nothing because
+        the beacon writes the UTM platform key. Channel fixed it: platform-key
+        clicks must now count toward the marketing payload's social.clicks."""
+        with server._lock:
+            conn = server._db()
+            conn.execute("DELETE FROM clicks")
+            conn.commit()
+            conn.close()
+        self._raw("/api/track", "POST",
+                  body=json.dumps({"slug": "keto-snacks", "source": "twitter"}))
+        self._raw("/api/track", "POST",
+                  body=json.dumps({"slug": "keto-snacks", "source": "pinterest"}))
+        self._raw("/api/track", "POST",
+                  body=json.dumps({"slug": "keto-snacks", "source": "page"}))
+        st, _, _, data = self._raw("/api/marketing", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        p = json.loads(data)
+        self.assertEqual(p["social"]["clicks"], 2)
+
+    def test_winners_score_real_channel_clicks_and_leads(self):
+        with server._lock:
+            conn = server._db()
+            conn.execute("DELETE FROM clicks")
+            conn.execute("DELETE FROM subscribers WHERE utm_content='win-abc'")
+            conn.commit()
+            conn.execute(
+                "INSERT INTO social_posts (slug, keyword, platform, name, link, "
+                "utm_content, status, published_at) "
+                "VALUES ('keto-snacks','keto snacks','Pinterest','Ketofied',"
+                "'','win-abc','published', datetime('now'))")
+            conn.execute(
+                "INSERT INTO subscribers (email, utm_content, confirmed, unsubscribed) "
+                "VALUES ('lead@example.com','win-abc',1,0)")
+            conn.commit()
+            conn.close()
+        st, _, _, _ = self._raw(
+            "/api/track", "POST",
+            body=json.dumps({"slug": "keto-snacks", "source": "pinterest",
+                             "content": "win-abc"}))
+        self.assertEqual(st, 200)
+        st, _, _, data = self._raw("/api/marketing", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        winners = json.loads(data)["social"]["winners"]
+        self.assertEqual(len(winners), 1)
+        self.assertEqual(winners[0]["utm_content"], "win-abc")
+        self.assertEqual(winners[0]["clicks"], 1)
+        self.assertEqual(winners[0]["leads"], 1)
+
+    def test_subscribe_captures_utm_source_and_content(self):
+        email = "utm-lead@example.com"
+        with server._lock:
+            conn = server._db()
+            conn.execute("DELETE FROM subscribers WHERE email=?", (email,))
+            conn.commit()
+            conn.close()
+        st, _, _, data = self._raw(
+            "/subscribe", "POST",
+            body=json.dumps({"email": email, "keyword": "keto snacks",
+                             "source": "niche",
+                             "utm_source": "twitter", "utm_content": "win-abc"}))
+        self.assertEqual(st, 200)
+        d = json.loads(data)
+        self.assertTrue(d["ok"], d)
+        with server._lock:
+            conn = server._db()
+            row = conn.execute(
+                "SELECT source, utm_source, utm_content FROM subscribers WHERE email=?",
+                (email,)).fetchone()
+            conn.close()
+        self.assertEqual(row["source"], "niche")  # page-type preserved
+        self.assertEqual(row["utm_source"], "twitter")
+        self.assertEqual(row["utm_content"], "win-abc")
+
 
 if __name__ == "__main__":
     unittest.main()

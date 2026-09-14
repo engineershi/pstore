@@ -12,6 +12,7 @@ import json
 import os
 import re
 import hashlib
+import amazon
 from datetime import datetime
 
 import editorial
@@ -525,7 +526,7 @@ def render_landing(saved_niches):
 <a class="chip" href="#faq">❓ FAQ</a>
  <a class="chip" href="/blog">📝 Blog</a>
  </nav></header>
-<main data-niche="home" data-source="home" data-keyword="best amazon niche picks">
+<main data-niche="home" data-source="home" data-keyword="best amazon niche picks" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
 <section class="card hero-home" id="top-picks">
   <h1 style="font-size:30px;line-height:1.15">Find the best <span style="color:var(--accent)">Amazon picks</span>, by niche — before you scroll once.</h1>
   <p style="font-size:16px;color:var(--muted);max-width:720px">Each niche page ranks the strongest products on Amazon for a topic — using live price, rating
@@ -622,7 +623,7 @@ def render_niche(keyword, niche, saved_niches=None, ab_headline=None, ab_variant
 <header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
 <nav><a href="/">🏠 Home</a><a href="/about">About</a><a href="/disclosure">Disclosure</a><a href="/lp/{_clean(_slugify(keyword))}">One-pager →</a></nav></header>
 {banner_slot}{style_slot}
-<main data-niche="{_clean(_slugify(keyword))}" data-source="niche" data-keyword="{_clean(keyword)}"{ab_attr}>
+<main data-niche="{_clean(_slugify(keyword))}" data-source="niche" data-keyword="{_clean(keyword)}"{ab_attr} data-tag="{_clean(amazon.AFFILIATE_TAG)}">
 <div class="card">
   {editorial.breadcrumbs_html(keyword)}
   <h1>{_clean(headline)}</h1>
@@ -712,7 +713,7 @@ def render_topic(term, parent_keyword, niche, parent_slug, style_pack=None):
 <header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
 <nav><a href="/">🏠 Home</a><a href="{_clean(hub)}">{_clean(parent_keyword.title())}: hub →</a><a href="/disclosure">Disclosure</a></nav></header>
 {banner_slot}{style_slot}
-<main data-niche="{_clean(term_slug)}" data-source="topic" data-keyword="{_clean(term or parent_keyword)}">
+<main data-niche="{_clean(term_slug)}" data-source="topic" data-keyword="{_clean(term or parent_keyword)}" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
 <div class="card">
   {editorial.breadcrumbs_html(term or parent_keyword)}
   <h1>Best {_clean(term or parent_keyword)}</h1>
@@ -797,7 +798,7 @@ def render_blog(saved_niches):
     body = f"""<header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
 <p class="tagline">{_clean(SITE_DESC)}</p>
 <nav><a href="/">🏠 Home</a><a href="/blog">📝 Blog</a><a href="/disclosure">Disclosure</a></nav></header>
-<main data-niche="blog" data-source="blog">
+<main data-niche="blog" data-source="blog" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
 <section class="hero-home card">
   <h1 style="font-size:30px;line-height:1.15">The <span style="color:var(--accent)">blog</span>.</h1>
   <p style="font-size:16px;color:var(--muted);max-width:720px">Every guide is a data-backed ranking of the best Amazon pick for that niche —

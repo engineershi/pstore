@@ -17,6 +17,8 @@
      analytics report can score which headline converts. */
   var abVariant = main ? main.getAttribute("data-variant") || "" : "";
   if (!utmContent && abVariant) utmContent = "ab-" + abVariant;
+  /* Affiliate tag the server rendered into this page (paid/organic split). */
+  var utmTag = main ? main.getAttribute("data-tag") || "" : "";
 
   /* ---- email opt-in: <form class="courier">, POST /subscribe, JSON ---- */
   document.addEventListener("submit", function (ev) {
@@ -55,7 +57,9 @@
         email: val,
         first_name: (first_name && first_name.value || "").trim(),
         keyword: (keyword && keyword.value) || slug,
-        source: (main && main.dataset.source) || "niche"
+        source: (main && main.dataset.source) || "niche",
+        utm_source: utmSource,
+        utm_content: utmContent
       })
     }).then(function (r) { return r.json(); })
       .then(function (d) {
@@ -215,7 +219,8 @@
       source: source,
       referrer: (document.referrer || "").slice(0, 200),
       asin: asin,
-      content: utmContent
+      content: utmContent,
+      tag: utmTag
     };
     if (navigator.sendBeacon) {
       navigator.sendBeacon("/api/track",
@@ -226,7 +231,8 @@
                 "&source=" + encodeURIComponent(payload.source) +
                 "&referrer=" + encodeURIComponent(payload.referrer) +
                 "&asin=" + encodeURIComponent(payload.asin) +
-                "&content=" + encodeURIComponent(payload.content);
+                "&content=" + encodeURIComponent(payload.content) +
+                "&tag=" + encodeURIComponent(payload.tag);
     }
   });
 /* ---- pageview beacon: report every public page visit once ---- */

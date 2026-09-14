@@ -814,6 +814,23 @@ def _publish_key_getter():
     return kv
 
 
+_SOCIAL_SOURCE_KEYS = frozenset(social._key(p) for p in social.PLATFORMS) | {"pin", "x"}
+
+
+def _click_channel(source):
+    """Canonical acquisition channel for a click's raw `source`. Social links
+    arrive with the UTM platform key (twitter, pinterest, ...), email CTAs say
+    'email', and everything else is site/organic. Keeps the funnel queries
+    honest: `WHERE channel='social'` aggregates every platform instead of
+    matching a literal (source='social') that nothing ever writes."""
+    s = (source or "").strip().lower()
+    if s in _SOCIAL_SOURCE_KEYS:
+        return "social"
+    if s == "email":
+        return "email"
+    return "organic"
+
+
 def _publish_native(kits):
     """Best-effort native per-platform posting for a batch of kits. Uses the
     keys the operator pasted on /admin/apikeys; platforms without keys report
@@ -1756,6 +1773,8 @@ def _ensure_db_schema(conn):
         confirmed INTEGER DEFAULT 1,
         unsubscribed INTEGER DEFAULT 0,
         sent_index INTEGER DEFAULT 0,
+        utm_source TEXT DEFAULT '',
+        utm_content TEXT DEFAULT '',
         created_at TEXT DEFAULT (datetime('now'))
     )""")
     conn.execute("""CREATE TABLE IF NOT EXISTS sent_emails (
@@ -1833,6 +1852,8 @@ def _ensure_db_schema(conn):
         ip TEXT,
         referrer TEXT,
         asin TEXT,
+        channel TEXT DEFAULT '',
+        tag TEXT DEFAULT '',
         created_at TEXT DEFAULT (datetime('now'))
     )""")
     conn.execute("""CREATE TABLE IF NOT EXISTS social_posts (
@@ -1871,6 +1892,16 @@ def _ensure_db_schema(conn):
         pass
     try:
         conn.execute("ALTER TABLE subscribers ADD COLUMN referred_by TEXT DEFAULT ''")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE subscribers ADD COLUMN utm_source TEXT DEFAULT ''")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE subscribers ADD COLUMN utm_content TEXT DEFAULT ''")
         conn.commit()
     except Exception:
         pass
@@ -1965,6 +1996,31 @@ def _ensure_db_schema(conn):
         conn.execute("ALTER TABLE clicks ADD COLUMN asin TEXT")
         conn.commit()
     except sqlite3.OperationalError:
+        conn.rollback()
+    try:
+        conn.execute("ALTER TABLE clicks ADD COLUMN channel TEXT DEFAULT ''")
+        conn.commit()
+    except sqlite3.OperationalError:
+        conn.rollback()
+    try:
+        conn.execute("ALTER TABLE clicks ADD COLUMN tag TEXT DEFAULT ''")
+        conn.commit()
+    except sqlite3.OperationalError:
+        conn.rollback()
+    # Backfill channel for clicks recorded before the column existed: every
+    # social platform key maps to 'social', email CTAs to 'email', the rest
+    # organic. Idempotent — only fills empty rows.
+    try:
+        conn.execute(
+            "UPDATE clicks SET channel='social' WHERE lower(source) IN ("
+            + ",".join("?" for _ in sorted(_SOCIAL_SOURCE_KEYS)) + ") "
+            "AND (channel IS NULL OR channel='')",
+            tuple(sorted(_SOCIAL_SOURCE_KEYS)))
+        conn.execute(
+            "UPDATE clicks SET channel='email' WHERE source='email' "
+            "AND (channel IS NULL OR channel='')")
+        conn.commit()
+    except Exception:
         conn.rollback()
     try:
         conn.execute("ALTER TABLE niches ADD COLUMN updated_at TEXT")
@@ -8879,7 +8935,7 @@ fresh();
                           (mailer.SEQUENCE_LENGTH,))
             social_pub = q1("SELECT COUNT(*) FROM social_posts WHERE status='published'")
             social_sched = q1("SELECT COUNT(*) FROM social_posts WHERE status='scheduled'")
-            social_clicks = q1("SELECT COUNT(*) FROM clicks WHERE source='social'")
+            social_clicks = q1("SELECT COUNT(*) FROM clicks WHERE channel='social'")
             views = q1("SELECT COUNT(*) FROM events WHERE name='view'")
             promo = q1("SELECT COUNT(*) FROM events WHERE name!='view'")
             niches = q1("SELECT COUNT(*) FROM niches")
@@ -8898,15 +8954,21 @@ fresh();
                 "WHERE status='published' AND utm_content!=''").fetchall()
             conn.close()
         click_stats = {}
+        lead_stats = {}
         if soc_rows:
             with _lock:
                 c2 = _db()
                 for r in soc_rows:
                     click_stats[(r["utm_content"])] = c2.execute(
-                        "SELECT COUNT(*) FROM clicks WHERE content=? AND source='social'",
+                        "SELECT COUNT(*) FROM clicks WHERE content=? AND channel='social'",
+                        (r["utm_content"],)).fetchone()[0] or 0
+                    lead_stats[(r["utm_content"])] = c2.execute(
+                        "SELECT COUNT(*) FROM subscribers WHERE utm_content=? "
+                        "AND confirmed=1 AND unsubscribed=0",
                         (r["utm_content"],)).fetchone()[0] or 0
                 c2.close()
-        winners = [dict(r, clicks=click_stats.get(r["utm_content"], 0))
+        winners = [dict(r, clicks=click_stats.get(r["utm_content"], 0),
+                        leads=lead_stats.get(r["utm_content"], 0))
                    for r in soc_rows if click_stats.get(r["utm_content"], 0) > 0]
         winners.sort(key=lambda r: -r["clicks"])
 
@@ -9226,10 +9288,10 @@ fresh();
             page_clicks = q1("SELECT COUNT(*) FROM clicks WHERE source='page'")
             landing_clicks = q1("SELECT COUNT(*) FROM clicks WHERE source='landing-cta'")
             all_clicks = q1("SELECT COUNT(*) FROM clicks")
-            social_clicks = q1("SELECT COUNT(*) FROM clicks WHERE source='social'")
+            social_clicks = q1("SELECT COUNT(*) FROM clicks WHERE channel='social'")
             # per-channel click volume -> per-channel estimated earnings
             chan_rows = conn.execute(
-                "SELECT COALESCE(NULLIF(source,''), 'page') src, COUNT(*) c FROM clicks "
+                "SELECT COALESCE(NULLIF(channel,''),'organic') src, COUNT(*) c FROM clicks "
                 "GROUP BY src ORDER BY c DESC").fetchall()
             pages = q1("SELECT COUNT(*) FROM niches") + q1("SELECT COUNT(*) FROM topics")
             reviewed = q1("SELECT COUNT(*) FROM email_events WHERE type='open'")  # engagement proxy
@@ -10244,14 +10306,16 @@ document.addEventListener("click", async function(e){{
 
 
 # ------------------------------------------------------------------ email suite
-    def _record_click(self, slug, source="page", referrer="", asin="", content="", country=""):
+    def _record_click(self, slug, source="page", referrer="", asin="", content="", country="", channel="", tag=""):
         ip = security.ip_token(self._client_ip())
+        channel = channel or _click_channel(source)
         with _lock:
             conn = _db()
             conn.execute(
-                "INSERT INTO clicks (slug, source, ip, referrer, asin, content, country) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (slug, source, ip, referrer, asin, content, str(country or "")[:8]))
+                "INSERT INTO clicks (slug, source, ip, referrer, asin, content, country, channel, tag) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (slug, source, ip, referrer, asin, content, str(country or "")[:8],
+                 channel, str(tag or "")[:40]))
             conn.commit()
             conn.close()
 
@@ -10268,6 +10332,8 @@ document.addEventListener("click", async function(e){{
         keyword = str(body.get("keyword") or "").strip()[:120]
         first_name = str(body.get("first_name") or "").strip()[:80]
         source = (str(body.get("source") or "niche").strip()[:40]) or "niche"
+        utm_source = (str(body.get("utm_source") or "").strip()[:40])
+        utm_content = (str(body.get("utm_content") or "").strip()[:40])
         ref = str(body.get("ref") or "").strip()[:80]
         with _lock:
             conn = _db()
@@ -10282,11 +10348,18 @@ document.addEventListener("click", async function(e){{
                 msg = "You're subscribed again — the next update will find its way to your inbox."
             else:
                 cur = conn.execute(
-                    "INSERT INTO subscribers (email, source, keyword, first_name, confirmed) "
-                    "VALUES (?,?,?,?,1)", (email, source, keyword, first_name))
+                    "INSERT INTO subscribers (email, source, keyword, first_name, confirmed, "
+                    "utm_source, utm_content) VALUES (?,?,?,?,1,?,?)",
+                    (email, source, keyword, first_name, utm_source, utm_content))
                 sid = cur.lastrowid
                 is_new = True
                 msg = "Done — you'll only hear from us when these picks change, and you can unsubscribe any time."
+            # First attribution wins: keep the original UTM once a lead has one.
+            if utm_source or utm_content:
+                conn.execute(
+                    "UPDATE subscribers SET utm_source=?, utm_content=? WHERE id=? "
+                    "AND (utm_source IS NULL OR utm_source='')",
+                    (utm_source, utm_content, sid))
             ref_token = self._ensure_ref_token(conn, sid)
             if ref and ref != ref_token:
                 conn.execute(
@@ -10455,7 +10528,8 @@ document.addEventListener("click", async function(e){{
         asin = str(body.get("asin") or (q.get("asin") or [""])[0]).strip().upper()[:40]
         content = str(body.get("content") or (q.get("content") or [""])[0]).strip()[:40]
         country = str(self.headers.get("CF-IPCountry") or "").strip()[:8]
-        self._record_click(slug, source, referrer, asin, content, country)
+        tag = str(body.get("tag") or (q.get("tag") or [""])[0]).strip()[:40]
+        self._record_click(slug, source, referrer, asin, content, country, tag=tag)
         return self._send(200, {"ok": True})
 
     def _page_view(self):

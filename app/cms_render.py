@@ -634,7 +634,7 @@ def render_landing_page_page(context, keyword, site_url=None):
 <style>{css}</style>
 </head>
 <body>
-<main data-niche="{e(slug)}" data-source="landing" data-keyword="{e(keyword)}">
+<main data-niche="{e(slug)}" data-source="landing" data-keyword="{e(keyword)}" data-tag="{e(amazon_mod.AFFILIATE_TAG)}">
 <div class="topbar">
   <div class="brand"><b>✓ {e(keyword_title[:28])} Guide</b></div>
   <div class="trust2"><span>🛒 Live Amazon prices</span><span>⭐ Real buyer ratings</span>{top_link} <a class="full-review" href="/n/{e(slug)}" rel="noopener">Full review ↗</a></div>
