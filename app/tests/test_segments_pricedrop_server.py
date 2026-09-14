@@ -624,6 +624,87 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
         self.assertIn(b"Background threads", body)
         self.assertIn(b"setInterval(tick, 4000)", body)
 
+    def test_system_api_monitoring_blocks(self):
+        """The console payload exposes the full monitoring surface: API health,
+        indexing/search-engine discovery, the end-user funnel and the live
+        RSS/sitemap/robots status (all derived offline from the DB)."""
+        self._seed()
+        st, ct, body = self._raw("/api/system", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        data = json.loads(body)
+        self.assertTrue(data["ok"])
+        # API health
+        self.assertIn("api", data)
+        self.assertIsInstance(data["api"]["routes"], list)
+        self.assertGreaterEqual(data["api"]["total_hits"], 0)
+        self.assertIsInstance(data["api"]["errors"], list)
+        # discovery / indexing
+        d = data["discovery"]
+        self.assertGreater(d["sitemap_entries"], 0)
+        self.assertGreater(d["indexable_niches"], 0)
+        self.assertGreaterEqual(d["noindex_niches"], 0)
+        self.assertGreaterEqual(d["topics_live"], 0)
+        self.assertIn("indexnow_key", d)
+        self.assertIn("indexnow_last", d)
+        self.assertIsInstance(d["engines"], dict)
+        for eng in ("gsc", "bing", "yandex"):
+            self.assertIn(eng, d["engines"])
+        self.assertIsInstance(d["engine_traffic"], list)
+        # funnel
+        f = data["funnel"]
+        for key in ("subs_today", "views_today", "opens_today",
+                    "email_clicks_today", "referrers", "referred_total",
+                    "pricewatch_drops"):
+            self.assertIn(key, f)
+        self.assertIsInstance(f["published_per_platform"], list)
+        self.assertIsInstance(f["clicks_source_today"], list)
+        self.assertIsInstance(f["clicks_source_7d"], list)
+        self.assertIn("earnings_est", f)
+        # live surface
+        lv = data["live"]
+        self.assertIn("items", lv["feed"])
+        self.assertIn("images", lv["feed"])
+        self.assertIn("newest", lv["feed"])
+        self.assertIn("feed_url", lv)
+        self.assertIn("/rss.xml", lv["feed_url"])
+        self.assertIn("surface", lv)
+        for key in ("rss", "sitemap", "robots"):
+            self.assertIn(key, lv["surface"])
+        m = data["queues"]
+        self.assertGreaterEqual(m["clicks_today"], 2)
+
+    def test_system_api_route_telemetry_tallies_responses(self):
+        """Per-route tallies count every dispatched _send response, so API health
+        shows both the hot paths (200s) and the gated ones (401s)."""
+        before = dict(server._API_STATS)
+        try:
+            self._raw("/api/system", cookie=self.cookie)
+            self._raw("/api/system")  # no cookie -> 401
+            self._raw("/robots.txt")
+            hits = server._API_STATS.get("/api/system", {}).get("hits", 0)
+            self.assertGreaterEqual(hits, 2)
+            self.assertGreaterEqual(server._API_STATS.get("/robots.txt", {}).get("hits", 0), 1)
+            st, ct, body = self._raw("/api/system", cookie=self.cookie)
+            data = json.loads(body)
+            routes = {r["path"]: r for r in data["api"]["routes"]}
+            self.assertIn("/api/system", routes)
+            self.assertGreaterEqual(routes["/api/system"]["hits"], 2)
+            self.assertGreaterEqual(routes["/api/system"]["4xx"], 1)
+        finally:
+            server._API_STATS.clear()
+            server._API_STATS.update(before)
+
+    def test_admin_system_page_monitor_sections(self):
+        self._seed()
+        st, ct, body = self._raw("/admin/system", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        html = body.decode("utf-8", "replace")
+        for section in ("API health", "Indexing &amp; search engines",
+                        "End-user funnel", "Live surface status", "/rss.xml",
+                        "sitemap entries", "URLs submitted via IndexNow",
+                        "Published today by platform"):
+            self.assertIn(section, html)
+
 
 if __name__ == "__main__":
     unittest.main()

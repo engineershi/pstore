@@ -383,6 +383,107 @@ _OG_CACHE_VERSION = "navy3"  # bump when the share-card design changes
 _START_TS = time.time()
 _HEARTBEATS = {}  # name -> {last, last_ok, last_err, err}
 
+# --- console telemetry --------------------------------------------------------
+# Per-route response tally (path -> {hits,2xx,3xx,4xx,5xx}) flushed through the
+# dispatch layer so the System console can show API health ("which routes are
+# hot, which are erroring") without scraping logs.
+_API_LOCK = threading.Lock()
+_API_STATS = {}
+_MAX_API_ROUTES = 128
+# Last IndexNow fire (time of success latest, urls submitted) for the console's
+# search-engine panel. Purely informational; never blocks the caller.
+_INDEXNOW_LAST = {"last": 0.0, "urls": 0, "err": ""}
+_FEED_LOCK = threading.Lock()
+_FEED_CHECK = {"t": 0.0, "busy": False, "base": "", "rss": "", "sitemap": "", "robots": ""}
+
+
+def _tally_api(path, code):
+    """Record one dispatched response for the console's API-health panel."""
+    try:
+        path = (path or "").split("?")[0]
+        if not path or path.startswith("/static") or "/style.css" in path:
+            return
+        bucket = "%dxx" % (code // 100)
+        with _API_LOCK:
+            r = _API_STATS.setdefault(path[:120],
+                                      {"hits": 0, "2xx": 0, "3xx": 0, "4xx": 0,
+                                       "5xx": 0})
+            r["hits"] += 1
+            r[bucket] += 1
+            while len(_API_STATS) > _MAX_API_ROUTES:
+                del _API_STATS[next(iter(_API_STATS))]
+    except Exception:
+        pass
+
+
+def _mark_indexnow_fired(urls, ok=True, err=""):
+    try:
+        n = max(1, len(urls or []))
+        with _API_LOCK:
+            _INDEXNOW_LAST["urls"] = _INDEXNOW_LAST.get("urls", 0) + n
+            if ok:
+                _INDEXNOW_LAST["last"] = time.time()
+                if err:
+                    _INDEXNOW_LAST["err"] = str(err)[:300]
+            else:
+                _INDEXNOW_LAST["err"] = str(err or "submit failed")[:300]
+    except Exception:
+        pass
+
+
+def _live_surface_refresh():
+    """In a daemon thread, fetch the PUBLIC sitemap/robots/rss URLs the same way
+    a crawler or feed-reader does (cache 60s) so the console's live-status row
+    reflects what the internet actually sees. Skipped on non-production hosts."""
+    base = (seo.BASE_URL or "").rstrip("/")
+    try:
+        host = (urllib.parse.urlsplit(base).hostname or "").lower()
+    except Exception:
+        host = ""
+    if not host or host in ("pstore.example", "localhost", "127.0.0.1"):
+        return
+    if DB and str(DB).startswith("/tmp"):
+        return  # test DBs stay hermit — never fetch the live origin from tests
+    out = {}
+    for key, path in (("rss", "/rss.xml"), ("sitemap", "/sitemap.xml"),
+                      ("robots", "/robots.txt")):
+        try:
+            with urllib.request.urlopen(base + path, timeout=8) as resp:
+                out[key] = str(getattr(resp, "status", 200))
+        except Exception:
+            out[key] = "unreachable"
+    with _FEED_LOCK:
+        _FEED_CHECK.update(out or {})
+        _FEED_CHECK["busy"] = False
+
+
+def _live_surface_start():
+    """Kick a self-check only if the cached result is older than 60s (or on a
+    different base URL); the console's 4s auto-refresh never re-fetches the
+    public origin."""
+    try:
+        base = (seo.BASE_URL or "").rstrip("/")
+        try:
+            host = (urllib.parse.urlsplit(base).hostname or "").lower()
+        except Exception:
+            host = ""
+        if not host or host in ("pstore.example", "localhost", "127.0.0.1"):
+            return
+        if DB and str(DB).startswith("/tmp"):
+            return
+        with _FEED_LOCK:
+            now = time.time()
+            stale = (now - _FEED_CHECK["t"]) > 60
+            moved = _FEED_CHECK["base"] != base
+            if _FEED_CHECK["busy"] or not (stale or moved):
+                return
+            _FEED_CHECK["busy"] = True
+            _FEED_CHECK["t"] = now
+            _FEED_CHECK["base"] = base
+        threading.Thread(target=_live_surface_refresh, daemon=True).start()
+    except Exception:
+        pass
+
 
 def _beat(name, ok=True, err=""):
     now = time.time()
@@ -1175,6 +1276,7 @@ def _fire_indexnow_urls(paths):
     except Exception:
         return
     if urls:
+        _mark_indexnow_fired(urls)
         threading.Thread(target=lambda: indexnow.submit_urls(urls), daemon=True).start()
 
 
@@ -2427,6 +2529,7 @@ class Handler(BaseHTTPRequestHandler):
             self._head_only = False
 
     def _send(self, code, body, ctype="application/json; charset=utf-8"):
+        _tally_api(getattr(self, "path", ""), code)
         data = body if isinstance(body, bytes) else json.dumps(body).encode("utf-8")
         data = _stamp_style_version(data, ctype)
         self.send_response(code)
@@ -2464,6 +2567,7 @@ class Handler(BaseHTTPRequestHandler):
                              % (age, edge_age))
         else:
             self.send_header("Cache-Control", "public, max-age=%d" % age)
+        _tally_api(getattr(self, "path", ""), 200)
         self.end_headers()
         if not getattr(self, "_head_only", False):
             self.wfile.write(data)
@@ -4725,6 +4829,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             return
         if not urls:
             return
+        _mark_indexnow_fired(urls)
         threading.Thread(target=lambda: indexnow.submit_urls(urls), daemon=True).start()
 
     def _push_indexnow(self, keyword):
@@ -5538,6 +5643,7 @@ document.addEventListener("click", function (e) {{
         body = self._body()
         urls = self._all_urls(body.get("urls") or [])
         ok, message = indexnow.submit_urls(urls)
+        _mark_indexnow_fired(urls, ok=ok, err="" if ok else message)
         return self._send(200, {"ok": ok, "message": message, "submitted": len(urls)})
 
     # ------------------------------------------------ search-engine consoles
@@ -11143,6 +11249,47 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             native_keys = [r[0] for r in conn.execute(
                 "SELECT key FROM settings WHERE key LIKE 'social.key.%' "
                 "AND value!=''")]
+            # end-user funnel + discovery inventory (all read-only aggregations)
+            subs_today = cnt("SELECT COUNT(*) FROM subscribers WHERE "
+                             "created_at >= date('now')")
+            views_today = cnt("SELECT COUNT(*) FROM events WHERE name='view' "
+                              "AND created_at >= date('now')")
+            opens_today = cnt("SELECT COUNT(*) FROM email_events WHERE type='open' "
+                              "AND created_at >= date('now')")
+            email_clicks_today = cnt("SELECT COUNT(*) FROM clicks WHERE source='email' "
+                                     "AND created_at >= date('now')")
+            clicks_total = cnt("SELECT COUNT(*) FROM clicks")
+            referrers = cnt("SELECT COUNT(*) FROM subscribers WHERE referrals>0")
+            referred_total = cnt("SELECT COALESCE(SUM(referrals),0) FROM subscribers")
+            published_per = [dict(r) for r in conn.execute(
+                "SELECT platform, COUNT(*) c FROM social_posts "
+                "WHERE status='published' AND published_at >= date('now') "
+                "GROUP BY platform ORDER BY c DESC, platform")]
+            clicks_source_today = [dict(r) for r in conn.execute(
+                "SELECT COALESCE(NULLIF(source,''),'unknown') source, COUNT(*) c "
+                "FROM clicks WHERE created_at >= date('now') "
+                "GROUP BY source ORDER BY c DESC")]
+            clicks_source_7d = [dict(r) for r in conn.execute(
+                "SELECT COALESCE(NULLIF(source,''),'unknown') source, COUNT(*) c "
+                "FROM clicks WHERE created_at >= datetime('now','-7 days') "
+                "GROUP BY source ORDER BY c DESC")]
+            nics = conn.execute("SELECT keyword, products FROM niches").fetchall()
+            niche_rows = len(nics)
+            live_slugs = set()
+            for nr in nics:
+                if (nr["products"] or "").strip() not in ("", "[]", "{}"):
+                    live_slugs.add(seo._slugify(nr["keyword"]))
+            indexable_niches = len(live_slugs)
+            noindex_niches = max(0, niche_rows - indexable_niches)
+            if live_slugs:
+                topics_live = cnt(
+                    "SELECT COUNT(*) FROM topics WHERE parent_slug IN (%s)"
+                    % ",".join("?" * len(live_slugs)),
+                    *sorted(live_slugs))
+            else:
+                topics_live = 0
+            sitemap_entries = (2 + len(seo.STATIC_PAGES) + 2 * indexable_niches
+                               + topics_live)
             conn.close()
 
         pd = self._price_run_state()
@@ -11210,6 +11357,32 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
               "ident": t.ident}
              for t in threading.enumerate()], key=lambda t: (not t["alive"], t["name"]))
 
+        # ---- API health (per-route response tally from the dispatch layer) ----
+        with _API_LOCK:
+            api_routes = [{"path": k, "hits": v["hits"], "2xx": v["2xx"],
+                           "3xx": v["3xx"], "4xx": v["4xx"], "5xx": v["5xx"]}
+                          for k, v in sorted(_API_STATS.items(),
+                                             key=lambda kv: kv[1]["hits"],
+                                             reverse=True)[:16]]
+        api_total = sum(r["hits"] for r in api_routes)
+        api_errors = [r["path"] for r in api_routes if r["5xx"] > 0]
+        if api_errors:
+            issues.append("API 5xx on: %s" % ", ".join(api_errors[:5]))
+
+        # ---- indexing + search-engine monitoring ----
+        eng_traf = self._seoengines_traffic(7)
+        eng_buckets = [(k, v.get("views", 0), v.get("clicks", 0))
+                       for k, v in eng_traf.get("engines", {}).items()]
+        eng_buckets.sort(key=lambda t: t[1] + t[2], reverse=True)
+
+        # ---- live surface (self-check) + RSS feed stats ----
+        _live_surface_start()
+        with _FEED_LOCK:
+            surface = {"rss": _FEED_CHECK.get("rss", ""),
+                       "sitemap": _FEED_CHECK.get("sitemap", ""),
+                       "robots": _FEED_CHECK.get("robots", "")}
+        feed = self._feed_stats()
+
         return {
             "ok": True,
             "generated_at": _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
@@ -11226,6 +11399,44 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                 "subscribers": subs_total, "clicks_today": clicks_today,
                 "emails_today": emails_today, "pricewatch": pricewatch,
                 "niches": niches,
+            },
+            "api": {
+                "routes": api_routes, "total_hits": api_total,
+                "errors": api_errors,
+            },
+            "discovery": {
+                "sitemap_entries": sitemap_entries,
+                "indexable_niches": indexable_niches,
+                "noindex_niches": noindex_niches,
+                "topics_live": topics_live,
+                "indexnow_key": bool(indexnow.key()),
+                "indexnow_last": human(_INDEXNOW_LAST.get("last") or 0),
+                "indexnow_urls": _INDEXNOW_LAST.get("urls", 0),
+                "indexnow_err": _INDEXNOW_LAST.get("err", ""),
+                "engines": {
+                    "gsc": bool(os.environ.get("PSTORE_GSC_CLIENT_ID")),
+                    "bing": bool(os.environ.get("PSTORE_BING_API_KEY")
+                                 or _get_setting("bing.api_key")),
+                    "yandex": bool(os.environ.get("PSTORE_YANDEX_CLIENT_ID")),
+                },
+                "engine_traffic": [
+                    {"engine": e, "views": v, "clicks": c}
+                    for e, v, c in eng_buckets],
+            },
+            "funnel": {
+                "subs_today": subs_today, "views_today": views_today,
+                "opens_today": opens_today, "email_clicks_today": email_clicks_today,
+                "referrers": referrers, "referred_total": referred_total,
+                "published_per_platform": published_per,
+                "clicks_source_today": clicks_source_today,
+                "clicks_source_7d": clicks_source_7d,
+                "pricewatch_drops": len(pd.get("drops") or []),
+                "earnings_est": earnings.estimate(clicks_total, ""),
+            },
+            "live": {
+                "feed": feed,
+                "feed_url": (seo.BASE_URL.rstrip("/") + "/rss.xml"),
+                "surface": surface,
             },
             "db": {"bytes": db_size, "wal_bytes": db_wal,
                    "mb": round((db_size + db_wal) / 1048576, 1)},
@@ -11309,6 +11520,83 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                "alive" if t["alive"] else "dead",
                "daemon" if t["daemon"] else "foreground")
             for t in rep["threads"]) or "<tr><td colspan='3'>None</td></tr>"
+        # ---- API health ----
+        api = rep.get("api", {})
+        api_rows = "".join(
+            '<tr><td>%s</td><td class="ct">%s</td><td class="ct">%s</td>'
+            '<td class="ct">%s</td><td class="ct">%s</td><td class="ct %s">%s</td></tr>'
+            % (seo._clean(r["path"]), r["hits"], r["2xx"], r["3xx"], r["4xx"],
+               "no" if r["5xx"] else "", r["5xx"])
+            for r in api.get("routes", [])) or "<tr><td colspan='6' class='hint'>No responses tracked yet (the tally starts once traffic hits the dispatcher).</td></tr>"
+        # ---- discovery / indexing / search engines ----
+        disc = rep.get("discovery", {})
+        eng_flag = lambda b: '<span class="%s">%s</span>' % ("yes" if b else "no",
+                                                             "connected" if b else "not connected")
+        eng_rows = "".join(
+            '<tr><td>%s</td><td class="%s">%s</td><td class="%s">%s</td></tr>'
+            % (e["engine"], "yes" if e["clicks"] else "no", e["clicks"],
+               "yes" if e["views"] else "no", e["views"])
+            for e in disc.get("engine_traffic", []))
+        inow = disc.get("indexnow_err") or ""
+        indexnow_state = ('key ready' if disc.get("indexnow_key")
+                          else 'NO KEY — discovery default landing pages only')
+        # ---- end-user funnel ----
+        fun = rep.get("funnel", {})
+        pub_rows = "".join(
+            '<tr><td>%s</td><td class="ct">%s</td></tr>'
+            % (seo._clean(p["platform"]), p["c"])
+            for p in fun.get("published_per_platform", [])) or \
+            "<tr><td colspan='2' class='hint'>Nothing published yet today.</td></tr>"
+        src_cells = lambda rows, lim: "".join(
+            '<div class="stat-tile"><b>%d</b><span>%s</span></div>'
+            % (s["c"], seo._clean(s["source"] or "unknown"))
+            for s in (rows or [])[:lim])
+        est = fun.get("earnings_est") or {}
+        est_amt = ""
+        if est:
+            try:
+                est_amt = "$%.2f" % (est.get("monthly") or est.get("per_month") or 0)
+            except (TypeError, ValueError):
+                est_amt = ""
+        drop_src = ("%d" % fun.get("pricewatch_drops", 0))
+        # ---- live surface ----
+        live = rep.get("live", {})
+        feed = live.get("feed", {})
+        surf = live.get("surface", {})
+        surf_cell = lambda v: ('<span class="%s">%s</span>'
+                               % ("yes" if v and v not in ("unreachable",) else
+                                  "no" if v else "idle",
+                                  v or "pending…"))
+        live_rows = (
+            '<tr><td>RSS feed</td><td class="ct">%s items</td>'
+            '<td class="ct">%d with image</td><td class="ct">%s</td><td>%s</td></tr>'
+            % (feed.get("items", 0), feed.get("images", 0),
+               feed.get("newest") or "—", surf_cell(surf.get("rss", ""))))
+        live_rows += (
+            '<tr><td>Sitemap</td><td colspan="3" class="hint">%d entries '
+            '(%d indexable niches, %d live topics)</td><td>%s</td></tr>'
+            % (disc.get("sitemap_entries", 0), disc.get("indexable_niches", 0),
+               disc.get("topics_live", 0), surf_cell(surf.get("sitemap", ""))))
+        live_rows += (
+            '<tr><td>robots.txt</td><td colspan="3" class="hint">public crawl gate</td>'
+            '<td>%s</td></tr>' % surf_cell(surf.get("robots", "")))
+        inow_hint = (" · last fire %s" % disc["indexnow_last"]) \
+            if disc.get("indexnow_last") else ""
+        if inow:
+            inow_hint += " · " + seo._clean(inow)
+        funnel_tiles = (
+            '<div class="stat-tile"><b>%s</b><span>Subscribers today</span></div>'
+            '<div class="stat-tile"><b>%s</b><span>Pageviews today</span></div>'
+            '<div class="stat-tile"><b>%s</b><span>Email opens today</span></div>'
+            '<div class="stat-tile"><b>%s</b><span>Email clicks today</span></div>'
+            '<div class="stat-tile"><b>%s</b><span>Referrers</span></div>'
+            '<div class="stat-tile"><b>%s</b><span>Referred leads</span></div>'
+            '<div class="stat-tile"><b>%s</b><span>Price-drop hits</span></div>'
+            '<div class="stat-tile"><b>%s</b><span>Est. mo. earnings</span></div>'
+            % (fun.get("subs_today", 0), fun.get("views_today", 0),
+               fun.get("opens_today", 0), fun.get("email_clicks_today", 0),
+               fun.get("referrers", 0), fun.get("referred_total", 0),
+               fun.get("pricewatch_drops", 0), est_amt or "—"))
         body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>System console — pstore</title><link rel="stylesheet" href="/style.css">
@@ -11348,6 +11636,33 @@ stay <b>IDLE</b>. Redrawn automatically every 4s.</p>
 <tbody id="sched">{sched}</tbody></table></div></section>
 <section class="card"><h2>🗃 Queues &amp; counters</h2>
 <div class="stat-tiles" id="queues">{queue_tiles}</div></section>
+<section class="card"><h2>🛡 API health <span class="hint">(responses tallied live by path — 5xx turns a row red)</span></h2>
+<div class="table-wrap"><table><thead><tr><th>Route</th><th class="ct">Hits</th><th class="ct">2xx</th><th class="ct">3xx</th><th class="ct">4xx</th><th class="ct">5xx</th></tr>
+</thead><tbody id="api-routes">{api_rows}</tbody></table></div></section>
+<section class="card"><h2>🧭 Indexing &amp; search engines</h2>
+<div class="features" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">
+ <div class="feature"><h3>{disc.get('sitemap_entries', 0)}</h3><p class="hint">sitemap entries ({disc.get('indexable_niches', 0)} indexable niches · {disc.get('noindex_niches', 0)} noindex)</p></div>
+ <div class="feature"><h3>{indexnow_state}</h3><p class="hint">IndexNow{inow_hint}</p></div>
+ <div class="feature"><h3>{disc.get('indexnow_urls', 0)}</h3><p class="hint">URLs submitted via IndexNow</p></div>
+</div>
+<div class="table-wrap"><table><thead><tr><th>Engine</th><th class="ct">Clicks (7d)</th><th class="ct">Views (7d)</th></tr></thead>
+<tbody>{eng_rows}</tbody></table></div>
+<p class="hint">GSC {eng_flag(disc.get('engines', {}).get('gsc'))} · Bing {eng_flag(disc.get('engines', {}).get('bing'))} · Yandex {eng_flag(disc.get('engines', {}).get('yandex'))} — console tokens feed real impressions/positions; until then rows are referral-attributed. Manage under <a href="/admin/seoengines">Search engines</a>.</p></section>
+<section class="card"><h2>🎯 End-user funnel</h2>
+<div class="stat-tiles">
+ {funnel_tiles}
+</div>
+<div class="features" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr))">
+ <div class="feature"><h4>Clicks today by source</h4><div class="stat-tiles">{src_cells(fun.get('clicks_source_today'), 8)}</div></div>
+ <div class="feature"><h4>Clicks last 7d by source</h4><div class="stat-tiles">{src_cells(fun.get('clicks_source_7d'), 8)}</div></div>
+ <div class="feature"><h4>Published today by platform</h4>
+  <div class="table-wrap" style="margin-top:4px"><table><tbody>{pub_rows}</tbody></table></div></div>
+</div>
+<p class="hint">Full cross-channel ROI lives on <a href="/admin/analytics">Analytics</a>; referral breakdown on <a href="/admin/segments">Segments</a>.</p></section>
+<section class="card"><h2>📡 Live surface status <span class="hint">(self-check of the public URLs as a crawler/feed-reader sees them, refreshed ~60s)</span></h2>
+<div class="table-wrap"><table><thead><tr><th>Asset</th><th class="ct">Coverage</th><th class="ct">Live HTTP</th></tr>
+</thead><tbody>{live_rows}</tbody></table></div>
+<p class="hint">Feed: <a href="{live.get('feed_url', '')}">/rss.xml</a></p></section>
 <section class="card"><h2>🧩 Config</h2>
 <div class="table-wrap"><table><tbody>{cfg_rows}</tbody></table></div></section>
 <section class="card"><h2>🧵 Background threads</h2>
@@ -11386,8 +11701,16 @@ async function tick(){{
         (x.last||'—')+'</td></tr>';
     }});
     document.getElementById('sched').innerHTML = s2;
+    var a2='';
+    (d.api&&d.api.routes||[]).forEach(function(x){{
+      a2+='<tr><td>'+esc(x.path)+'</td><td class="ct">'+x.hits+'</td><td class="ct">'+
+        x['2xx']+'</td><td class="ct">'+x['3xx']+'</td><td class="ct">'+x['4xx']+
+        '</td><td class="ct '+(x['5xx']?'no':'')+'">'+x['5xx']+'</td></tr>';
+    }});
+    if(a2) document.getElementById('api-routes').innerHTML = a2;
   }}catch(e){{document.getElementById('stamp').textContent='⚠ live refresh failed: '+e;}}
 }}
+function esc(s){{return (s==null?'':String(s)).replace(/[&<>"]/g,function(c){{return {{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}}[c];}});}}
 tick(); setInterval(tick, 4000);
 </script>
 </main>
