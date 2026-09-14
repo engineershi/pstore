@@ -1215,6 +1215,183 @@ class TestSocialSuite(unittest.TestCase):
         self.assertEqual(row["utm_source"], "twitter")
         self.assertEqual(row["utm_content"], "win-abc")
 
+    # ------------------------------------------------------- delivery hardening
+    def _insert_scheduled_post(self, slug="keto-snacks", platform="Pinterest",
+                               stamp=None):
+        with server._lock:
+            conn = server._db()
+            cur = conn.execute(
+                "INSERT INTO social_posts (slug, keyword, platform, name, body, link, "
+                "utm_content, status, scheduled_at) VALUES (?,?,?,?,?,?,?, 'scheduled', ?)",
+                (slug, "keto snacks", platform, "Ketofied", "Body of %s" % slug,
+                 "https://example.com/lp/%s?utm_content=hd%s" % (slug, slug[:4]),
+                 "hd-" + slug[:8], stamp or "2000-01-01 00:00:00"))
+            pid = cur.lastrowid
+            conn.commit()
+            conn.close()
+        return pid
+
+    def test_flush_claims_then_delivers_then_publishes(self):
+        """The pipeline must claim (scheduling->publishing) atomically BEFORE any
+        delivery and only flip to published AFTER delivery dispatches, so a
+        scheduled post is never 'published' without being sent."""
+        pid = self._insert_scheduled_post()
+        with server._lock:
+            conn = server._db()
+            row = conn.execute("SELECT * FROM social_posts WHERE id=?", (pid,)).fetchone()
+            conn.close()
+        claimed = [dict(row)]
+        with server._lock:
+            conn = server._db()
+            server._claim_due_social(conn, claimed, "2000-01-01 00:00:01")
+            conn.commit()
+            conn.close()
+        with server._lock:
+            conn = server._db()
+            s1 = conn.execute("SELECT status, deliver_attempts, scheduled_at "
+                              "FROM social_posts WHERE id=?", (pid,)).fetchone()
+            conn.close()
+        self.assertEqual(s1["status"], "publishing")
+        self.assertEqual(s1["deliver_attempts"], 1)
+        self.assertIsNone(s1["scheduled_at"])
+        fired = []
+        server._deliver_claimed_social(claimed, lambda kits: fired.extend(kits))
+        self.assertEqual([k["slug"] for k in fired], ["keto-snacks"])
+        with server._lock:
+            conn = server._db()
+            d1 = conn.execute("SELECT delivered_at, status FROM social_posts WHERE id=?",
+                              (pid,)).fetchone()
+            conn.close()
+        self.assertEqual(d1["status"], "publishing")
+        self.assertTrue(d1["delivered_at"])
+        server._settle_claimed_social(claimed, "2000-01-01 00:00:02")
+        with server._lock:
+            conn = server._db()
+            s2 = conn.execute("SELECT status, published_at FROM social_posts WHERE id=?",
+                              (pid,)).fetchone()
+            conn.close()
+        self.assertEqual(s2["status"], "published")
+        self.assertEqual(s2["published_at"], "2000-01-01 00:00:02")
+
+    def test_recover_stuck_social_settles_stale_but_skips_fresh(self):
+        """Rows stranded in 'publishing' by a crash (old claim, attempts below
+        the cap) are re-claimed and delivered; recent claims are left alone."""
+        stale = self._insert_scheduled_post(slug="keto-snacks")
+        fresh = self._insert_scheduled_post(slug="weight-loss")
+        with server._lock:
+            conn = server._db()
+            conn.execute("UPDATE social_posts SET status='publishing', claimed_at=?, "
+                         "deliver_attempts=1 WHERE id=?", ("2000-01-01 00:00:00", stale))
+            conn.execute("UPDATE social_posts SET status='publishing', claimed_at=?, "
+                         "deliver_attempts=1 WHERE id=?",
+                         ("2099-01-01 00:00:00", fresh))
+            conn.commit()
+            conn.close()
+        captured = []
+        saved_hook = server._webhook_fire
+        server._webhook_fire = lambda kits: captured.extend(kits)
+        try:
+            n = server._recover_stuck_social()
+        finally:
+            server._webhook_fire = saved_hook
+        self.assertEqual(n, 1)
+        with server._lock:
+            conn = server._db()
+            s1 = conn.execute("SELECT status, delivered_at, deliver_attempts "
+                              "FROM social_posts WHERE id=?", (stale,)).fetchone()
+            s2 = conn.execute("SELECT status FROM social_posts WHERE id=?",
+                              (fresh,)).fetchone()
+            conn.close()
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(s1["status"], "published")
+        self.assertTrue(s1["delivered_at"])
+        self.assertEqual(s1["deliver_attempts"], 2)
+        self.assertEqual(s2["status"], "publishing")  # still owned by its live flush
+
+    def test_recover_stuck_social_exhausts_attempts_without_redelivery(self):
+        """A post past the redelivery cap settles as published instead of being
+        re-sent every restart — bound the duplicate, never loop forever."""
+        pid = self._insert_scheduled_post(slug="keto-snacks")
+        with server._lock:
+            conn = server._db()
+            conn.execute(
+                "UPDATE social_posts SET status='publishing', claimed_at=?, "
+                "deliver_attempts=9 WHERE id=?",
+                ("2000-01-01 00:00:00", pid))
+            conn.commit()
+            conn.close()
+        captured = []
+        saved_hook = server._webhook_fire
+        server._webhook_fire = lambda kits: captured.extend(kits)
+        try:
+            n = server._recover_stuck_social()
+        finally:
+            server._webhook_fire = saved_hook
+        self.assertEqual(n, 1)
+        self.assertEqual(captured, [])
+        with server._lock:
+            conn = server._db()
+            s = conn.execute("SELECT status, delivered_at, deliver_attempts "
+                             "FROM social_posts WHERE id=?", (pid,)).fetchone()
+            conn.close()
+        self.assertEqual(s["status"], "published")
+        self.assertEqual(s["delivered_at"], "")
+        self.assertEqual(s["deliver_attempts"], 9)
+
+    def test_recover_stuck_social_defers_to_live_flush(self):
+        """Recovery never touches rows a live flush currently owns."""
+        pid = self._insert_scheduled_post(slug="keto-snacks")
+        with server._lock:
+            conn = server._db()
+            conn.execute("UPDATE social_posts SET status='publishing', claimed_at=?, "
+                         "deliver_attempts=1 WHERE id=?", ("2000-01-01 00:00:00", pid))
+            conn.commit()
+            conn.close()
+        server._SOCIAL_FLUSH_ACTIVE[0] += 1
+        try:
+            n = server._recover_stuck_social()
+        finally:
+            server._SOCIAL_FLUSH_ACTIVE[0] -= 1
+        self.assertEqual(n, 0)
+        with server._lock:
+            conn = server._db()
+            s = conn.execute("SELECT status FROM social_posts WHERE id=?",
+                             (pid,)).fetchone()
+            conn.close()
+        self.assertEqual(s["status"], "publishing")
+
+    def test_recover_outbox_stuck_requeues_or_discards(self):
+        """Outbox rows orphaned in 'sending' by a crash go back to 'scheduled'
+        until the send-attempt cap, then settle as 'done' (stalled) instead of
+        looping forever."""
+        import datetime as _dt
+        with server._lock:
+            conn = server._db()
+            conn.execute("DELETE FROM outbox")
+            cur = conn.execute(
+                "INSERT INTO outbox (spec, recipients, status, claimed_at, attempts) "
+                "VALUES ('{\"subject\":\"recover me\"}', '[\"a@x\"]', 'sending', "
+                "? , 2)", ("2000-01-01 00:00:00",))
+            requeue_id = cur.lastrowid
+            cur2 = conn.execute(
+                "INSERT INTO outbox (spec, recipients, status, claimed_at, attempts) "
+                "VALUES ('{\"subject\":\"hopeless\"}', '[\"b@x\"]', 'sending', "
+                "? , 5)", ("2000-01-01 00:00:00",))
+            dead_id = cur2.lastrowid
+            conn.commit()
+            conn.close()
+        n = server._recover_outbox_stuck()
+        self.assertEqual(n, 2)
+        with server._lock:
+            conn = server._db()
+            a = conn.execute("SELECT status FROM outbox WHERE id=?", (requeue_id,)).fetchone()
+            b = conn.execute("SELECT status, result FROM outbox WHERE id=?",
+                             (dead_id,)).fetchone()
+            conn.close()
+        self.assertEqual(a["status"], "scheduled")
+        self.assertEqual(b["status"], "done")
+        self.assertIn("stalled", b["result"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -237,6 +237,49 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
         self.assertEqual(final["state"]["status"], "done")
         self.assertGreaterEqual(final["state"]["checked"], 1)
 
+    def test_pricedrop_second_run_short_circuits_while_running(self):
+        """A price-drop check already in progress must short-circuit new run
+        requests (started=False) instead of spinning a second worker on top."""
+        self._seed()
+        entered = threading.Event()
+        hold = threading.Event()
+        saved_worker = server.Handler._pricedrop_worker
+
+        def blocking_worker(self, rows, min_pct):
+            entered.set()
+            hold.wait(10)
+
+        server.Handler._pricedrop_worker = blocking_worker
+        try:
+            st, ct, body = self._raw("/api/pricedrop/run", method="POST",
+                                     body=b"{}", cookie=self.cookie)
+            self.assertEqual(st, 200)
+            self.assertTrue(json.loads(body).get("started"))
+            self.assertTrue(entered.wait(5), "worker never started")
+            st2, _, body2 = self._raw("/api/pricedrop/run", method="POST",
+                                      body=b"{}", cookie=self.cookie)
+            d2 = json.loads(body2)
+            self.assertEqual(st2, 200)
+            self.assertFalse(d2.get("started"))
+            self.assertTrue(d2.get("running"))
+        finally:
+            hold.set()
+            server.Handler._pricedrop_worker = saved_worker
+            import datetime as _dtt
+            server._set_setting(server._PRICEDROP_STATE_KEY, json.dumps(
+                {"running": False, "status": "done", "checked": 0, "total": 0,
+                 "drops": [],
+                 "last_run": _dtt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                 "error": ""}))
+        # the worker is released: a later poll sees the run complete
+        for _ in range(50):
+            st, ct, body = self._raw("/api/pricedrop", cookie=self.cookie)
+            s = json.loads(body)
+            if not s["state"]["running"]:
+                break
+            import time
+            time.sleep(0.05)
+
     def test_reengage_cold_sends_only_cold(self):
         """Re-engagement must target only COLD leads and be deduped."""
         self._seed()

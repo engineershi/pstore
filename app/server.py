@@ -628,6 +628,9 @@ function authStrengthEl(pw,unmet){
 
 _lock = threading.Lock()
 
+_SOCIAL_FLUSH_ACTIVE = [0]  # in-process flag: >0 while a delivery flush is in flight
+_PRICEDROP_RUN_LOCK = threading.Lock()
+
 # --- niche data refresh -------------------------------------------------------
 # Manual refresh re-mines one/all saved niches so prices, ratings and stock
 # stay current. An automatic background loop refreshes "stale" niches on a
@@ -899,6 +902,153 @@ def _webhook_fire(kits):
     threading.Thread(target=fire, daemon=True).start()
 
 
+def _claim_due_social(c, rows, stamp):
+    """Under an active DB transaction: claim due rows for delivery. Rows move
+    ``scheduled -> publishing`` atomically (attempts bumped) so a concurrent
+    flush can never pick them up again; the final ``published`` flip happens
+    only AFTER delivery is dispatched below."""
+    for r in rows:
+        c.execute(
+            "UPDATE social_posts SET status='publishing', claimed_at=?, "
+            "scheduled_at=NULL, deliver_attempts=COALESCE(deliver_attempts,0)+1 "
+            "WHERE id=? AND status='scheduled'", (stamp, r["id"]))
+
+
+def _social_kits(rows):
+    return [{"platform": r["platform"], "name": r["name"] or "",
+             "body": r["body"] or "", "link": r["link"] or "",
+             "slug": r["slug"] or "", "keyword": r["keyword"] or ""} for r in rows]
+
+
+def _deliver_claimed_social(rows, hook):
+    """Deliver already-claimed ('publishing') rows: native per-platform posting
+    first, then the webhook for whatever native skipped/failed. Writes
+    ``delivered_at`` for every row that actually got dispatched so a crash
+    right after delivery can't cause a blind re-send of the same content.
+
+    Never raises. Returns nothing; a caller that crashes mid-delivery leaves
+    the row in 'publishing' for ``_recover_stuck_social`` to finish."""
+    if not rows:
+        return
+    kits = _social_kits(rows)
+    posted = set()
+    try:
+        results = _publish_native(kits)
+        posted = {str(r.get("slug")) + "|" + str(r.get("platform"))
+                  for k, r in zip(kits, results)
+                  if r.get("ok") and r.get("via") == "native"}
+    except Exception:
+        posted = set()
+    webhook_kits = [k for k in kits
+                    if (str(k.get("slug")) + "|" + str(k.get("platform"))) not in posted]
+    if webhook_kits and hook:
+        hook(webhook_kits)
+    dispatched = posted | {str(k.get("slug")) + "|" + str(k.get("platform"))
+                           for k in webhook_kits}
+    with _lock:
+        conn = _db()
+        for r in rows:
+            key = str(r["slug"]) + "|" + str(r["platform"])
+            if key in dispatched:
+                conn.execute(
+                    "UPDATE social_posts SET delivered_at=datetime('now') WHERE id=?",
+                    (r["id"],))
+        conn.commit()
+        conn.close()
+
+
+def _settle_claimed_social(rows, stamp):
+    """Terminal transition for claimed rows: ``publishing -> published`` with the
+    real publish time recorded. Called after delivery so status reflects
+    reality (scheduled never 'published' before delivery is dispatched)."""
+    if not rows:
+        return
+    with _lock:
+        conn = _db()
+        for r in rows:
+            conn.execute(
+                "UPDATE social_posts SET status='published', published_at=?, "
+                "scheduled_at=NULL WHERE id=? AND status='publishing'",
+                (stamp, r["id"]))
+        conn.commit()
+        conn.close()
+
+
+def _recover_stuck_social(age_sec=120, max_attempts=2):
+    """Self-heal posts that were claimed ('publishing') but never settled — a
+    crash or a runtime failure mid-flush left them stuck. Any row older than
+    ``age_sec`` is treated as abandoned: re-claim and re-run the deliver+settle
+    path so a scheduled post is never silently lost, but cap re-delivery at
+    ``max_attempts`` so a dead webhook can't duplicate forever (the exhausted
+    rows settle as published without another shot).
+
+    Guarded by the in-process flush flag: a healthy flush holds its own claimed
+    rows for a while (native timeouts), so we only ever touch rows no live
+    flush owns. Returns how many rows were recovered/exhausted."""
+    if _SOCIAL_FLUSH_ACTIVE[0]:
+        return 0
+    stamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    recover, exhausted = [], []
+    try:
+        with _lock:
+            conn = _db()
+            rows = conn.execute(
+                "SELECT id, slug, keyword, platform, name, body, link, deliver_attempts "
+                "FROM social_posts WHERE status='publishing' AND claimed_at!='' "
+                "AND claimed_at <= datetime('now', ?) ORDER BY id",
+                ("-%d seconds" % age_sec,)).fetchall()
+            for r in rows:
+                if int(r["deliver_attempts"] or 0) >= max_attempts:
+                    exhausted.append(dict(r))
+                else:
+                    recover.append(dict(r))
+                    conn.execute(
+                        "UPDATE social_posts SET claimed_at=?, "
+                        "deliver_attempts=COALESCE(deliver_attempts,0)+1 WHERE id=?",
+                        (stamp, r["id"]))
+            conn.commit()
+            conn.close()
+    except Exception:
+        return 0
+    try:
+        if recover:
+            _deliver_claimed_social(recover, _webhook_fire)
+        _settle_claimed_social(recover + exhausted, stamp)
+    except Exception:
+        return 0
+    return len(recover) + len(exhausted)
+
+
+def _run_social_flush(rows, stamp, hook):
+    """Full claim -> deliver -> settle pipeline for a set of scheduled rows.
+    Every row either ends 'published' or stays 'publishing' for recovery (only
+    on an in-flight crash). Returns the number of rows processed."""
+    if not rows:
+        return 0
+    _SOCIAL_FLUSH_ACTIVE[0] += 1
+    try:
+        with _lock:
+            conn = _db()
+            _claim_due_social(conn, rows, stamp)
+            conn.commit()
+            conn.close()
+        _deliver_claimed_social(rows, hook)
+    finally:
+        _SOCIAL_FLUSH_ACTIVE[0] -= 1
+    _settle_claimed_social(rows, stamp)
+    return len(rows)
+
+
+def _pending_social_count():
+    with _lock:
+        conn = _db()
+        n = conn.execute(
+            "SELECT COUNT(*) AS n FROM social_posts WHERE status='scheduled'"
+        ).fetchone()["n"]
+        conn.close()
+    return n
+
+
 def _flush_due_social(hook=None, now=None):
     """Publish every due scheduled post. Returns (published_now, still_pending).
     ``hook`` is a callable(kits) that fires real posting (webhook); it is invoked
@@ -912,37 +1062,9 @@ def _flush_due_social(hook=None, now=None):
                 "WHERE status='scheduled' AND scheduled_at IS NOT NULL "
                 "AND scheduled_at <= ? ORDER BY scheduled_at", (stamp,)).fetchall()
             due = [dict(r) for r in rows]
-            for r in due:
-                conn.execute(
-                    "UPDATE social_posts SET status='published', published_at=?, "
-                    "scheduled_at=NULL WHERE id=?", (stamp, r["id"]))
-            conn.commit()
             conn.close()
-        # Try native per-platform posting with the operator's pasted keys; only
-        # the platforms that had no creds (skipped) fall through to the webhook.
-        due_kits = [{"platform": r["platform"], "name": r["name"] or "",
-                     "body": r["body"] or "", "link": r["link"] or "",
-                     "slug": r["slug"] or "", "keyword": r["keyword"] or ""} for r in due]
-        webhook_kits = due_kits
-        try:
-            if due_kits:
-                results = _publish_native(due_kits)
-                posted = {str(r.get("slug")) + "|" + str(r.get("platform"))
-                          for r in results if r.get("ok") and r.get("via") == "native"}
-                if posted:
-                    webhook_kits = [k for k in due_kits
-                                    if (str(k.get("slug")) + "|" + str(k.get("platform"))) not in posted]
-        except Exception:
-            webhook_kits = due_kits
-        if webhook_kits and hook:
-            hook(webhook_kits)
-        with _lock:
-            conn = _db()
-            pending = conn.execute(
-                "SELECT COUNT(*) AS n FROM social_posts WHERE status='scheduled'"
-            ).fetchone()["n"]
-            conn.close()
-        return len(due), pending
+        published = _run_social_flush(due, stamp, hook)
+        return published, _pending_social_count()
     except Exception:
         return 0, 0
 
@@ -960,33 +1082,9 @@ def _flush_all_social(hook=None):
                 "WHERE status='scheduled' ORDER BY scheduled_at IS NULL, scheduled_at, id"
             ).fetchall()
             due = [dict(r) for r in rows]
-            for r in due:
-                conn.execute(
-                    "UPDATE social_posts SET status='published', published_at=?, "
-                    "scheduled_at=NULL WHERE id=?", (stamp, r["id"]))
-            conn.commit()
             conn.close()
-        all_kits = [{"platform": r["platform"], "name": r["name"] or "",
-                     "body": r["body"] or "", "link": r["link"] or "",
-                     "slug": r["slug"] or "", "keyword": r["keyword"] or ""} for r in due]
-        if all_kits:
-            try:
-                posted = {str(r.get("slug")) + "|" + str(r.get("platform"))
-                          for r in _publish_native(all_kits)
-                          if r.get("ok") and r.get("via") == "native"}
-            except Exception:
-                posted = set()
-            webhook_kits = [k for k in all_kits
-                            if (str(k.get("slug")) + "|" + str(k.get("platform"))) not in posted]
-            if webhook_kits and hook:
-                hook(webhook_kits)
-        with _lock:
-            conn = _db()
-            pending = conn.execute(
-                "SELECT COUNT(*) AS n FROM social_posts WHERE status='scheduled'"
-            ).fetchone()["n"]
-            conn.close()
-        return len(due), pending
+        published = _run_social_flush(due, stamp, hook)
+        return published, _pending_social_count()
     except Exception:
         return 0, 0
 
@@ -1440,6 +1538,7 @@ def _social_flush_loop(interval=60, amplify=True):
     Stops when interval <= 0."""
     while True:
         time.sleep(max(interval, 15))
+        _recover_stuck_social()
         _flush_due_social(_webhook_fire)
         if amplify:
             try:
@@ -1824,7 +1923,9 @@ def _ensure_db_schema(conn):
         status TEXT DEFAULT 'scheduled',
         result TEXT,
         created_at TEXT DEFAULT (datetime('now')),
-        sent_at TEXT
+        sent_at TEXT,
+        attempts INTEGER DEFAULT 0,
+        claimed_at TEXT DEFAULT ''
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox (status, scheduled_at)")
     conn.execute("""CREATE TABLE IF NOT EXISTS mailbox_messages (
@@ -1868,7 +1969,10 @@ def _ensure_db_schema(conn):
         status TEXT DEFAULT 'draft',
         scheduled_at TEXT,
         created_at TEXT DEFAULT (datetime('now')),
-        published_at TEXT
+        published_at TEXT,
+        deliver_attempts INTEGER DEFAULT 0,
+        delivered_at TEXT DEFAULT '',
+        claimed_at TEXT DEFAULT ''
     )""")
     try:
         conn.execute("ALTER TABLE social_posts ADD COLUMN scheduled_at TEXT")
@@ -1877,6 +1981,31 @@ def _ensure_db_schema(conn):
         pass
     try:
         conn.execute("ALTER TABLE social_posts ADD COLUMN amplify_count INTEGER DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE social_posts ADD COLUMN deliver_attempts INTEGER DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE social_posts ADD COLUMN delivered_at TEXT DEFAULT ''")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE social_posts ADD COLUMN claimed_at TEXT DEFAULT ''")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE outbox ADD COLUMN attempts INTEGER DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE outbox ADD COLUMN claimed_at TEXT DEFAULT ''")
         conn.commit()
     except Exception:
         pass
@@ -10856,18 +10985,21 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             min_pct = float(min_pct)
         except (TypeError, ValueError):
             min_pct = pricedrop.DEFAULT_MIN_DROP_PCT
-        state = self._price_run_state()
-        if state["running"]:
-            return self._send(200, {"started": False, "running": True,
-                                    "state": state})
-        rows = self._watched_products()
-        if not rows:
-            return self._send(200, {"started": False, "running": False,
-                                    "drops": [], "tracked": 0, "checked": 0,
-                                    "error": "no saved niches to watch"})
-        _set_setting(_PRICEDROP_STATE_KEY, json.dumps({
-            "running": True, "status": "scanning", "checked": 0,
-            "total": len(rows), "drops": [], "last_run": "", "error": ""}))
+        # Serialize run-or-skip: two racing POSTs must not both spin a worker
+        # (the running flag is written AFTER the guard, so it alone has a race).
+        with _PRICEDROP_RUN_LOCK:
+            state = self._price_run_state()
+            if state["running"]:
+                return self._send(200, {"started": False, "running": True,
+                                        "state": state})
+            rows = self._watched_products()
+            if not rows:
+                return self._send(200, {"started": False, "running": False,
+                                        "drops": [], "tracked": 0, "checked": 0,
+                                        "error": "no saved niches to watch"})
+            _set_setting(_PRICEDROP_STATE_KEY, json.dumps({
+                "running": True, "status": "scanning", "checked": 0,
+                "total": len(rows), "drops": [], "last_run": "", "error": ""}))
         threading.Thread(target=self._pricedrop_worker, args=(rows, min_pct),
                          daemon=True).start()
         return self._send(200, {"started": True, "running": True,
@@ -13414,7 +13546,9 @@ def _fire_outbox_rows():
         ids = [r["id"] for r in rows]
         if ids:
             ph = ",".join("?" * len(ids))
-            conn.execute("UPDATE outbox SET status='sending' WHERE id IN (%s)" % ph, ids)
+            conn.execute(
+                "UPDATE outbox SET status='sending', claimed_at=datetime('now'), "
+                "attempts=COALESCE(attempts,0)+1 WHERE id IN (%s)" % ph, ids)
             conn.commit()
         conn.close()
     for row in rows:
@@ -13436,10 +13570,38 @@ def _fire_outbox_rows():
             conn.close()
 
 
+def _recover_outbox_stuck(age_sec=600, max_attempts=3):
+    """Self-heal email studio sends orphaned in 'sending' by a crash: the
+    claim happens before dispatch, so a process death between the two strands
+    rows forever if nothing re-queues them. Older-than-age_sec 'sending' rows
+    go back to 'scheduled' (bounded at ``max_attempts`` dispatch attempts);
+    rows past the cap are marked 'done' with a stalled result so they never
+    re-send in an infinite loop. Returns rows recovered + discarded."""
+    with _lock:
+        conn = _db()
+        stuck = conn.execute(
+            "SELECT id, attempts FROM outbox WHERE status='sending' "
+            "AND claimed_at!='' AND claimed_at <= datetime('now', ?)",
+            ("-%d seconds" % age_sec,)).fetchall()
+        requeue = [r["id"] for r in stuck if int(r["attempts"] or 0) < max_attempts]
+        dead = [r["id"] for r in stuck if int(r["attempts"] or 0) >= max_attempts]
+        for i in requeue:
+            conn.execute("UPDATE outbox SET status='scheduled', claimed_at='' WHERE id=?", (i,))
+        for i in dead:
+            conn.execute(
+                "UPDATE outbox SET status='done', claimed_at='', result=? WHERE id=?",
+                (json.dumps({"ok": False, "sent": 0, "errors": 1,
+                             "error": "stalled in 'sending' after %d attempts" % max_attempts}), i))
+        conn.commit()
+        conn.close()
+    return len(requeue) + len(dead)
+
+
 def _outbox_loop():
     while True:
         time.sleep(45)
         try:
+            _recover_outbox_stuck()
             _fire_outbox_rows()
         except Exception:
             pass
@@ -13477,6 +13639,11 @@ def main():
           % max(1, int(float(_get_setting("content.loop_hours") or 24) or 24)))
     threading.Thread(target=_social_flush_loop, daemon=True).start()
     print("social scheduler: auto-flush every 60s (due scheduled posts)")
+    try:
+        _recover_stuck_social()
+        _recover_outbox_stuck()
+    except Exception:
+        pass
     threading.Thread(target=_outbox_loop, daemon=True).start()
     print("email outbox: due scheduled studio sends every 45s")
     threading.Thread(target=_inbox_loop, daemon=True).start()
