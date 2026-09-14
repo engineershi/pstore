@@ -1392,6 +1392,116 @@ class TestSocialSuite(unittest.TestCase):
         self.assertEqual(b["status"], "done")
         self.assertIn("stalled", b["result"])
 
+    # ------------------------------------------------------------- referrals
+    def _subscribe_via(self, email, body_extra=None):
+        body = {"email": email, "keyword": "keto snacks", "source": "niche"}
+        body.update(body_extra or {})
+        st, _, _, data = self._raw("/subscribe", "POST", body=json.dumps(body))
+        self.assertEqual(st, 200)
+        return json.loads(data)
+
+    def test_referral_link_credits_referrer_and_rewards_once(self):
+        """A fresh lead that lands on the shared ?ref= link credits the referrer
+        and fires the (deduped) reward note — the loop the old courier silently
+        dropped on /subscribe."""
+        with server._lock:
+            conn = server._db()
+            conn.execute("DELETE FROM subscribers WHERE email IN "
+                         "('ref@x.test','friend1@x.test','friend2@x.test','refb@x.test','selfy@x.test')")
+            conn.commit()
+            conn.close()
+        saved_cfg = mailer.configured
+        mailer.configured = lambda: True
+        sent = []
+        saved_send = mailer.send
+        mailer.send = (lambda subject, text, to, *a, **k:
+                       (sent.append((subject, to)) or True))
+        try:
+            ref = self._subscribe_via("ref@x.test")
+            self.assertTrue(ref["ok"])
+            with server._lock:
+                conn = server._db()
+                token = conn.execute("SELECT ref_token FROM subscribers WHERE email='ref@x.test'"
+                                     ).fetchone()["ref_token"]
+                conn.close()
+            self.assertTrue(token)
+            friend = self._subscribe_via("friend1@x.test", {"ref": token})
+            self.assertTrue(friend["ok"])
+            self.assertNotEqual(friend.get("referral_url", ""), "")
+            with server._lock:
+                conn = server._db()
+                fb = conn.execute("SELECT referred_by FROM subscribers WHERE email='friend1@x.test'"
+                                  ).fetchone()
+                cred = conn.execute("SELECT referrals FROM subscribers WHERE email='ref@x.test'"
+                                    ).fetchone()
+                conn.close()
+            self.assertEqual(fb["referred_by"], token)
+            self.assertEqual(cred["referrals"], 1)
+            for _ in range(40):  # the reward fires on a background thread
+                if any("reward" in s for s, _ in sent):
+                    break
+                import time
+                time.sleep(0.05)
+            rewards = [to for s, to in sent if "reward" in s]
+            self.assertEqual(rewards, ["ref@x.test"])
+            # second friend: credit again, but the reward stays deduped (one ever)
+            friend2 = self._subscribe_via("friend2@x.test", {"ref": token})
+            self.assertTrue(friend2["ok"])
+            with server._lock:
+                conn = server._db()
+                cred2 = conn.execute("SELECT referrals FROM subscribers WHERE email='ref@x.test'"
+                                     ).fetchone()
+                conn.close()
+            self.assertEqual(cred2["referrals"], 2)
+            self.assertEqual(len(rewards), 1)
+        finally:
+            mailer.configured = saved_cfg
+            mailer.send = saved_send
+
+    def test_referral_never_credits_self_or_override_first(self):
+        """Share links don't credit yourself, and an already-attributed lead
+        can't be re-credited by a different referrer (first attribution wins)."""
+        with server._lock:
+            conn = server._db()
+            conn.execute("DELETE FROM subscribers WHERE email IN "
+                         "('selfy@x.test','taken@x.test','refb@x.test')")
+            conn.commit()
+            conn.close()
+        self._subscribe_via("selfy@x.test")
+        self._subscribe_via("refb@x.test")
+        with server._lock:
+            conn = server._db()
+            self_tok = conn.execute("SELECT ref_token, id FROM subscribers WHERE email='selfy@x.test'"
+                                    ).fetchone()
+            refb_tok = conn.execute("SELECT ref_token FROM subscribers WHERE email='refb@x.test'"
+                                    ).fetchone()["ref_token"]
+            conn.close()
+        # credible referrer signs up 'taken@x.test'
+        self._subscribe_via("taken@x.test", {"ref": refb_tok})
+        with server._lock:
+            conn = server._db()
+            take = conn.execute("SELECT referred_by FROM subscribers WHERE email='taken@x.test'"
+                                ).fetchone()
+            t = conn.execute("SELECT referrals FROM subscribers WHERE email='refb@x.test'"
+                             ).fetchone()
+            conn.close()
+        self.assertEqual(take["referred_by"], refb_tok)
+        self.assertEqual(t["referrals"], 1)
+        # 'taken@x.test' re-subscribes with a NEW referrer's token: first wins, no change
+        self._subscribe_via("taken@x.test", {"ref": self_tok["ref_token"]})
+        with server._lock:
+            conn = server._db()
+            take2 = conn.execute("SELECT referred_by FROM subscribers WHERE email='taken@x.test'"
+                                 ).fetchone()
+            t2 = conn.execute("SELECT referrals FROM subscribers WHERE email='refb@x.test'"
+                              ).fetchone()
+            self_cred = conn.execute("SELECT referrals FROM subscribers WHERE id=?",
+                                     (self_tok["id"],)).fetchone()
+            conn.close()
+        self.assertEqual(take2["referred_by"], refb_tok)  # still the original
+        self.assertEqual(t2["referrals"], 1)              # no double credit
+        self.assertEqual(self_cred["referrals"], 0)       # own token proves nothing
+
 
 if __name__ == "__main__":
     unittest.main()

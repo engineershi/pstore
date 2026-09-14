@@ -1230,6 +1230,40 @@ def _send_welcome_email(subscriber_id, keyword):
         return
 
 
+def _send_referral_reward(referrer_id):
+    """Background reward note to a subscriber whose share link just converted:
+    'early access to the next guide' — the payoff that makes the referral loop
+    worth sharing. Deduped to one reward per referrer ever via the one-off
+    campaign table, and it only runs when the referrer is still confirmed and
+    unsubscribed. Never raises."""
+    try:
+        if not mailer.configured():
+            return
+        with _lock:
+            conn = _db()
+            row = conn.execute("SELECT * FROM subscribers WHERE id=?",
+                               (referrer_id,)).fetchone()
+            conn.close()
+        if not row or not row["confirmed"] or row["unsubscribed"]:
+            return
+        sub = dict(row)
+        kw = (sub.get("keyword") or "").strip() or "niche"
+        name = (sub.get("first_name") or "").strip() or "there"
+        body = ("Hi %s,\n\nSomeone used your guide link and picked up the %s guide. "
+                "Your referral has been credited.\n\n"
+                "Here's your reward — early access: the next %s guide lands in your "
+                "inbox the moment it's ready, before anyone else sees it.\n\n"
+                "Keep sharing your link — every friend who subscribes earns you "
+                "early access to the next niche guide.\n\n— pstore"
+                % (name, kw, kw))
+        stub = _AutosendStub()
+        Handler._dispatch_one_off(stub, "referral:reward", sub, kw, "",
+                                  "Someone used your link — your reward is inside",
+                                  body)
+    except Exception:
+        return
+
+
 def _build_topic_pages(parent_slug, count=6):
     """Mine new long-tail /n/<parent>/<term> pages for one niche from live
     Amazon autosuggest (unbuilt terms only), then ping IndexNow. Returns the
@@ -1874,6 +1908,7 @@ def _ensure_db_schema(conn):
         sent_index INTEGER DEFAULT 0,
         utm_source TEXT DEFAULT '',
         utm_content TEXT DEFAULT '',
+        referrals INTEGER DEFAULT 0,
         created_at TEXT DEFAULT (datetime('now'))
     )""")
     conn.execute("""CREATE TABLE IF NOT EXISTS sent_emails (
@@ -2031,6 +2066,11 @@ def _ensure_db_schema(conn):
         pass
     try:
         conn.execute("ALTER TABLE subscribers ADD COLUMN utm_content TEXT DEFAULT ''")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE subscribers ADD COLUMN referrals INTEGER DEFAULT 0")
         conn.commit()
     except Exception:
         pass
@@ -10490,12 +10530,12 @@ document.addEventListener("click", async function(e){{
                     "AND (utm_source IS NULL OR utm_source='')",
                     (utm_source, utm_content, sid))
             ref_token = self._ensure_ref_token(conn, sid)
-            if ref and ref != ref_token:
-                conn.execute(
-                    "UPDATE subscribers SET referred_by=? WHERE id=? "
-                    "AND (referred_by IS NULL OR referred_by='')", (ref[:80], sid))
+            referrer_id = self._credit_referral(conn, sid, ref)
             conn.commit()
             conn.close()
+        if referrer_id:
+            threading.Thread(target=_send_referral_reward, args=(referrer_id,),
+                             daemon=True).start()
         ref_slug = seo._slugify(keyword) if keyword else ""
         # Signed, short-lived token lets this just-opted-in visitor grab the
         # gated PDF lead magnet immediately (Cialdini's reciprocity in action).
@@ -10548,12 +10588,12 @@ document.addEventListener("click", async function(e){{
             conn.execute("INSERT OR IGNORE INTO pricewatch (email, asin, keyword) VALUES (?,?,?)",
                          (email, asin, keyword))
             ref_token = self._ensure_ref_token(conn, sid)
-            if ref and ref != ref_token:
-                conn.execute(
-                    "UPDATE subscribers SET referred_by=? WHERE id=? "
-                    "AND (referred_by IS NULL OR referred_by='')", (ref[:80], sid))
+            referrer_id = self._credit_referral(conn, sid, ref)
             conn.commit()
             conn.close()
+        if referrer_id:
+            threading.Thread(target=_send_referral_reward, args=(referrer_id,),
+                             daemon=True).start()
         if is_new and keyword:
             threading.Thread(target=_send_welcome_email, args=(sid, keyword),
                              daemon=True).start()
@@ -10564,6 +10604,33 @@ document.addEventListener("click", async function(e){{
                                 "download_token": security.make_token("pdf:" + keyword, 10 * 60)
                                 if keyword else "",
                                 "referral_url": self._referral_url(ref_slug, ref_token)})
+
+    def _credit_referral(self, conn, sid, ref):
+        """Record one referral attribution inside the active transaction. The
+        FIRST share link (by ref token) to sign someone up owns the credit —
+        later re-subscribes don't override it, and a subscriber can't credit
+        themselves. Returns the referrer's subscriber id (0 = none), so the
+        caller can fire the one-off reward mail on a background thread."""
+        ref = str(ref or "").strip()[:80]
+        if not ref:
+            return 0
+        cur = conn.execute(
+            "SELECT id, ref_token FROM subscribers WHERE id=?", (sid,)).fetchone()
+        if cur and ref == (cur["ref_token"] or ""):
+            return 0  # sharing your own link proves nothing
+        set_cur = conn.execute(
+            "UPDATE subscribers SET referred_by=? WHERE id=? "
+            "AND (referred_by IS NULL OR referred_by='')", (ref, sid))
+        if not set_cur.rowcount:
+            return 0  # already credited to someone else — keep first wins
+        row = conn.execute(
+            "SELECT id FROM subscribers WHERE ref_token=? AND id<>? ",
+            (ref, sid)).fetchone()
+        if not row:
+            return 0  # dangling/unknown token — nothing to credit
+        conn.execute("UPDATE subscribers SET referrals=COALESCE(referrals,0)+1 "
+                     "WHERE id=?", (row["id"],))
+        return row["id"]
 
     def _ensure_ref_token(self, conn, sid):
         row = conn.execute("SELECT ref_token FROM subscribers WHERE id=?", (sid,)).fetchone()

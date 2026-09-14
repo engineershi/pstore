@@ -59,7 +59,8 @@
         keyword: (keyword && keyword.value) || slug,
         source: (main && main.dataset.source) || "niche",
         utm_source: utmSource,
-        utm_content: utmContent
+        utm_content: utmContent,
+        ref: params.get("ref") || ""
       })
     }).then(function (r) { return r.json(); })
       .then(function (d) {
