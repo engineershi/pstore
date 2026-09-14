@@ -1452,6 +1452,14 @@ def _send_welcome_email(subscriber_id, keyword):
             conn = _db()
             conn.execute("UPDATE subscribers SET sent_index=? WHERE id=?",
                          (1, subscriber_id))
+            # Keep the per-niche interest row in sync: the welcome is this
+            # niche's email #1, so the next scoped send continues at step 2.
+            if kw:
+                conn.execute(
+                    "INSERT INTO sub_interests (subscriber_id, keyword, sent_index) "
+                    "VALUES (?,?,1) ON CONFLICT(subscriber_id, keyword) "
+                    "DO UPDATE SET sent_index=excluded.sent_index",
+                    (subscriber_id, kw))
             conn.execute("INSERT INTO sent_emails (subscriber_id, email_index, subject, "
                          "subject_variant) VALUES (?,?,?,?)",
                          (subscriber_id, 1, mail["subject"], "welcome"))
@@ -1721,6 +1729,14 @@ def _content_run(now=None, limit=None):
                         summary["kits_queued"] += q
                 except Exception as exc:
                     summary["error"] = "%s: %s" % (n["keyword"], exc)
+        try:
+            # Permanent A/B on the money step (MME-10): auto-enroll the
+            # highest-clicked niche that has no live matchup yet.
+            stub = _AutosendStub()
+            ae = Handler._ab_autoenroll(stub)
+            summary["ab_enrolled"] = len(((ae or {}).get("enrolled") or []))
+        except Exception:
+            summary["ab_enrolled"] = 0
         summary["at"] = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
         _set_setting("content.last_run", json.dumps(summary))
     except Exception as exc:
@@ -2164,6 +2180,15 @@ def _ensure_db_schema(conn):
         referrals INTEGER DEFAULT 0,
         created_at TEXT DEFAULT (datetime('now'))
     )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS sub_interests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        subscriber_id INTEGER NOT NULL,
+        keyword TEXT NOT NULL,
+        sent_index INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(subscriber_id, keyword)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_interests_kw ON sub_interests (keyword)")
     conn.execute("""CREATE TABLE IF NOT EXISTS sent_emails (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         subscriber_id INTEGER NOT NULL,
@@ -2564,6 +2589,30 @@ def _init():
                 order_rate=float(rate) if rate else None)
     except Exception:
         pass
+
+
+def _auto_variant_headline(keyword, items):
+    """A second headline for the auto-enrolled A/B matchup: keeps the refined
+    best-pick promise (the #1 snack-score ASIN with its product title slug), so
+    the control and the challenger both read as credible review-page headlines
+    while appealing to slightly different search intents."""
+    best = None
+    try:
+        best = market_engine.pick_for_buyers(items)
+    except Exception:
+        best = None
+    asin_title = None
+    if best:
+        try:
+            asin_title = best.get("title") or ""
+            if len(asin_title) > 52:
+                asin_title = asin_title[:52].rsplit(" ", 1)[0] + "…"
+        except Exception:
+            asin_title = None
+    kw = (keyword or "").strip().lower()
+    if asin_title:
+        return "The #1 %s: %s" % (kw, asin_title)
+    return "Best %s — compared & ranked" % kw
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -10826,6 +10875,10 @@ document.addEventListener("click", async function(e){{
                     "UPDATE subscribers SET unsubscribed=0, confirmed=1, source=?, keyword=?, first_name=? "
                     "WHERE id=?", (source, keyword, first_name, row["id"]))
                 sid = row["id"]
+                if keyword:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO sub_interests (subscriber_id, keyword) VALUES (?,?) "
+                        "ON CONFLICT(subscriber_id, keyword) DO NOTHING", (sid, keyword))
                 msg = "You're subscribed again — the next update will find its way to your inbox."
             else:
                 cur = conn.execute(
@@ -10834,6 +10887,10 @@ document.addEventListener("click", async function(e){{
                     (email, source, keyword, first_name, utm_source, utm_content))
                 sid = cur.lastrowid
                 is_new = True
+                if keyword:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO sub_interests (subscriber_id, keyword) VALUES (?,?) "
+                        "ON CONFLICT(subscriber_id, keyword) DO NOTHING", (sid, keyword))
                 msg = "Done — you'll only hear from us when these picks change, and you can unsubscribe any time."
             # First attribution wins: keep the original UTM once a lead has one.
             if utm_source or utm_content:
@@ -10897,6 +10954,10 @@ document.addEventListener("click", async function(e){{
                     "VALUES (?, 'price-alert', ?, ?, 1)", (email, keyword, first_name))
                 sid = cur.lastrowid
                 is_new = True
+            if keyword:
+                conn.execute(
+                    "INSERT OR IGNORE INTO sub_interests (subscriber_id, keyword) VALUES (?,?) "
+                    "ON CONFLICT(subscriber_id, keyword) DO NOTHING", (sid, keyword))
             conn.execute("INSERT OR IGNORE INTO pricewatch (email, asin, keyword) VALUES (?,?,?)",
                          (email, asin, keyword))
             ref_token = self._ensure_ref_token(conn, sid)
@@ -11173,8 +11234,9 @@ document.addEventListener("click", async function(e){{
                    "FROM subscribers s")
             args = ()
             if kw:
-                sql += " WHERE lower(s.keyword)=?"
-                args = (kw,)
+                sql += (" WHERE (lower(s.keyword)=? OR EXISTS(SELECT 1 FROM sub_interests i "
+                    " WHERE i.subscriber_id=s.id AND lower(i.keyword)=?))")
+                args = (kw, kw)
             sql += " ORDER BY s.id DESC LIMIT ?"
             rows = [dict(r) for r in conn.execute(sql, args + (limit,))]
             conn.close()
@@ -12092,13 +12154,25 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             conn = _db()
             if niche_kw:
                 subs = conn.execute(
-                    "SELECT * FROM subscribers WHERE unsubscribed=0 AND confirmed=1 "
-                    "AND sent_index < ? AND lower(keyword)=? ORDER BY id",
-                    (mailer.SEQUENCE_LENGTH, niche_kw)).fetchall()
+                    "SELECT s.*, i.keyword AS ikw, i.sent_index AS isent, "
+                    "(CASE WHEN i.id IS NOT NULL THEN 1 ELSE 0 END) AS has_interest "
+                    "FROM subscribers s "
+                    "LEFT JOIN sub_interests i ON i.subscriber_id=s.id AND lower(i.keyword)=? "
+                    "WHERE s.unsubscribed=0 AND s.confirmed=1 "
+                    "AND (lower(s.keyword)=? OR i.id IS NOT NULL) "
+                    "AND COALESCE(i.sent_index, s.sent_index) < ? ORDER BY s.id",
+                    (niche_kw, niche_kw, mailer.SEQUENCE_LENGTH)).fetchall()
             else:
                 subs = conn.execute(
-                    "SELECT * FROM subscribers WHERE unsubscribed=0 AND confirmed=1 "
-                    "AND sent_index < ? ORDER BY id", (mailer.SEQUENCE_LENGTH,)).fetchall()
+                    "SELECT s.*, i.keyword AS ikw, i.sent_index AS isent, "
+                    "(CASE WHEN i.id IS NOT NULL THEN 1 ELSE 0 END) AS has_interest "
+                    "FROM subscribers s "
+                    "LEFT JOIN sub_interests i ON i.subscriber_id=s.id "
+                    "WHERE s.unsubscribed=0 AND s.confirmed=1 "
+                    "AND ((i.id IS NULL AND s.sent_index < ?) OR "
+                    "     (i.id IS NOT NULL AND i.sent_index < ?)) "
+                    "ORDER BY s.id, ikw",
+                    (mailer.SEQUENCE_LENGTH, mailer.SEQUENCE_LENGTH)).fetchall()
             niche_map = {r["keyword"].strip().lower(): r
                          for r in conn.execute("SELECT keyword, products FROM niches")}
             conn.close()
@@ -12106,13 +12180,16 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
         unready = 0
         ai_copy_cache = {}
         for sub in subs:
-            kw = (sub["keyword"] or "").strip()
+            kw = (sub["ikw"] or sub["keyword"] or "").strip() if sub["has_interest"] \
+                else (sub["keyword"] or "").strip()
+            if niche_kw:
+                kw = niche_kw
             item_row = niche_map.get(kw.lower())
             items = json.loads(item_row["products"] or "[]") if item_row else []
             first = sub["first_name"] or ""
             seg = self._subscriber_segment(sub["id"])
             is_converted = seg == "converted"
-            idx = (sub["sent_index"] or 0) + 1
+            idx = ((sub["isent"] if sub["has_interest"] else (sub["sent_index"] or 0)) or 0) + 1
             if is_converted:
                 # Segment-aware branch: a lead who clicked a product ASIN gets the
                 # review + value-ladder upsell follow-up, not the same nurture
@@ -12181,6 +12258,15 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                     conn = _db()
                     new_index = mailer.SEQUENCE_LENGTH if is_converted else idx
                     conn.execute("UPDATE subscribers SET sent_index=? WHERE id=?", (new_index, sid))
+                    # Per-niche sequence progress: the interest row tracks this
+                    # lead's position in THIS niche specifically, so a follower
+                    # of two niches advances each sequence independently.
+                    if kw:
+                        conn.execute(
+                            "INSERT INTO sub_interests (subscriber_id, keyword, sent_index) "
+                            "VALUES (?,?,?) ON CONFLICT(subscriber_id, keyword) "
+                            "DO UPDATE SET sent_index=excluded.sent_index",
+                            (sid, kw, new_index))
                     conn.execute("INSERT INTO sent_emails (subscriber_id, email_index, subject, "
                                  "subject_variant) VALUES (?,?,?,?)",
                                  (sid, idx, mail["subject"], subv))
@@ -12514,8 +12600,9 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                        "FROM subscribers s")
                 args = ()
                 if kwf:
-                    sql += " WHERE lower(s.keyword)=?"
-                    args = (kwf,)
+                    sql += (" WHERE (lower(s.keyword)=? OR EXISTS(SELECT 1 FROM sub_interests i "
+                            " WHERE i.subscriber_id=s.id AND lower(i.keyword)=?))")
+                    args = (kwf, kwf)
                 rows = [dict(r) for r in conn.execute(sql, args)]
                 conn.close()
             if seg:
@@ -14307,14 +14394,82 @@ $$(".card[data-captions]").forEach(function(card){{
                 "note": ("Disabled variants converting below 25%% of the leader "
                          "once a niche reached %d lifetime clicks." % min_clicks)}
 
-    def _variants_autoclean(self):
-        """Admin: run A/B auto-cleanup on demand and report what got disabled."""
+    def _ab_autoenroll(self, min_clicks=None):
+        """Auto-enroll the highest-earning niche into a permanent headline
+        matchup: whichever niche page has attracted the most Amazon clicks AND
+        has no live headline variants yet gets a control + alternative pair so
+        the money page is always being A/B tested. Returns what was enrolled."""
+        if min_clicks is None:
+            try:
+                min_clicks = int(_get_setting("ab.min_clicks") or 40)
+            except (TypeError, ValueError):
+                min_clicks = 40
+        # The niche that already converts the most visitors into buyers deserves
+        # a permanent matchup (Leech's "A/B every money step").
+        with _lock:
+            conn = _db()
+            top = conn.execute(
+                "SELECT lower(slug) AS s, COUNT(*) AS c FROM clicks "
+                "WHERE slug IS NOT NULL AND slug != '' AND content NOT LIKE 'ab-%' "
+                "GROUP BY s ORDER BY c DESC LIMIT 1").fetchone()
+            conn.close()
+        enrolled = []
+        if not top or int(top["c"] or 0) < min_clicks:
+            return {"ok": True, "enrolled": enrolled,
+                    "note": "No niche has reached %d lifetime clicks yet — keep driving traffic." % min_clicks}
+        slug = top["s"]
+        niche = None
+        for n in self._all_niches():
+            if seo._slugify(n.get("keyword") or "") == slug:
+                niche = n
+                break
+        if not niche:
+            return {"ok": True, "enrolled": enrolled,
+                    "note": "Top niche %s isn't a saved niche — skip." % slug}
+        with _lock:
+            conn = _db()
+            live = conn.execute(
+                "SELECT COUNT(*) AS c FROM niche_variants WHERE lower(slug)=? "
+                "AND enabled=1 AND headline != ''", (slug,)).fetchone()["c"]
+            conn.close()
+        if live >= 2:
+            return {"ok": True, "enrolled": enrolled,
+                    "note": "%s already has a live matchup (%d variants)." % (slug, live)}
+        kw = (niche.get("keyword") or "").strip()
+        items = niche.get("products") or []
         try:
+            alt = _auto_variant_headline(kw, items)
+        except Exception:
+            alt = "Best %s — the picks buyers compare most" % kw
+        headline_control = "Best %s: ranked picks" % kw
+        with _lock:
+            conn = _db()
+            conn.execute(
+                "INSERT INTO niche_variants (slug, variant, headline, enabled) VALUES (?,?,?,1) "
+                "ON CONFLICT(id) DO NOTHING", (slug, 1, headline_control))
+            conn.execute(
+                "INSERT INTO niche_variants (slug, variant, headline, enabled) VALUES (?,?,?,1) "
+                "ON CONFLICT(id) DO NOTHING", (slug, 2, alt))
+            conn.commit()
+            conn.close()
+        enrolled.append({"slug": slug, "clicks": top["c"],
+                         "control": headline_control, "variant": alt})
+        return {"ok": True, "enrolled": enrolled,
+                "note": ("Enrolled %s into a permanent headline matchup (%d lifetime clicks)."
+                         % (slug, int(top["c"] or 0)))}
+
+    def _variants_autoclean(self):
+        """Admin: run A/B auto-cleanup (disable losers) AND auto-enroll the
+        top-clicked niche that lacks a matchup. Returns the report."""
+        try:
+            enrolled, self._ok_clean = None, True
+            r = self._ab_autoenroll()
             self._ab_autoclean()
         except Exception as exc:
             return self._send(200, {"ok": False, "error": str(exc)})
-        # freshest stats for the report
-        return self._send(200, self._ab_summary())
+        rep = self._ab_summary()
+        rep["enrolled"] = (r or {}).get("enrolled", [])
+        return self._send(200, rep)
 
     def _ab_summary(self):
         """Snapshot of every niche's variant health for the /admin/variants page."""

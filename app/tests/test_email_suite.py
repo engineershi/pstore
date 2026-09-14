@@ -1166,6 +1166,38 @@ class TestEmailSuite(unittest.TestCase):
             self.assertTrue(mailer.unsubscribe_url("u@example.com").startswith(
                 "/unsubscribe?e=") or "unsubscribe" in mailer.unsubscribe_url("u@example.com"))
 
+    def test_subscribe_multi_keyword_creates_interest_rows(self):
+        """MME-7: subscribing the same email to a different keyword creates
+        a new sub_interests row; scoped sends count each niche independently."""
+        saved = (mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD)
+        mailer.SMTP_HOST = "smtp.test.local"
+        mailer.SMTP_USER = "u@example.com"
+        mailer.SMTP_PASSWORD = "pw"
+        try:
+            self._subscribe("multi@example.com", keyword="keto snacks")
+            self._wait_welcome("multi@example.com")
+            self._subscribe("multi@example.com", keyword="yoga mat")
+        finally:
+            mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD = saved
+        with server._lock:
+            conn = server._db()
+            sid = conn.execute(
+                "SELECT id FROM subscribers WHERE lower(email)=? "
+                "ORDER BY id DESC LIMIT 1",
+                ("multi@example.com",)).fetchone()["id"]
+            rows = [dict(r) for r in conn.execute(
+                "SELECT keyword, sent_index FROM sub_interests "
+                "WHERE subscriber_id=? ORDER BY keyword", (sid,)).fetchall()
+            ]
+            conn.close()
+        self.assertEqual(len(rows), 2)
+        kws = [r["keyword"] for r in rows]
+        self.assertIn("keto snacks", kws)
+        self.assertIn("yoga mat", kws)
+        progress = {r["keyword"]: r["sent_index"] for r in rows}
+        self.assertEqual(progress["keto snacks"], 1)  # welcome counted
+        self.assertEqual(progress["yoga mat"], 0)     # not sent yet
+
 
 class TestEbookModule(unittest.TestCase):
     def test_build_ebook_without_ai(self):

@@ -500,6 +500,49 @@ def optin_html(keyword, source="niche", anchor=""):
 </form>"""
 
 
+_LEAD_GATE_CSS = """
+.gate{box-sizing:border-box;max-width:560px;margin:26px auto 0;padding:22px 20px;border:1.5px solid var(--accent,#c8560b);border-radius:14px;background:var(--card,#fff);text-align:center;box-shadow:0 8px 30px rgba(0,0,0,.08)}
+.gate .gift{font-size:40px;line-height:1;margin-bottom:6px}
+.gate h2{margin:0 0 4px;font-size:20px}
+.gate .muted{color:var(--muted,#5f6470);font-size:13.5px;margin:4px auto 10px;line-height:1.5;max-width:420px}
+.gate form{display:flex;flex-wrap:wrap;gap:8px;max-width:430px;margin:12px auto 0}
+.gate form input{flex:1 1 180px;min-width:0;padding:12px 14px;border:1px solid var(--inputs-bd,#c8cbcf);border-radius:10px;font-size:15px;font-family:inherit}
+.gate form button{flex:1 1 150px;padding:12px 14px;border:0;border-radius:999px;font-size:15px;font-weight:800;color:#fff;background:var(--cta,#c8560b);cursor:pointer}
+.gate form button:hover{filter:brightness(1.07)}
+.gate .courier-msg{color:#159a4b;font-size:13px;min-height:18px;margin:8px 0 0}
+.gate .cta{display:inline-block;margin-top:14px;padding:12px 22px;border-radius:999px;background:var(--cta,#c8560b);color:#fff;font-weight:800;text-decoration:none;font-size:15px}
+.gate .hint{font-size:12px;color:var(--muted,#8a93a2);margin-top:10px}
+"""
+
+
+def lead_gate_html(keyword, source="niche"):
+    """Email-gated free-guide PDF block for SEO pages (MME-6): the visitor enters
+    their email to unlock the niche's generated PDF guide. Markup mirrors the
+    CMS landing gate so courier.js' existing gate-form handler unlocks #gate-unlock
+    with the /subscribe download token. Ships its own CSS (SEO pages don't load
+    the CMS gate styles)."""
+    kw = _clean(keyword or "picks")
+    return f"""<style>{_LEAD_GATE_CSS}</style>
+<div class="gate" id="gate" data-source="{_clean(source)}">
+  <div class="gift">🎁</div>
+  <h2>Free guide: best {kw} to buy</h2>
+  <p class="muted">One compact PDF of the ranked picks — the score, the price, the
+  quick take on each. We'll also ping you if any ranked pick's price drops.</p>
+  <form class="courier gate-form" action="/subscribe" method="post">
+    <input type="text" name="first_name" placeholder="First name" autocomplete="given-name">
+    <input type="email" name="email" placeholder="you@example.com" required autocomplete="email">
+    <input type="hidden" name="keyword" value="{kw}">
+    <input type="hidden" name="source" value="{_clean(source)}-gate">
+    <button type="submit">Send me the free guide →</button>
+  </form>
+  <p class="courier-msg gate-msg"></p>
+  <a class="cta" id="gate-unlock" href="#" rel="noopener" style="display:none">⬇ Your guide is ready</a>
+  <p class="hint">No spam. Unsubscribe any time. A price-drop alert only fires when a ranked pick's price changes.</p>
+</div>
+<script>var _lgcc=document.getElementById('gate');if(_lgcc){{var i=_lgcc.querySelector('input[name=email]');if(i)setTimeout(function(){{if(!document.body.getAttribute('data-opted'))i.focus();}},900);}}</script>
+"""
+
+
 def courier_script():
     return '<script src="/courier.js" defer></script>'.encode("utf-8")
 
@@ -670,6 +713,7 @@ def render_niche(keyword, niche, saved_niches=None, ab_headline=None, ab_variant
   <h2>The ranked list</h2>
   {ranked}
   {editorial.upsell_block(items, keyword)}
+  {lead_gate_html(keyword, "niche") if items else ""}
   {editorial.comparison_html(items) if items else ""}
   {editorial.methodology_html()}
   {editorial.related_html(keyword, saved_niches) if saved_niches else ""}
@@ -761,6 +805,7 @@ def render_topic(term, parent_keyword, niche, parent_slug, style_pack=None):
   <h2>Top {_clean(term or parent_keyword)} picks</h2>
   {ranked}
   {editorial.upsell_block(items, term or parent_keyword)}
+  {lead_gate_html(term or parent_keyword, "topic") if items else ""}
   {editorial.comparison_html(items) if items else ""}
   {editorial.methodology_html()}
   <p class="hint">This is a focused sub-topic of our <a href="{_clean(hub)}">full {_clean(parent_keyword)} guide</a>.</p>
@@ -832,6 +877,7 @@ def render_priceband(amount, parent_keyword, parent_slug, items,
   <h2>Top {_clean(parent_keyword)} picks under ${amount:,}</h2>
   {ranked}
   {editorial.upsell_block(band, term_label)}
+  {lead_gate_html(term_label, "priceband") if band else ""}
   {editorial.comparison_html(band) if band else ""}
   {editorial.methodology_html()}
   <p class="hint">This is a budget slice of our <a href="{_clean(hub)}">full {_clean(parent_keyword)} guide</a>.</p>
@@ -893,6 +939,7 @@ def render_vs(title_a, title_b, a_asin, b_asin, parent_keyword, parent_slug,
   {editorial.trust_block_html()}
   <h2>The verdict</h2>
   {ranked}
+  {lead_gate_html(term_label, "vs") if cand else ""}
   {editorial.comparison_html(cand) if cand else ""}
   {editorial.methodology_html()}
   <p class="hint">Part of our <a href="{_clean(hub)}">full {_clean(parent_keyword)} guide</a>.</p>

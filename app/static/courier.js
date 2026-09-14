@@ -332,4 +332,114 @@
       beacon("lead_pdf");
     }
   });
+
+  /* ---- MME-5: scroll / exit-intent subscribe nudge ---- */
+  var nudgeShown = false;
+  function escHtml(s) {
+    return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+  function optedIn() {
+    return document.body.getAttribute("data-opted") === "1";
+  }
+  function buildNudge() {
+    if (typeof document.body === "undefined") return null;
+    var kw = main ? (main.getAttribute("data-keyword") || slug) : slug;
+    var card = document.createElement("div");
+    card.id = "courier-nudge";
+    card.className = "courier-nudge";
+    card.setAttribute("role", "dialog");
+    card.setAttribute("aria-label", "Get the free guide");
+    card.innerHTML =
+      '<button type="button" class="courier-nudge-x" aria-label="Close">\u00d7</button>' +
+      '<div class="courier-nudge-title">\U0001f4e9 The best ' + escHtml(kw) + ' — ranked</div>' +
+      '<p class="courier-nudge-sub">Picks from live Amazon data in a free guide. Drop your email and it\u2019s yours.</p>' +
+      '<form class="courier courier-nudge-form">' +
+      '<input type="email" name="email" placeholder="you@example.com" required autocomplete="email">' +
+      '<button type="submit" class="warm">Send me the guide</button>' +
+      '<input type="hidden" name="keyword" value="' + escAttr(kw) + '">' +
+      '<p class="courier-msg" style="display:none;font-size:12.5px;margin:6px 0 0"></p></form>' +
+      '<p class="courier-nudge-foot">No spam \u2014 unsubscribe any time.</p>';
+    card.querySelector(".courier-nudge-x").addEventListener("click", function () {
+      dismissNudge();
+    });
+    document.body.appendChild(card);
+    return card;
+  }
+  function dismissNudge() {
+    var n = document.getElementById("courier-nudge");
+    if (n) { n.classList.remove("show"); }
+    nudgeShown = true;
+    try { sessionStorage.setItem("pstore_nudged", "1"); } catch (e) {}
+  }
+  function showNudge() {
+    if (nudgeShown || optedIn()) return;
+    try { if (sessionStorage.getItem("pstore_nudged") === "1") return; } catch (e) {}
+    var card = document.getElementById("courier-nudge") || buildNudge();
+    if (!card) return;
+    card.classList.add("show");
+    nudgeShown = true;
+    try { sessionStorage.setItem("pstore_nudged", "1"); } catch (e) {}
+  }
+  function nudgeAllowed() {
+    /* public SEO content pages only — never admin/api/social */
+    if (!main) return false;
+    var p = location.pathname || "";
+    if (p.indexOf("/admin") === 0 || p.indexOf("/api") === 0 ||
+        p.indexOf("/social") === 0 || p.indexOf("/e/") === 0) return false;
+    return true;
+  }
+  if (nudgeAllowed()) {
+    var scan = false;
+    var notch = 0;
+    document.addEventListener("scroll", function () {
+      if (scan) return;
+      try {
+        var doc = document.documentElement;
+        var max = (doc.scrollHeight - window.innerHeight) || 1;
+        if (window.scrollY >= max * 0.55) {
+          scan = true;
+          setTimeout(showNudge, 400);
+        }
+      } catch (e) {}
+    }, { passive: true });
+    document.addEventListener("mouseout", function (ev) {
+      if (nudgeShown || scan) { return; }
+      if (!ev.relatedTarget && ev.clientY <= 0) {
+        scan = true;
+        setTimeout(showNudge, 250);
+      }
+    });
+    /* safety: if nobody ever scrolls, offer the guide once after 45s */
+    setTimeout(function () {
+      if (!nudgeShown) showNudge();
+    }, 45000);
+  }
+  /* hide the nudge once the visitor opts in anywhere on the page */
+  if ("MutationObserver" in window) {
+    new MutationObserver(function () {
+      if (optedIn()) {
+        var n = document.getElementById("courier-nudge");
+        if (n) { n.classList.remove("show"); }
+        try { sessionStorage.setItem("pstore_nudged", "1"); } catch (e) {}
+      }
+    }).observe(document.body, { attributes: true, attributeFilter: ["data-opted"] });
+  }
+  var nudgeStyle = document.createElement("style");
+  nudgeStyle.textContent =
+    ".courier-nudge{position:fixed;right:16px;bottom:16px;z-index:88;width:280px;max-width:calc(100vw - 32px);" +
+    "background:#fff;color:#23262e;border:1px solid #e3e0d4;border-radius:14px;padding:16px 16px 12px;" +
+    "box-shadow:0 18px 50px rgba(0,0,0,.28);display:none;font-family:inherit}" +
+    ".courier-nudge.show{display:block;animation:courierNudgeIn .28s ease}" +
+    "@keyframes courierNudgeIn{from{transform:translateY(18px);opacity:0}to{transform:none;opacity:1}}" +
+    ".courier-nudge-x{position:absolute;top:6px;right:10px;border:none;background:none;color:#8a93a2;" +
+    "font-size:16px;cursor:pointer;line-height:1}" +
+    ".courier-nudge-title{font-size:15px;font-weight:700;margin:0 0 4px;padding-right:16px}" +
+    ".courier-nudge-sub{font-size:12.5px;color:#5a6270;line-height:1.5;margin:0 0 10px}" +
+    ".courier-nudge-form{display:flex;gap:6px;flex-wrap:wrap}" +
+    ".courier-nudge-form input[type=email]{flex:1;min-width:0;padding:9px 10px;border:1px solid #d0d4dc;" +
+    "border-radius:8px;font-size:13.5px}" +
+    ".courier-nudge-form button{white-space:nowrap}" +
+    ".courier-nudge-foot{font-size:11px;color:#9aa1ad;margin:8px 0 0}";
+  document.head.appendChild(nudgeStyle);
 })();

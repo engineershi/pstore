@@ -832,5 +832,178 @@ class TestMmeWaveA(unittest.TestCase):
         self.assertIn("https://pstore.example/stories", urls)
 
 
+class TestMmeWaveB(unittest.TestCase):
+    """Wave B: MME-5 (nudge), MME-6 (lead gate), MME-7 (sub_interests schema),
+    MME-10 (AB auto-enroll)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.db = "/tmp/pstore_test_mme_b_%s.db" % uuid.uuid4().hex[:8]
+        shutil.copy(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "..", "pstore.db"), cls.db)
+        os.environ["PSTORE_DB"] = cls.db
+        os.environ["PSTORE_ADMIN_EMAIL"] = "owner@test.example"
+        os.environ["PSTORE_ADMIN_PASSWORD"] = "test-pass-123"
+        os.environ.pop("PSTORE_URL", None)
+        os.environ.pop("PSTORE_MARKETS", None)
+        import importlib
+        importlib.reload(server)
+        importlib.reload(seo)
+        amazon.CACHE_TTL = 0
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        cls.PORT = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        try:
+            os.unlink(cls.db)
+        except Exception:
+            pass
+        os.environ.pop("PSTORE_DB", None)
+        os.environ.pop("PSTORE_MARKETS", None)
+
+    def _get(self, path):
+        conn = http.client.HTTPConnection("127.0.0.1", self.PORT, timeout=10)
+        conn.request("GET", path)
+        resp = conn.getresponse()
+        ct = resp.getheader("Content-Type", "")
+        body = resp.read()
+        conn.close()
+        return resp.status, ct, body
+
+    def _seed_niche(self, keyword, products):
+        with server._lock:
+            conn = server._db()
+            conn.execute(
+                "INSERT OR REPLACE INTO niches (keyword, market, products) "
+                "VALUES (?,?,?)", (keyword, "com", json.dumps(products)))
+            conn.commit()
+            conn.close()
+
+    # ---- MME-5 courier.js nudge markers ----
+
+    def test_courier_js_nudge_markers(self):
+        js_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "..", "static", "courier.js")
+        with open(js_path, "r", encoding="utf-8", errors="replace") as fh:
+            js = fh.read()
+        self.assertIn("pstore_nudged", js)
+        self.assertIn("courier-nudge", js)
+        self.assertIn("data-opted", js)
+        self.assertIn("45000", js)  # 45s fallback
+        self.assertIn("sessionStorage", js)
+
+    # ---- MME-6 lead gate ----
+
+    def test_lead_gate_html_structure(self):
+        html = seo.lead_gate_html("keto snacks", "niche")
+        self.assertIn('id="gate"', html)
+        self.assertIn('class="courier gate-form"', html)
+        self.assertIn('id="gate-unlock"', html)
+        self.assertIn('name="keyword" value="keto snacks"', html)
+        self.assertIn('name="source" value="niche-gate"', html)
+        self.assertIn("keto snacks", html)
+
+    def test_niche_page_includes_gate_with_items(self):
+        items = [{"asin": "B0G1", "title": "Tent", "price": 55.0,
+                  "stars": 4.3, "reviews": 200, "currency": "USD",
+                  "url": "https://www.amazon.com/dp/B0G1"}]
+        self._seed_niche("camping gear", items)
+        st, ct, body = self._get("/n/camping-gear")
+        self.assertEqual(st, 200)
+        html = body.decode("utf-8", "replace")
+        self.assertIn('id="gate"', html)
+        self.assertIn('id="gate-unlock"', html)
+
+    def test_niche_page_no_gate_without_items(self):
+        self._seed_niche("empty niche", [])
+        st, ct, body = self._get("/n/empty-niche")
+        html = body.decode("utf-8", "replace")
+        self.assertNotIn("gate-unlock", html)
+
+    def test_priceband_renders_gate(self):
+        items = [{"asin": "B0PB", "title": "Widget", "price": 42.0,
+                  "stars": 4.1, "reviews": 100, "currency": "USD",
+                  "url": "https://www.amazon.com/dp/B0PB"}]
+        html = seo.render_priceband(60, "camping gear", "camping-gear",
+                                    items).decode("utf-8", "replace")
+        self.assertIn("gate-unlock", html)
+        self.assertIn("camping gear under $60", html)
+
+    def test_priceband_no_gate_when_band_empty(self):
+        items = [{"asin": "B0PBN", "title": "Expensive", "price": 500.0,
+                  "stars": 4.1, "reviews": 100, "currency": "USD",
+                  "url": "https://www.amazon.com/dp/B0PBN"}]
+        html = seo.render_priceband(50, "camping gear", "camping-gear",
+                                    items).decode("utf-8", "replace")
+        self.assertNotIn("gate-unlock", html)
+        self.assertIn("noindex", html)
+
+    def test_vs_page_renders_gate(self):
+        items = [
+            {"asin": "AAA", "title": "Espresso A", "price": 99.0,
+             "stars": 4.5, "reviews": 300, "currency": "USD",
+             "url": "https://www.amazon.com/dp/AAA"},
+            {"asin": "BBB", "title": "Espresso B", "price": 149.0,
+             "stars": 4.7, "reviews": 200, "currency": "USD",
+             "url": "https://www.amazon.com/dp/BBB"},
+        ]
+        html = seo.render_vs("Espresso A", "Espresso B", "AAA", "BBB",
+                             "espresso", "espresso", items
+                             ).decode("utf-8", "replace")
+        self.assertIn("gate-unlock", html)
+        self.assertIn("Espresso A", html)
+
+    # ---- MME-7 sub_interests schema exists ----
+
+    def test_sub_interests_table_exists(self):
+        with server._lock:
+            conn = server._db()
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(sub_interests)").fetchall()}
+            conn.close()
+        self.assertIn("subscriber_id", cols)
+        self.assertIn("keyword", cols)
+        self.assertIn("sent_index", cols)
+
+    # ---- MME-10 AB auto-enroll creates variant rows ----
+
+    def test_ab_autoenroll_creates_variants(self):
+        kw = "best blender"
+        slug = seo._slugify(kw)
+        self._seed_niche(kw, [{"asin": "B0B1", "title": "Blender X",
+                                "price": 39.99, "stars": 4.4,
+                                "reviews": 800, "currency": "USD",
+                                "url": "https://www.amazon.com/dp/B0B1"}])
+        # seed 50 clicks on the slug
+        with server._lock:
+            conn = server._db()
+            for _ in range(50):
+                conn.execute(
+                    "INSERT INTO clicks (slug, source, content) "
+                    "VALUES (?, 'niche', '')", (slug,))
+            conn.commit(); conn.close()
+        stub = server._AutosendStub()
+        r = server.Handler._ab_autoenroll(stub, min_clicks=2)
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["enrolled"])
+        self.assertEqual(r["enrolled"][0]["slug"], slug)
+        with server._lock:
+            conn = server._db()
+            rows = conn.execute(
+                "SELECT variant, headline, enabled FROM niche_variants "
+                "WHERE lower(slug)=? ORDER BY variant", (slug,)).fetchall()
+            conn.close()
+        variants = [dict(x) for x in rows]
+        self.assertEqual(len(variants), 2)
+        headlines = {v["variant"]: v["headline"] for v in variants}
+        self.assertIn("ranked picks", headlines[1])
+        # calling again should not create duplicates
+        r2 = server.Handler._ab_autoenroll(stub, min_clicks=2)
+        self.assertEqual(len(r2["enrolled"]), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
