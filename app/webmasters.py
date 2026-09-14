@@ -519,26 +519,69 @@ def bing_submit_sitemap(key, url, sitemap=None):
                 {"siteUrl": url, "feedUrl": sitemap})
 
 
+def _bing_list(status, data, key):
+    """Normalize a Bing api.svc/json response to (list_or_None). The JSON
+    protocol wraps payloads in a `d` fragment (`{"d": [...]}`, and sometimes
+    `{"d": null}`); the same endpoint may return a bare array. Accept both,
+    so a legitimately-empty `{"d": []}` is not mistaken for an API error."""
+    if status != 200:
+        return None
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        inner = data.get("d")
+        if isinstance(inner, list):
+            return inner
+        if inner is None:
+            return []
+    return None
+
+
 def bing_stats(key, url, days=28):
-    """Bing keyword/page stats. GET artifact varies by endpoint; we ask
-    GetKeywordStats and parse the top-query aggregate for the site."""
-    q = urllib.parse.urlencode({"siteUrl": url, "country": "US"})
-    status, data = _req("GET", _bing_url("/GetKeywordStats", key) + "&" + q,
+    """Bing per-page performance stats — the Search Performance report for one
+    verified site. Calls GetPageStats (siteUrl + key); the same endpoint
+    returns weekly buckets, so rows are aggregated per page. A valid response
+    with no data yet (`{"d": []}`) returns ok=True with zeroed totals so a
+    snapshot gets persisted and the hub says "synced, 0" instead of failing."""
+    q = urllib.parse.urlencode({"siteUrl": urllib.parse.urlsplit(url).geturl()
+                                if "://" in url else url})
+    status, data = _req("GET", _bing_url("/GetPageStats", key) + "&" + q,
                         _hdr(WebmasterAPI=key))
-    if status != 200 or not isinstance(data, list):
+    rows = _bing_list(status, data, key)
+    if rows is None:
         return False, {"error": str(data)[:200], "rows": []}
-    rows = [{"page": (r.get("Query") or "?"), "clicks": int(r.get("Clicks") or 0),
-             "impressions": int(r.get("Impressions") or 0),
-             "position": round(float(r.get("Position") or 0), 1),
-             "max_position": round(float(r.get("MaxPosition") or 0), 1)}
-            for r in data]
-    totals = {"clicks": sum(r["clicks"] for r in rows),
-              "impressions": sum(r["impressions"] for r in rows),
-              "ctr": round(sum(r["clicks"] for r in rows) / max(
-                  sum(r["impressions"] for r in rows), 1) * 100, 1),
-              "position": round(sum(r["position"] for r in rows) / max(len(rows), 1), 1),
-              "days": days}
-    return True, {"rows": rows, "totals": totals}
+    pages = {}
+    for r in rows:
+        page = r.get("Query") or r.get("Page") or r.get("Url") or r.get("url") or "?"
+        bucket = pages.setdefault(page, {"clicks": 0, "impressions": 0,
+                                         "pos_num": 0.0, "pos_w": 0})
+        clicks = int(r.get("Clicks") or r.get("clicks") or 0)
+        impr = int(r.get("Impressions") or r.get("impressions") or 0)
+        bucket["clicks"] += clicks
+        bucket["impressions"] += impr
+        pos = r.get("AvgImpressionPosition", r.get("AvgClickPosition",
+                                                    r.get("Position")))
+        try:
+            pos = float(pos or 0.0)
+        except (TypeError, ValueError):
+            pos = 0.0
+        bucket["pos_num"] += pos * impr
+        bucket["pos_w"] += impr
+    out = []
+    for page, b in pages.items():
+        out.append({"page": page, "clicks": b["clicks"],
+                    "impressions": b["impressions"],
+                    "position": round(b["pos_num"] / max(b["pos_w"], 1), 1),
+                    "max_position": round(b["pos_num"] / max(b["pos_w"], 1), 1)})
+    out.sort(key=lambda x: (x["clicks"], x["impressions"]), reverse=True)
+    clicks = sum(r["clicks"] for r in out)
+    impressions = sum(r["impressions"] for r in out)
+    pos_avg = sum(r["position"] * max(r["impressions"], 1) for r in out) / \
+        max(sum(max(r["impressions"], 1) for r in out), 1)
+    totals = {"clicks": clicks, "impressions": impressions,
+              "ctr": round(clicks / max(impressions, 1) * 100, 1),
+              "position": round(pos_avg, 1), "days": days}
+    return True, {"rows": out, "totals": totals}
 
 
 def _strip_site_url(v):

@@ -39,6 +39,22 @@ class FakeWm:
         self.calls = []
         self.wm_get = lambda k, d="": self.store.get(k, d)
         self.wm_set = lambda k, v: self.store.__setitem__(k, v)
+        self.bing_page_stats = {"d": [
+            {"__type": "PageStats:#Microsoft.Bing.Webmaster.Api",
+             "AvgClickPosition": 0, "AvgImpressionPosition": 2.5,
+             "Clicks": 1, "Impressions": 30,
+             "Date": "\\/Date(1399100400000)\\/",
+             "Query": "http://pstore-gxbv.onrender.com/n/keto"},
+            {"__type": "PageStats:#Microsoft.Bing.Webmaster.Api",
+             "AvgClickPosition": 1, "AvgImpressionPosition": 4.0,
+             "Clicks": 2, "Impressions": 60,
+             "Date": "\\/Date(1401519600000)\\/",
+             "Query": "http://pstore-gxbv.onrender.com/n/keto"},
+            {"__type": "PageStats:#Microsoft.Bing.Webmaster.Api",
+             "AvgClickPosition": 0, "AvgImpressionPosition": 9.0,
+             "Clicks": 0, "Impressions": 10,
+             "Date": "\\/Date(1401519600000)\\/",
+             "Query": "http://pstore-gxbv.onrender.com/n/low-carb"}]}
 
     def hook(self):
         self._saved = (webmasters._req, webmasters._STORE_GET,
@@ -93,9 +109,8 @@ class FakeWm:
                  "contents": [{"submitted": "2020-01-01",
                                "lastDownloaded": "2020-01-02"}],
                  "isPending": False}]}
-        if "GetKeywordStats" in url:
-            return 200, [{"Query": "keto", "Clicks": 3, "Impressions": 90,
-                          "Position": 2.5, "MaxPosition": 1}]
+        if "GetPageStats" in url:
+            return 200, self.bing_page_stats
         if "SubmitFeed" in url:
             return 200, {}
         if "GetUserSites" in url:
@@ -384,9 +399,44 @@ class TestWebmastersClients(unittest.TestCase):
         ok, data = webmasters.bing_stats("bing-key-test",
                                          "https://pstore-gxbv.onrender.com", 28)
         self.assertTrue(ok)
-        self.assertEqual(data["rows"][0]["page"], "keto")
+        self.assertEqual([r["page"] for r in data["rows"]],
+                         ["http://pstore-gxbv.onrender.com/n/keto",
+                          "http://pstore-gxbv.onrender.com/n/low-carb"])
+        self.assertEqual(data["rows"][0]["clicks"], 3)
+        self.assertEqual(data["rows"][0]["impressions"], 90)
         self.assertEqual(data["totals"]["clicks"], 3)
-        self.assertEqual(data["totals"]["impressions"], 90)
+        self.assertEqual(data["totals"]["impressions"], 100)
+        self.assertEqual(data["totals"]["ctr"], 3.0)
+        self.assertIn("GetPageStats", self.wm.calls[-1][1])
+        self.assertNotIn("GetKeywordStats", self.wm.calls[-1][1])
+
+    def test_bing_stats_empty_envelope_is_ok(self):
+        saved = self.wm.bing_page_stats
+        try:
+            self.wm.bing_page_stats = {"d": []}
+            ok, data = webmasters.bing_stats(
+                "bing-key-test", "https://pstore-gxbv.onrender.com", 28)
+            self.assertTrue(ok)
+            self.assertEqual(data["rows"], [])
+            self.assertEqual(data["totals"]["clicks"], 0)
+            self.assertEqual(data["totals"]["impressions"], 0)
+        finally:
+            self.wm.bing_page_stats = saved
+
+    def test_bing_stats_bare_array_still_parses(self):
+        saved = self.wm.bing_page_stats
+        try:
+            self.wm.bing_page_stats = [
+                {"Clicks": 2, "Impressions": 8, "AvgImpressionPosition": 1.5,
+                 "Query": "http://pstore-gxbv.onrender.com/n/waist"}]
+            ok, data = webmasters.bing_stats(
+                "bing-key-test", "https://pstore-gxbv.onrender.com", 28)
+            self.assertTrue(ok)
+            self.assertEqual(data["rows"][0]["page"],
+                             "http://pstore-gxbv.onrender.com/n/waist")
+            self.assertEqual(data["totals"]["impressions"], 8)
+        finally:
+            self.wm.bing_page_stats = saved
 
     def test_bing_submit_sitemap(self):
         s, d = webmasters.bing_submit_sitemap(
@@ -442,6 +492,20 @@ class TestWebmastersClients(unittest.TestCase):
     def test_sync_engine_unknown(self):
         ok, data = webmasters.sync_engine("brave")
         self.assertFalse(ok)
+
+    def test_sync_engine_bing_persists_snapshot_even_when_empty(self):
+        saved = self.wm.bing_page_stats
+        try:
+            self.wm.bing_page_stats = {"d": []}
+            ok, data = webmasters.sync_engine("bing", 28)
+        finally:
+            self.wm.bing_page_stats = saved
+        self.assertTrue(ok)
+        snap = webmasters.last_sync("bing")
+        self.assertTrue(snap)
+        self.assertIn("at", snap)
+        self.assertEqual(snap["totals"]["clicks"], 0)
+        self.assertEqual(snap["totals"]["impressions"], 0)
 
     def test_engines_status_states(self):
         self.wm.store["seoeng.gsc.token"] = json.dumps(GSC_TOK)
