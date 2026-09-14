@@ -167,6 +167,7 @@ def post_to(platform, kit, key_getter):
     profile = {
         "Twitter / X": _post_twitter, "Pinterest": _post_pinterest,
         "Facebook": _post_facebook, "LinkedIn": _post_linkedin,
+        "Telegram": _post_telegram,
     }.get(platform)
     if profile is None:
         return {"ok": False, "platform": platform, "via": "skipped",
@@ -344,6 +345,53 @@ def _post_linkedin(b, kv):
                      payload, {"Authorization": "Bearer " + tok})
     return {"ok": 200 <= st < 300, "platform": "LinkedIn", "via": "native",
             "message": ("created " + str((data or {}).get("id") or "")) if data else str(st)}
+
+
+def _post_telegram(b, kv):
+    """Telegram channel win-loop backend: posts the tracked link (with the share
+    card when one exists) to a channel via a free BotFather bot. Credentials:
+      * bot token — `social.key.telegram` (one line in /admin/apikeys), or fold
+        both into it as `TOKEN|@channel` (or a numeric chat id),
+      * optional separate chat id — `social.key.telegram.chat`.
+    Zero budget, zero review queue: the loop's winner re-queues posts natively to
+    this channel like any other platform."""
+    field = (kv("telegram", "token") or "").strip()
+    chat = (kv("telegram", "chat") or "").strip()
+    token = field
+    if "|" in field:
+        token, chat = (s.strip() for s in field.split("|", 1))
+    elif chat and chat == field:
+        chat = ""  # kv() fell back to the token itself — no separate chat set
+    if not token:
+        return {"ok": False, "platform": "Telegram", "via": "skipped",
+                "message": "No Telegram bot token configured."}
+    if not chat:
+        return {"ok": False, "platform": "Telegram", "via": "native",
+                "message": "No Telegram chat id configured (paste TOKEN|@channel or "
+                           "set social.key.telegram.chat)."}
+    text = (b["body"] or "").strip()
+    tail = []
+    if b.get("hashtags"):
+        tail.append(b["hashtags"])
+    if b.get("link") and b["link"] not in text:
+        tail.append(b["link"])
+    text = (text + ("\n\n" + "\n".join(tail) if tail else "")).strip()
+    image = b.get("image_png") or b.get("image") or ""
+    if image:
+        st, data = _post("https://api.telegram.org/bot%s/sendPhoto" % token,
+                         {"chat_id": chat, "photo": image, "caption": text[:1024]},
+                         {"Content-Type": "application/json"})
+    else:
+        st, data = _post("https://api.telegram.org/bot%s/sendMessage" % token,
+                         {"chat_id": chat, "text": text[:4096]},
+                         {"Content-Type": "application/json"})
+    msg_id = ""
+    try:
+        msg_id = str((data or {}).get("result", {}).get("message_id") or "")
+    except Exception:
+        msg_id = ""
+    return {"ok": 200 <= st < 300, "platform": "Telegram", "via": "native",
+            "message": ("posted msg=%s" % msg_id) if msg_id else json.dumps(data or st)}
 
 
 def og_image(url):

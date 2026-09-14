@@ -191,6 +191,15 @@ class TestSocialSuite(unittest.TestCase):
             self.assertTrue(kit["utm_content"])
             self.assertEqual(kit["target"], "landing")
 
+    def test_kits_include_telegram_win_loop_channel(self):
+        """The composer emits a Telegram kit (utm_source=telegram) so the content
+        engine + winner-amplify loop can post natively to a free channel."""
+        d = self._api()
+        tg = [k for k in d["kits"] if k["platform"] == "Telegram"]
+        self.assertEqual(len(tg), 1)
+        self.assertEqual(social._key("Telegram"), "telegram")
+        self.assertIn("utm_source=telegram", tg[0]["link"])
+
     def test_publish_single_platform(self):
         d = self._api()
         core = social._ALPHABET.lower()

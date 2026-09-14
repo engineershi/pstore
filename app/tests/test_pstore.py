@@ -6,6 +6,8 @@ import sys
 import unittest
 import urllib.request
 
+import social
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import amazon
@@ -1720,11 +1722,9 @@ class TestRoutes(unittest.TestCase):
         self.assertEqual(st, 200, body)
         out = _json.loads(body)
         self.assertTrue(out["ok"], out)
-        self.assertEqual(out["published"], 6, out)
-        self.assertEqual(len(out["posts"]), 6, out)
-        self.assertEqual({p["platform"] for p in out["posts"]},
-                         {"Twitter / X", "Facebook", "LinkedIn",
-                          "Instagram", "Pinterest", "Threads"})
+        self.assertEqual(out["published"], len(social.PLATFORMS), out)
+        self.assertEqual(len(out["posts"]), len(social.PLATFORMS), out)
+        self.assertEqual({p["platform"] for p in out["posts"]}, set(social.PLATFORMS))
 
     def test_boosts_to_social_publishes_relink(self):
         import json as _json

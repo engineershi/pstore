@@ -128,6 +128,52 @@ class TestNativeScaffold(Base):
         self.assertEqual(res["via"], "native")
         self.assertIn("api.linkedin.com/v2/ugcPosts", self.requests[0][0])
 
+    def test_telegram_skipped_without_token(self):
+        res = publish.post_to("Telegram", self._kit("Telegram"), self._keys())
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["via"], "skipped")
+        self.assertEqual(self.requests, [])  # no network hit
+
+    def test_telegram_requires_chat_when_only_token(self):
+        res = publish.post_to("Telegram", self._kit("Telegram"),
+                              self._keys({("telegram", "token"): "TG:tok"}))
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["via"], "native")
+        self.assertIn("chat", res["message"].lower())
+        self.assertEqual(self.requests, [])
+
+    def test_telegram_posts_message_with_token_and_chat(self):
+        self._ok()
+        res = publish.post_to("Telegram", self._kit("Telegram", "Ranked list here"),
+                              self._keys({("telegram", "token"): "TG123:tok",
+                                          ("telegram", "chat"): "@pstore"}))
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["via"], "native")
+        url, payload, _ = self.requests[0]
+        self.assertIn("api.telegram.org/botTG123:tok/sendMessage", url)
+        self.assertEqual(payload["chat_id"], "@pstore")
+        self.assertIn("utm_content=ab", payload["text"])
+
+    def test_telegram_token_bar_chat_folding(self):
+        self._ok()
+        res = publish.post_to("Telegram", self._kit("Telegram"),
+                              self._keys({("telegram", "token"): "TG:tok|@chan"}))
+        self.assertTrue(res["ok"])
+        self.assertEqual(self.requests[0][1]["chat_id"], "@chan")
+
+    def test_telegram_sends_photo_caption_when_image_present(self):
+        self._ok()
+        kit = self._kit("Telegram", "Hello world")
+        kit["image_png"] = "https://x/og.png"
+        res = publish.post_to("Telegram", kit,
+                              self._keys({("telegram", "token"): "TG:tok",
+                                          ("telegram", "chat"): "12345"}))
+        self.assertTrue(res["ok"])
+        url, payload, _ = self.requests[0]
+        self.assertIn("/sendPhoto", url)
+        self.assertEqual(payload["photo"], "https://x/og.png")
+        self.assertIn("Hello world", payload["caption"])
+
     def test_unknown_platform_skipped(self):
         res = publish.post_to("Threads", self._kit("Threads"), self._keys())
         self.assertEqual(res["via"], "skipped")

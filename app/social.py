@@ -22,7 +22,8 @@ import urllib.parse
 
 import market_engine
 
-PLATFORMS = ["Twitter / X", "Facebook", "LinkedIn", "Instagram", "Pinterest", "Threads"]
+PLATFORMS = ["Twitter / X", "Facebook", "LinkedIn", "Instagram", "Pinterest", "Threads",
+             "Telegram"]
 
 # 1-marketing-safe short codes (no 0/1/o/l/i) for per-post attribution.
 _ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
@@ -159,9 +160,19 @@ def _threads(keyword, title, proof, price, link, slug):
             "body": body[:495], "link": link, "hashtags": hashtags(keyword)}
 
 
+def _telegram(keyword, title, proof, price, link, slug):
+    head = f"🏆 The best {keyword}, ranked from live Amazon data."
+    body = (f"{head}\n\n#1: {_clip(title, 70)} — {proof}"
+            f"{' · ' + price if price else ''}."
+            f"\n\nFull ranked list + live prices: {link}")
+    return {"platform": "Telegram", "name": "Telegram post (top pick)",
+            "body": body[:3000], "link": link, "hashtags": hashtags(keyword)}
+
+
 _COMPOSERS = {
     "Twitter / X": _twitter, "Facebook": _facebook, "LinkedIn": _linkedin,
     "Instagram": _instagram, "Pinterest": _pinterest, "Threads": _threads,
+    "Telegram": _telegram,
 }
 
 
