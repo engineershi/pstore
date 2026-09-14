@@ -565,6 +565,65 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
             conn.close()
         return r["products"] if r else "[]"
 
+    # ------------------------------------------------------------ system console
+    def test_system_api_requires_login(self):
+        st, ct, body = self._raw("/api/system")
+        self.assertEqual(st, 401)
+
+    def test_system_api_payload_shape(self):
+        self._seed()
+        st, ct, body = self._raw("/api/system", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        data = json.loads(body)
+        self.assertTrue(data["ok"])
+        names = {h["name"] for h in data["completed"]}
+        self.assertTrue({"content", "social", "outbox", "inbox", "autosend",
+                         "refresh", "http", "pricedrop"} <= names)
+        self.assertTrue(data["schedule"])
+        self.assertIn("outbox_scheduled", data["queues"])
+        self.assertIn("social_published_today", data["queues"])
+        self.assertIn("smtp", data["config"])
+        self.assertIn("db", data)
+        self.assertIn("threads", data)
+        self.assertIsInstance(data["issues"], list)
+        for t in data["threads"]:
+            self.assertIn("alive", t)
+
+    def test_system_heartbeat_flags_error_and_stale(self):
+        import time as _t
+        saved = dict(server._HEARTBEATS)
+        try:
+            server._HEARTBEATS["outbox"] = {
+                "last": _t.time() - 10000, "last_ok": _t.time() - 10000,
+                "last_err": 0, "err": ""}
+            server._HEARTBEATS["autosend"] = {
+                "last": _t.time() - 5, "last_ok": 0, "last_err": _t.time() - 5,
+                "err": "smtp 530 auth failed"}
+            st, ct, body = self._raw("/api/system", cookie=self.cookie)
+            self.assertEqual(st, 200)
+            data = json.loads(body)
+            by_name = {h["name"]: h for h in data["completed"]}
+            self.assertEqual(by_name["outbox"]["status"], "stale")
+            self.assertEqual(by_name["autosend"]["status"], "error")
+            issue_blob = " ".join(data["issues"]).lower()
+            self.assertIn("smtp 530", issue_blob)
+            self.assertIn("not reported", issue_blob)
+        finally:
+            server._HEARTBEATS.clear()
+            server._HEARTBEATS.update(saved)
+
+    def test_admin_system_page(self):
+        self._seed()
+        st, ct, body = self._raw("/admin/system", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        self.assertIn(b"System console", body)
+        self.assertIn(b"Automation health", body)
+        self.assertIn(b"Scheduled automation", body)
+        self.assertIn(b"Issues to look at", body)
+        self.assertIn(b"Queues", body)
+        self.assertIn(b"Background threads", body)
+        self.assertIn(b"setInterval(tick, 4000)", body)
+
 
 if __name__ == "__main__":
     unittest.main()

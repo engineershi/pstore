@@ -308,6 +308,7 @@ FUNCTIONS = [
     ("marketing", "Marketing & ROI"),
     ("analytics", "Analytics & backup"),
     ("keys", "Keys & API keys"),
+    ("system", "System console"),
 ]
 
 # Slugs maintained so tests have a stable, documented reference.
@@ -336,6 +337,7 @@ FUNCTION_PATHS = {
     "analytics": ("/admin/analytics", "/admin/backup", "/admin/manual",
                   "/api/analytics", "/api/pin-health"),
     "keys": ("/keys", "/keys/", "/admin/apikeys", "/api/keys"),
+    "system": ("/admin/system", "/api/system"),
 }
 
 # Hub/nav chip key -> owning function (for filtering what a user sees).
@@ -347,6 +349,7 @@ NAV_FN = {
     "social": "social", "variants": "marketing", "segments": "marketing",
     "pricedrop": "marketing", "template": "marketing", "keys": "keys", "apikeys": "keys",
     "analytics": "analytics", "backup": "analytics", "manual": "analytics",
+    "system": "system",
 }
 
 BUILTIN_ROLES = [
@@ -357,7 +360,7 @@ BUILTIN_ROLES = [
     ("marketing", "Marketing & ROI", ["marketing"]),
     ("analyst", "Analytics", ["analytics"]),
     ("keys", "Keys & API keys", ["keys"]),
-    ("operator", "Operator", ["dashboard", "email", "social"]),
+    ("operator", "Operator", ["dashboard", "email", "social", "system"]),
     ("full", "Full access", ALL_FUNCTIONS),
 ]
 _SESSIONS = {}  # token -> monotonic expiry
@@ -370,6 +373,29 @@ _PNG_CACHE = {}  # slug -> raster og card bytes (pure-Python render, capped)
 _OG_RENDER_SEM = threading.BoundedSemaphore(2)  # never more than 2 renders at once
 OG_CACHE_DIR = os.environ.get("PSTORE_OG_CACHE") or None  # persistent /og/*.png cache
 _OG_CACHE_VERSION = "navy3"  # bump when the share-card design changes
+
+# ------------------------------------------------------------------ automaton watch
+# The system console derives "is every automation alive?" from heartbeats: every
+# daemon loop stamps _beat() after each tick (ok=True) or with its error (ok=False).
+# An automation whose last beat ages past ~3 cadences flips to STALE in the console,
+# and any ok=False beat flips it to ERROR immediately — so a dead/lamed worker is
+# visible in the operator UI without anyone tailing logs.
+_START_TS = time.time()
+_HEARTBEATS = {}  # name -> {last, last_ok, last_err, err}
+
+
+def _beat(name, ok=True, err=""):
+    now = time.time()
+    h = _HEARTBEATS.setdefault(name, {"last": 0.0, "last_ok": 0.0,
+                                      "last_err": 0.0, "err": ""})
+    h["last"] = now
+    if ok:
+        h["last_ok"] = now
+        if err:
+            h["err"] = str(err)[:300]
+    else:
+        h["last_err"] = now
+        h["err"] = str(err)[:300]
 
 
 def _og_cache_dir():
@@ -782,8 +808,9 @@ def _auto_refresh_loop():
             now = time.time()
             for kw in _refresh_stale_candidates(now):
                 _refresh_niche(kw)
-        except Exception:
-            pass
+            _beat("refresh", True)
+        except Exception as exc:
+            _beat("refresh", False, str(exc))
 
 
 def _refresh_all_worker(kws):
@@ -1488,8 +1515,9 @@ def _content_loop():
         try:
             if _content_enabled():
                 _content_run()
-        except Exception:
-            pass
+                _beat("content", True)
+        except Exception as exc:
+            _beat("content", False, str(exc))
         try:
             wait = max(int(float(_get_setting("content.loop_hours") or 24) * 3600), 3600)
         except Exception:
@@ -1572,8 +1600,12 @@ def _social_flush_loop(interval=60, amplify=True):
     Stops when interval <= 0."""
     while True:
         time.sleep(max(interval, 15))
-        _recover_stuck_social()
-        _flush_due_social(_webhook_fire)
+        try:
+            _recover_stuck_social()
+            _flush_due_social(_webhook_fire)
+            _beat("social", True)
+        except Exception as exc:
+            _beat("social", False, str(exc))
         if amplify:
             try:
                 _auto_amplify_winners()
@@ -3783,9 +3815,11 @@ for (const id of ["me-name","me-pw","me-pw2"])
             ("Analyze",
              [("/admin/analytics", "📈 Analytics", "analytics"),
               ("/admin/backup", "💾 Backup", "backup")]),
+            ("Monitor",
+             [("/admin/system", "🖥 System console", "system", True),
+              ("/admin/manual", "📖 Manual", "manual")]),
             ("Operate",
-             [("/admin/manual", "📖 Manual", "manual"),
-              ("/admin/users", "👥 Users & roles", "users"),
+             [("/admin/users", "👥 Users & roles", "users"),
               ("/admin", "🗺 All pages", "admin", True),
               ("/admin/logout", "⎋ Logout", "logout")]),
         ]
@@ -4175,6 +4209,10 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._admin_priority(q)
             if path == "/admin/social":
                 return self._admin_social(q)
+            if path == "/admin/system":
+                return self._admin_system()
+            if path == "/api/system":
+                return self._system_api()
             if path == "/admin/sem":
                 return self._admin_sem(q)
             if path == "/admin/seo":
@@ -11022,6 +11060,342 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
 </body></html>"""
         return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
 
+    # ------------------------------------------------------------ system console
+    def _system_payload(self):
+        """Everything the operator console needs to see at a glance: which
+        background automations are alive (heartbeat-derived), what's scheduled/queued,
+        config gaps, and a list of concrete issues when something isn't normal."""
+        import datetime as _dt
+        now = time.time()
+
+        def human(ts):
+            if not ts:
+                return ""
+            try:
+                return _dt.datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S UTC")
+            except Exception:
+                return ""
+
+        content_hours = 24
+        try:
+            content_hours = max(1, int(float(_get_setting("content.loop_hours") or 24) or 24))
+        except (TypeError, ValueError):
+            content_hours = 24
+        cadence = {
+            "http": ("HTTP server", 60),
+            "content": ("Daily content engine (pages + kits)", content_hours * 3600),
+            "social": ("Social scheduler (flush + amplify + drip)", 60),
+            "outbox": ("Email studio outbox", 45),
+            "inbox": ("IMAP reply polling", 60),
+            "refresh": ("Niche auto-refresh", max(_REFRESH_INTERVAL_SEC or 0, 300)),
+            "autosend": ("Sequence autosend check", 1800),
+        }
+        # pricedrop is trigger-driven (manual button), so it has no fixed cadence.
+
+        def health(name):
+            h = _HEARTBEATS.get(name) or {}
+            cad = cadence.get(name)
+            detail = h.get("err") or ""
+            status, last = "idle", h.get("last")
+            if name == "refresh" and (_REFRESH_INTERVAL_SEC or 0) <= 0:
+                status, detail = "disabled", "auto-refresh disabled (REF interval is 0)"
+            elif name == "content" and not _content_enabled():
+                status, detail = "disabled", "content engine disabled (content.enabled=0)"
+            elif h.get("last_err", 0) > (h.get("last_ok") or 0):
+                status = "error"
+            elif h.get("last"):
+                stale_off = max(90, cad[1] * 3 + 30)
+                status = "stale" if now - h["last"] > stale_off else "ok"
+            return {"name": name, "label": cad[0] if cad else name,
+                    "status": status, "last": human(last),
+                    "last_ok": human(h.get("last_ok")),
+                    "last_err": human(h.get("last_err")),
+                    "age_s": int(now - last) if last else None,
+                    "detail": detail}
+
+        with _lock:
+            conn = _db()
+            def cnt(sql, *a):
+                return int(conn.execute(sql, a).fetchone()[0])
+            outbox_scheduled = cnt("SELECT COUNT(*) FROM outbox WHERE status='scheduled'")
+            outbox_sending = cnt("SELECT COUNT(*) FROM outbox WHERE status='sending'")
+            outbox_stuck = cnt("SELECT COUNT(*) FROM outbox WHERE status='sending' AND "
+                               "claimed_at!='' AND claimed_at <= datetime('now','-600 seconds')")
+            social_scheduled = cnt("SELECT COUNT(*) FROM social_posts WHERE status='scheduled'")
+            social_publishing = cnt("SELECT COUNT(*) FROM social_posts WHERE status='publishing'")
+            social_stuck = cnt("SELECT COUNT(*) FROM social_posts WHERE status='publishing' AND "
+                               "claimed_at!='' AND claimed_at <= datetime('now','-120 seconds')")
+            social_published_today = cnt("SELECT COUNT(*) FROM social_posts WHERE status='published' "
+                                         "AND published_at >= date('now')")
+            subs_total = cnt("SELECT COUNT(*) FROM subscribers WHERE unsubscribed=0")
+            clicks_today = cnt("SELECT COUNT(*) FROM clicks WHERE created_at >= date('now')")
+            emails_today = cnt("SELECT COUNT(*) FROM sent_emails WHERE sent_at >= date('now')")
+            pricewatch = cnt("SELECT COUNT(*) FROM pricewatch")
+            niches = cnt("SELECT COUNT(*) FROM niches")
+            db_size = os.path.getsize(DB) if os.path.exists(DB) else 0
+            db_wal = 0
+            for suffix in ("-wal", "-shm"):
+                try:
+                    if os.path.exists(DB + suffix):
+                        db_wal += os.path.getsize(DB + suffix)
+                except Exception:
+                    pass
+            native_keys = [r[0] for r in conn.execute(
+                "SELECT key FROM settings WHERE key LIKE 'social.key.%' "
+                "AND value!=''")]
+            conn.close()
+
+        pd = self._price_run_state()
+        healths = {"http": health("http"), "content": health("content"),
+                   "social": health("social"), "outbox": health("outbox"),
+                   "inbox": health("inbox"), "refresh": health("refresh"),
+                   "autosend": health("autosend"),
+                   "pricedrop": {"name": "pricedrop", "label": "Price-drop watcher",
+                                 "status": "disabled" if pd["status"] == "idle" and not pd["running"]
+                                           else "error" if pd.get("error") else "ok",
+                                 "detail": pd.get("error") or ""}}
+
+        # autosend state overrides heartbeat status (disabled slot vs scheduler alive)
+        try:
+            autosend_state = json.loads(_get_setting(AUTOSEND_STATE_KEY, "{}") or "{}") or {}
+        except Exception:
+            autosend_state = {}
+        if (autosend_state.get("status") == "disabled" or healths["autosend"]["status"] == "disabled"):
+            healths["autosend"]["status"] = "disabled"
+        if autosend_state.get("status") == "error":
+            healths["autosend"]["status"] = "error"
+            healths["autosend"]["detail"] = autosend_state.get("error") or healths["autosend"]["detail"]
+
+        # schedule table (next-run estimates from last heartbeat + cadence)
+        schedule = []
+        for name, hinfo in healths.items():
+            cad = cadence.get(name)
+            interval = cad[1] if cad else None
+            last = _HEARTBEATS.get(name, {}).get("last")
+            next_in = max(0, int(interval - (now - last))) if interval and last else None
+            when = human(now + (next_in or 0)) if next_in is not None else ""
+            schedule.append({"task": name, "label": hinfo["label"],
+                             "status": hinfo["status"],
+                             "cycle": "every %ds" % interval if interval else "manual",
+                             "next_in_s": next_in, "next": when,
+                             "last": hinfo.get("last") or ""})
+
+        issues = []
+        for name, hinfo in healths.items():
+            if hinfo["status"] == "error":
+                issues.append("%s is failing: %s" % (hinfo["label"],
+                                                     hinfo.get("detail") or "no detail"))
+            elif hinfo["status"] == "stale":
+                issues.append("%s has not reported in >%ds — check the worker"
+                              % (hinfo["label"], max(90, (cadence.get(name) or (None, 90))[1] * 3 + 30)))
+        if outbox_stuck:
+            issues.append("%d email outbox row(s) stuck in 'sending' — recovery is due" % outbox_stuck)
+        if social_stuck:
+            issues.append("%d social post(s) stranded in 'publishing' — recovery is due" % social_stuck)
+        if not mailer.configured():
+            issues.append("SMTP not configured — email sends are refused (set SMTP_HOST/USER/PASSWORD)")
+        if not ai.configured():
+            issues.append("AI not configured — ebook/headline copy uses deterministic templates")
+        if not (_SOCIAL_WEBHOOK or _get_setting("social.webhook")) and not native_keys:
+            issues.append("No social destination configured — posts stay queued (set a webhook or native keys)")
+        if native_keys:
+            platforms = sorted({k.split(".")[2] if len(k.split(".")) > 2 else k
+                                for k in native_keys})
+            social_dest = "native (%s)" % ", ".join(platforms)
+        else:
+            social_dest = "webhook" if (_SOCIAL_WEBHOOK or _get_setting("social.webhook")) else "none"
+
+        threads = sorted(
+            [{"name": t.name or "", "alive": t.is_alive(), "daemon": t.daemon,
+              "ident": t.ident}
+             for t in threading.enumerate()], key=lambda t: (not t["alive"], t["name"]))
+
+        return {
+            "ok": True,
+            "generated_at": _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "uptime_s": int(now - _START_TS),
+            "pid": os.getpid(),
+            "completed": [h for h in healths.values()],
+            "schedule": schedule,
+            "queues": {
+                "outbox_scheduled": outbox_scheduled, "outbox_sending": outbox_sending,
+                "outbox_stuck": outbox_stuck,
+                "social_scheduled": social_scheduled,
+                "social_publishing": social_publishing, "social_stuck": social_stuck,
+                "social_published_today": social_published_today,
+                "subscribers": subs_total, "clicks_today": clicks_today,
+                "emails_today": emails_today, "pricewatch": pricewatch,
+                "niches": niches,
+            },
+            "db": {"bytes": db_size, "wal_bytes": db_wal,
+                   "mb": round((db_size + db_wal) / 1048576, 1)},
+            "config": {
+                "smtp": mailer.configured(), "ai": ai.configured(),
+                "inbound": mailer.inbound_configured(),
+                "autosend_hours": autosend_state.get("hours") or _AUTOSEND_HOURS,
+                "social_destination": social_dest,
+                "webhook": bool(_SOCIAL_WEBHOOK or _get_setting("social.webhook")),
+            },
+            "threads": threads,
+            "issues": issues,
+        }
+
+    def _system_api(self):
+        self._beat_http()
+        return self._send(200, self._system_payload())
+
+    def _beat_http(self):
+        _beat("http", True)
+
+    def _admin_system(self):
+        rep = self._system_payload()
+        cards = "".join(
+            '<div class="stat-tile st-%s"><b>%s</b><span>%s</span>%s</div>'
+            % (h.get("status"), h.get("status").upper(), h.get("label"),
+               ('<i>%s</i>' % seo._clean(h.get("detail")) if h.get("detail") else ""))
+            for h in rep["completed"])
+        sched = "".join(
+            '<tr><td>%s</td><td>%s</td><td>%s</td>'
+            '<td class="ct">%s</td><td class="ct">%s</td></tr>'
+            % (seo._clean(r["label"]), r["status"].upper(),
+               r["cycle"], r.get("next") or "—", r.get("last") or "—")
+            for r in rep["schedule"]) or "<tr><td colspan='5'>No schedulers.</td></tr>"
+        q = rep["queues"]
+        queue_tiles = (
+            '<div class="stat-tile"><b>%d</b><span>Outbox due</span></div>'
+            '<div class="stat-tile"><b>%d</b><span>Outbox sending</span></div>'
+            '<div class="stat-tile"><b>%d</b><span>Outbox stuck</span></div>'
+            '<div class="stat-tile"><b>%d</b><span>Social scheduled</span></div>'
+            '<div class="stat-tile"><b>%d</b><span>Social publishing</span></div>'
+            '<div class="stat-tile"><b>%d</b><span>Social stuck</span></div>'
+            '<div class="stat-tile"><b>%d</b><span>Published today</span></div>'
+            '<div class="stat-tile"><b>%d</b><span>Subscribers live</span></div>'
+            '<div class="stat-tile"><b>%d</b><span>Clicks today</span></div>'
+            '<div class="stat-tile"><b>%d</b><span>Emails today</span></div>'
+            '<div class="stat-tile"><b>%d</b><span>Price watches</span></div>'
+            '<div class="stat-tile"><b>%d</b><span>Niches</span></div>'
+            % (q.get("outbox_scheduled", 0), q.get("outbox_sending", 0),
+               q.get("outbox_stuck", 0), q.get("social_scheduled", 0),
+               q.get("social_publishing", 0), q.get("social_stuck", 0),
+               q.get("social_published_today", 0), q.get("subscribers", 0),
+               q.get("clicks_today", 0), q.get("emails_today", 0),
+               q.get("pricewatch", 0), q.get("niches", 0)))
+        issues_html = "".join('<li class="bad">%s</li>' % seo._clean(i)
+                              for i in rep["issues"]) or \
+            '<li class="good">All systems nominal.</li>'
+        qb = rep.get("db", {})
+        cfg = rep.get("config", {})
+        cfg_rows = (
+            '<tr><td>SMTP</td><td class="%s">%s</td></tr>'
+            '<tr><td>AI copy</td><td class="%s">%s</td></tr>'
+            '<tr><td>Email inbound</td><td class="%s">%s</td></tr>'
+            '<tr><td>Social destination</td><td>%s%s</td></tr>'
+            '<tr><td>Sequence hours</td><td>%s UTC</td></tr>'
+            '<tr><td>DB size</td><td>%s MB (+%s WAL)</td></tr>'
+            % ("yes" if cfg.get("smtp") else "no",
+               "configured" if cfg.get("smtp") else "NOT configured — sends refused",
+               "yes" if cfg.get("ai") else "no",
+               "configured" if cfg.get("ai") else "templates only",
+               "yes" if cfg.get("inbound") else "no",
+               "IMAP polling" if cfg.get("inbound") else "replies likely lost",
+               seo._clean(cfg.get("social_destination") or "none"),
+               (" (webhook set)" if cfg.get("webhook") else ""),
+               ",".join(str(h) for h in (cfg.get("autosend_hours") or [])) or "off",
+               qb.get("mb", 0), qb.get("wal_bytes", 0)))
+        thr_rows = "".join(
+            '<tr><td>%s</td><td class="%s">%s</td><td class="ct">%s</td></tr>'
+            % (seo._clean(t["name"] or "unnamed"),
+               "yes" if t["alive"] else "no",
+               "alive" if t["alive"] else "dead",
+               "daemon" if t["daemon"] else "foreground")
+            for t in rep["threads"]) or "<tr><td colspan='3'>None</td></tr>"
+        body = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>System console — pstore</title><link rel="stylesheet" href="/style.css">
+<meta name="robots" content="noindex,nofollow">
+<style>
+table{{width:100%;border-collapse:collapse;margin-top:8px}}td,th{{text-align:left;padding:6px 8px;
+border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
+.stat-tile{{position:relative}}
+.stat-tile i{{display:block;font-style:normal;font-size:11px;opacity:.8;margin-top:3px}}
+.st-ok b{{color:var(--g,#2e8b57)}} .st-error{{border:2px solid #c00}}
+.st-error b{{color:#c00}} .st-stale{{border:2px solid #e67e22}}
+.st-stale b{{color:#e67e22}} .st-disabled{{opacity:.55}} .st-idle{{opacity:.55}}
+ul.issues{{list-style:none;padding:0;margin:8px 0 0}}
+ul.issues li{{padding:8px 10px;border-radius:6px;font-size:13px;margin-bottom:6px}}
+ul.issues li.bad{{background:#fbeceb;border:1px solid #e3a9a5;color:#8b1a11}}
+ul.issues li.good{{background:#eaf7ee;border:1px solid #bfe6cb;color:#1c5f33}}
+td.yes{{color:#2e8b57}} td.no{{color:#c00;font-weight:600}}
+#uptime{{font-weight:600}}
+@media(max-width:640px){{.hero h1{{font-size:24px}}td,th{{font-size:12px;padding:5px 6px}}}}
+</style></head><body>
+<header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
+<div class="hero"><h1>System <span>console.</span></h1>
+<p class="tagline">Every automation, its schedule and its queue — live. <span id="stamp"></span>
+&middot; up <b id="uptime"></b> &middot; pid <span id="pid"></span></p></div>
+{self._admin_nav('system')}</header>
+<main>
+<section class="card"><h2>❤️ Automation health</h2>
+<p class="hint">Each background worker beats after every tick; a beat older than ~3
+cycles turns <b style="color:#e67e22">STALE</b>, a failing tick flips the card
+<b style="color:#c00">ERROR</b> with its last error, and workers that never started
+stay <b>IDLE</b>. Redrawn automatically every 4s.</p>
+<div class="stat-tiles" id="health">{cards}</div></section>
+<section class="card"><h2>🌀 Issues to look at</h2><ul class="issues" id="issues">{issues_html}</ul></section>
+<section class="card"><h2>🕐 Scheduled automation</h2>
+<div class="table-wrap"><table><thead><tr><th>Task</th><th>State</th><th>Cycle</th>
+<th class="ct">Next run</th><th class="ct">Last beat</th></tr></thead>
+<tbody id="sched">{sched}</tbody></table></div></section>
+<section class="card"><h2>🗃 Queues &amp; counters</h2>
+<div class="stat-tiles" id="queues">{queue_tiles}</div></section>
+<section class="card"><h2>🧩 Config</h2>
+<div class="table-wrap"><table><tbody>{cfg_rows}</tbody></table></div></section>
+<section class="card"><h2>🧵 Background threads</h2>
+<div class="table-wrap"><table><thead><tr><th>Thread</th><th>State</th><th class="ct">Kind</th></tr>
+</thead><tbody>{thr_rows}</tbody></table></div></section>
+<script>
+async function tick(){{
+  try{{
+    var d = await (await fetch('/api/system')).json();
+    if(!d || !d.ok) return;
+    document.getElementById('stamp').textContent = 'updated ' + (d.generated_at||'');
+    var up = d.uptime_s||0, h=Math.floor(up/3600), m=Math.floor(up%3600/60), s=up%60;
+    document.getElementById('uptime').textContent = h+'h '+m+'m '+s+'s';
+    document.getElementById('pid').textContent = d.pid;
+    var h2='', i2='';
+    (d.completed||[]).forEach(function(x){{
+      h2+='<div class="stat-tile st-'+x.status+'"><b>'+x.status.toUpperCase()+'</b><span>'+
+        x.label+'</span>'+(x.detail?'<i>'+x.detail+'</i>':'')+'</div>';
+      if(x.status==='error'||x.status==='stale')
+        i2+='<li class="bad">'+x.label+': '+x.status+
+            (x.detail?' — '+x.detail:'')+'</li>';
+    }});
+    if(i2){{
+      var need=(d.issues||[]).slice();
+      need.unshift(''); document.getElementById('issues').innerHTML = need.join('');
+      document.getElementById('issues').insertAdjacentHTML('afterbegin', i2);
+    }} else {{
+      document.getElementById('issues').innerHTML =
+        (d.issues||[]).map(function(x){{return '<li class="bad">'+x+'</li>';}}).join('')||
+        '<li class="good">All systems nominal.</li>';
+    }}
+    var s2='';
+    (d.schedule||[]).forEach(function(x){{
+      s2+='<tr><td>'+x.label+'</td><td>'+x.status.toUpperCase()+'</td><td>'+
+        x.cycle+'</td><td class="ct">'+(x.next||'—')+'</td><td class="ct">'+
+        (x.last||'—')+'</td></tr>';
+    }});
+    document.getElementById('sched').innerHTML = s2;
+  }}catch(e){{document.getElementById('stamp').textContent='⚠ live refresh failed: '+e;}}
+}}
+tick(); setInterval(tick, 4000);
+</script>
+</main>
+<footer><p>Everything shown here is live state from the running process and its
+database — no log parsing. If a card stays STALE, the worker has stopped beating.</p></footer>
+</body></html>"""
+        return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
+
     # ------------------------------------------------------------------ price drops
     def _price_store(self):
         """PriceStore rooted next to the active sqlite DB so tests stay hermit
@@ -11110,6 +11484,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             "total": len(rows), "drops": result.get("drops") or [],
             "last_run": _dt.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
             "error": error}))
+        _beat("pricedrop", ok=not error, err=error)
 
     def _pricedrop_run(self):
         """Re-scrape current prices for every ranked ASIN and flag real drops
@@ -13612,8 +13987,9 @@ def _inbox_loop():
         time.sleep(60)
         try:
             _inbox_tick()
-        except Exception:
-            pass
+            _beat("inbox", True)
+        except Exception as exc:
+            _beat("inbox", False, str(exc))
 
 
 def _autosend_tick():
@@ -13666,9 +14042,11 @@ def _autosend_tick():
 def _autosend_loop():
     while True:
         try:
-            _autosend_tick()
-        except Exception:
-            pass
+            res = _autosend_tick()
+            _beat("autosend", ok=not str(res).startswith("error"),
+                  err=str(res) if str(res).startswith("error") else "")
+        except Exception as exc:
+            _beat("autosend", False, str(exc))
         time.sleep(1800)  # check twice hourly so transient misses still catch the slot
 
 
@@ -13740,8 +14118,9 @@ def _outbox_loop():
         try:
             _recover_outbox_stuck()
             _fire_outbox_rows()
-        except Exception:
-            pass
+            _beat("outbox", True)
+        except Exception as exc:
+            _beat("outbox", False, str(exc))
 
 
 def main():
