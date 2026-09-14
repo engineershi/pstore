@@ -20,6 +20,58 @@
   /* Affiliate tag the server rendered into this page (paid/organic split). */
   var utmTag = main ? main.getAttribute("data-tag") || "" : "";
 
+  /* ---- multi-market switcher (PSTORE_MARKETS > 1): bounce every Amazon
+     link on the page to the chosen marketplace host + its affiliate tag.
+     The server renders the enabled {market: {host, tag}} map; we remember
+     each visitor's choice and highlight the active market. ---- */
+  var mktSwitcher = document.querySelector(".market-switch");
+  var marketMap = null;
+  if (mktSwitcher) {
+    try {
+      marketMap = JSON.parse(mktSwitcher.getAttribute("data-markets") || "{}");
+      if (!marketMap || typeof marketMap !== "object") marketMap = null;
+    } catch (e) { marketMap = null; }
+  }
+  function marketPref() {
+    try { return localStorage.getItem("pstore_market") || ""; } catch (e) { return ""; }
+  }
+  function rewriteAmazonLinks(mkt) {
+    if (!marketMap || !marketMap[mkt]) return;
+    try { localStorage.setItem("pstore_market", mkt); } catch (e) {}
+    var target = marketMap[mkt];
+    document.querySelectorAll('a[href*="amazon."]').forEach(function (a) {
+      var href = a.getAttribute("href") || "";
+      var m = href.match(/\/(?:dp|gp\/product|gp\/aw\/d)\/([A-Z0-9]{10})/i);
+      if (!m) return;
+      try {
+        var u = new URL(href, location.href);
+        u.hostname = target.host;
+        if (target.tag) u.searchParams.set("tag", target.tag);
+        else u.searchParams.delete("tag");
+        a.href = u.toString();
+      } catch (e) {}
+    });
+    if (mktSwitcher) {
+      mktSwitcher.setAttribute("data-active", mkt);
+      mktSwitcher.querySelectorAll("button[data-mkt]").forEach(function (b) {
+        b.classList.toggle("on", b.getAttribute("data-mkt") === mkt);
+      });
+    }
+  }
+  if (mktSwitcher && marketMap) {
+    var saved = marketPref();
+    var active = mktSwitcher.getAttribute("data-active") || "";
+    if (saved && marketMap[saved] && saved !== active) rewriteAmazonLinks(saved);
+    else if (saved === active && saved && saved !== (marketMap[active] ? active : "")) {
+      /* already-remembered market that is also current — keep links clean */
+    }
+    mktSwitcher.addEventListener("click", function (ev) {
+      var b = ev.target.closest ? ev.target.closest("button[data-mkt]") : null;
+      if (!b || !marketMap[b.getAttribute("data-mkt")]) return;
+      rewriteAmazonLinks(b.getAttribute("data-mkt"));
+    });
+  }
+
   /* ---- email opt-in: <form class="courier">, POST /subscribe, JSON ---- */
   document.addEventListener("submit", function (ev) {
     var form = ev.target;

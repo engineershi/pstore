@@ -229,7 +229,8 @@ def _product_graph(items, page_url=None, slug=None):
 def landing_product_jsonld(pick, page_url, image_url=""):
     """Single-Product graph for the /lp/<slug> sales page (the top pick, so the
     page stays "one-product focused" per Google merchant guidelines). Nulls and
-    partial ratings are omitted rather than serialized."""
+    partial ratings are omitted rather than serialized. Also carries the site's
+    trailing BreadcrumbList in the same graph."""
     if not pick or not pick.get("title"):
         return None
     node = {
@@ -262,7 +263,17 @@ def landing_product_jsonld(pick, page_url, image_url=""):
             "bestRating": 5,
             "worstRating": 1,
         }
-    return {"@context": "https://schema.org", "@graph": [node]}
+    graph = [node]
+    if page_url:
+        kw = (pick.get("keyword") or "").strip()
+        bcrumb = editorial.breadcrumb_jsonld(kw or pick.get("slug") or "pick")
+        bcrumb["itemListElement"].append({
+            "@type": "ListItem",
+            "position": len(bcrumb["itemListElement"]) + 1,
+            "name": pick.get("title", "")[:120],
+            "item": page_url})
+        graph.append(bcrumb)
+    return {"@context": "https://schema.org", "@graph": graph}
 
 
 def _head(title, desc, canonical, path, jsonld=None, og_image=None, noindex=False):
@@ -493,6 +504,29 @@ def courier_script():
     return '<script src="/courier.js" defer></script>'.encode("utf-8")
 
 
+_MARKET_LABELS = {"com": "US", "co.uk": "UK", "de": "DE", "ca": "CA",
+                  "co.jp": "JP", "com.au": "AU", "in": "IN"}
+
+
+def market_switcher_html():
+    """Small client-side marketplace switcher shown only when more than one
+    market is enabled (PSTORE_MARKETS). Every button bounces the page's
+    Amazon links to that market's host + derived affiliate tag; courier.js
+    applies the choice and remembers it per visitor. Empty string otherwise."""
+    blob = amazon.markets_blob()
+    if len(blob) < 2:
+        return ""
+    opts = "".join(
+        '<button type="button" data-mkt="%s"%s>%s</button>'
+        % (k, " class=\"on\"" if k == amazon.MARKET else "",
+           _MARKET_LABELS.get(k, k))
+        for k in ("com", "co.uk", "de", "ca", "co.jp", "com.au", "in")
+        if k in blob)
+    return ('<span class="market-switch" data-markets="%s" data-active="%s">'
+            '<b>Shop:</b>%s</span>'
+            % (_clean(json.dumps(blob)), _clean(amazon.MARKET), opts))
+
+
 def render_landing(saved_niches):
     """Storefront-style home: value prop, how-we-pick, niche index, FAQ."""
     jsonld = {
@@ -524,8 +558,9 @@ def render_landing(saved_niches):
 <a class="chip" href="#method">🔬 How we pick</a>
 <a class="chip" href="#notify">✉️ Stay updated</a>
 <a class="chip" href="#faq">❓ FAQ</a>
- <a class="chip" href="/blog">📝 Blog</a>
- </nav></header>
+<a class="chip" href="/blog">📝 Blog</a>
+ <a class="chip" href="/stories">🎞 Stories</a>
+  </nav>{market_switcher_html()}</header>
 <main data-niche="home" data-source="home" data-keyword="best amazon niche picks" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
 <section class="card hero-home" id="top-picks">
   <h1 style="font-size:30px;line-height:1.15">Find the best <span style="color:var(--accent)">Amazon picks</span>, by niche — before you scroll once.</h1>
@@ -621,7 +656,7 @@ def render_niche(keyword, niche, saved_niches=None, ab_headline=None, ab_variant
     style_slot = (style_pack or {}).get("css") or ""
     body = f"""
 <header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
-<nav><a href="/">🏠 Home</a><a href="/about">About</a><a href="/disclosure">Disclosure</a><a href="/lp/{_clean(_slugify(keyword))}">One-pager →</a></nav></header>
+<nav><a href="/">🏠 Home</a><a href="/about">About</a><a href="/disclosure">Disclosure</a><a href="/lp/{_clean(_slugify(keyword))}">One-pager →</a><a href="/stories/{_clean(_slugify(keyword))}">Story</a></nav>{market_switcher_html()}</header>
 {banner_slot}{style_slot}
 <main data-niche="{_clean(_slugify(keyword))}" data-source="niche" data-keyword="{_clean(keyword)}"{ab_attr} data-tag="{_clean(amazon.AFFILIATE_TAG)}">
 <div class="card">
@@ -697,8 +732,11 @@ def render_topic(term, parent_keyword, niche, parent_slug, style_pack=None):
     if il:
         graph.append(il)
     graph.extend(_product_graph(items, BASE_URL + canonical, term_slug))
-    if editorial.best_pick(items):
-        graph.append(editorial.breadcrumb_jsonld(term or parent_keyword))
+    best = editorial.best_pick(items)
+    if best:
+        graph.append(editorial.faq_jsonld(term or parent_keyword, best))
+        graph.append(editorial.breadcrumb_jsonld(term or parent_keyword,
+                                                 parent_keyword))
     graph.append(_org_jsonld())
     jsonld = {"@context": "https://schema.org", "@graph": graph}
     og = BASE_URL + "/og/" + (term_slug or _slugify(parent_keyword)) + ".png"
@@ -711,7 +749,7 @@ def render_topic(term, parent_keyword, niche, parent_slug, style_pack=None):
     style_slot = (style_pack or {}).get("css") or ""
     body = f"""
 <header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
-<nav><a href="/">🏠 Home</a><a href="{_clean(hub)}">{_clean(parent_keyword.title())}: hub →</a><a href="/disclosure">Disclosure</a></nav></header>
+<nav><a href="/">🏠 Home</a><a href="{_clean(hub)}">{_clean(parent_keyword.title())}: hub →</a><a href="/disclosure">Disclosure</a><a href="/stories/{_clean(_slugify(parent_keyword))}">Story</a></nav>{market_switcher_html()}</header>
 {banner_slot}{style_slot}
 <main data-niche="{_clean(term_slug)}" data-source="topic" data-keyword="{_clean(term or parent_keyword)}" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
 <div class="card">
@@ -735,6 +773,138 @@ def render_topic(term, parent_keyword, niche, parent_slug, style_pack=None):
     return head + body + _footer()
 
 
+def _num_price(item):
+    """Numeric price of an item, or None when it isn't a positive number."""
+    p = (item or {}).get("price")
+    if isinstance(p, (int, float)):
+        return p if p > 0 else None
+    try:
+        f = float(p)
+        return f if f > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def render_priceband(amount, parent_keyword, parent_slug, items,
+                     currency=None):
+    """/n/<parent>/under-<amount> — the parent niche's ranked set reframed on a
+    hard budget: only items priced at or below $<amount>. Shoppers searching
+    "<kw> under $X" get a tight, indexable shortlist instead of the full guide.
+    Shares the niche's live data; noindex when nothing fits the band."""
+    amount = int(amount)
+    band = [it for it in (items or [])
+            if (_num_price(it) is not None and _num_price(it) <= amount)]
+    term_label = "%s under $%s" % (parent_keyword, amount)
+    canonical = "/n/%s/under-%d" % (parent_slug, amount)
+    title = "Best %s under $%s — ranked from live Amazon data" \
+        % (parent_keyword, "{:,}".format(amount))
+    desc = (f"Looking for the best {parent_keyword} under ${amount:,}? "
+            f"Same live scoring as the full guide — rating, review volume, "
+            f"price — now filtered to what actually fits your budget.")
+    graph = []
+    il = editorial.item_list_jsonld(band, term_label)
+    if il:
+        graph.append(il)
+    graph.extend(_product_graph(band, BASE_URL + canonical, "under-%d" % amount))
+    best = editorial.best_pick(band)
+    if best:
+        graph.append(editorial.faq_jsonld(term_label, best))
+        graph.append(editorial.breadcrumb_jsonld(term_label, parent_keyword))
+    graph.append(_org_jsonld())
+    jsonld = {"@context": "https://schema.org", "@graph": graph}
+    og = BASE_URL + "/og/" + _slugify(parent_keyword) + ".png"
+    head = _head(title, desc, canonical, canonical, jsonld=jsonld, og_image=og,
+                 noindex=not bool(band))
+    ranked = "".join(editorial.pick_html(term_label, it, idx, band)
+                     for idx, it in enumerate(score_order(band)))
+    hub = "/n/%s" % (parent_slug or _slugify(parent_keyword))
+    body = f"""
+<header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
+<nav><a href="/">🏠 Home</a><a href="{_clean(hub)}">{_clean(parent_keyword.title())}: full guide →</a><a href="/disclosure">Disclosure</a></nav>{market_switcher_html()}</header>
+<main data-niche="{_clean(_slugify(parent_keyword))}" data-source="topic" data-keyword="{_clean(term_label)}" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
+<div class="card">
+  {editorial.breadcrumbs_html(term_label)}
+  <h1>Best {_clean(parent_keyword)} under ${amount:,}</h1>
+  <p class="lede">Your budget said “${amount:,}” — so this list skips everything pricier and keeps
+  the {_clean(parent_keyword)} picks that score highest within it. Live prices: a pick that climbs past the
+  cap gets replaced the moment the data refreshes.</p>
+  {editorial.trust_block_html()}
+  <h2>Top {_clean(parent_keyword)} picks under ${amount:,}</h2>
+  {ranked}
+  {editorial.upsell_block(band, term_label)}
+  {editorial.comparison_html(band) if band else ""}
+  {editorial.methodology_html()}
+  <p class="hint">This is a budget slice of our <a href="{_clean(hub)}">full {_clean(parent_keyword)} guide</a>.</p>
+</div>
+{optin_html(term_label, "topic")}
+<script src="/courier.js" defer></script>
+<script src="/table-flow.js" defer></script>
+</main>
+""".encode("utf-8")
+    return head + body + _footer()
+
+
+def render_vs(title_a, title_b, a_asin, b_asin, parent_keyword, parent_slug,
+              items, currency=None):
+    """/n/<parent>/<a>-vs-<b> — a head-to-head between the two ranked picks.
+    Both candidates are compared outright (what to choose, and when not to),
+    so "<a> or <b>" searches land on a page that actually answers the split.
+    Resolves the two products from the current niche data by ASIN."""
+    by_asin = {}
+    for it in (items or []):
+        a = (it.get("asin") or "").strip().upper()
+        if a:
+            by_asin[a] = it
+    cand = [by_asin[a_asin], by_asin[b_asin]] \
+        if a_asin in by_asin and b_asin in by_asin else []
+    term_label = "%s vs %s" % (title_a or a_asin, title_b or b_asin)
+    canonical = "/n/%s/%s-vs-%s" % (parent_slug, _slugify(title_a or a_asin),
+                                    _slugify(title_b or b_asin))
+    title = "%s vs %s — which %s wins" % (title_a or a_asin,
+                                          title_b or b_asin, parent_keyword)
+    desc = (f"{title_a} or {title_b} for {parent_keyword}? Head-to-head verdict "
+            f"from live Amazon price, rating and review data.")
+    graph = []
+    il = editorial.item_list_jsonld(cand, term_label)
+    if il:
+        graph.append(il)
+    graph.extend(_product_graph(cand, BASE_URL + canonical, "vs"))
+    best = editorial.best_pick(cand)
+    if best:
+        graph.append(editorial.faq_jsonld(term_label, best))
+        graph.append(editorial.breadcrumb_jsonld(term_label, parent_keyword))
+    graph.append(_org_jsonld())
+    jsonld = {"@context": "https://schema.org", "@graph": graph}
+    og = BASE_URL + "/og/" + _slugify(parent_keyword) + ".png"
+    head = _head(title, desc, canonical, canonical, jsonld=jsonld, og_image=og,
+                 noindex=not bool(cand))
+    ranked = "".join(editorial.pick_html(term_label, it, idx, cand)
+                     for idx, it in enumerate(score_order(cand)))
+    hub = "/n/%s" % (parent_slug or _slugify(parent_keyword))
+    body = f"""
+<header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
+<nav><a href="/">🏠 Home</a><a href="{_clean(hub)}">{_clean(parent_keyword.title())}: full guide →</a><a href="/disclosure">Disclosure</a></nav>{market_switcher_html()}</header>
+<main data-niche="{_clean(_slugify(parent_keyword))}" data-source="topic" data-keyword="{_clean(term_label)}" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
+<div class="card">
+  {editorial.breadcrumbs_html(term_label)}
+  <h1>{_clean(title_a or a_asin)} vs {_clean(title_b or b_asin)}</h1>
+  <p class="lede">Choosing between two good {_clean(parent_keyword)} picks? Here's the head-to-head
+  from our live data — the winner, and exactly who the runner-up is still the right answer for.</p>
+  {editorial.trust_block_html()}
+  <h2>The verdict</h2>
+  {ranked}
+  {editorial.comparison_html(cand) if cand else ""}
+  {editorial.methodology_html()}
+  <p class="hint">Part of our <a href="{_clean(hub)}">full {_clean(parent_keyword)} guide</a>.</p>
+</div>
+{optin_html(term_label, "topic")}
+<script src="/courier.js" defer></script>
+<script src="/table-flow.js" defer></script>
+</main>
+""".encode("utf-8")
+    return head + body + _footer()
+
+
 def indexable_urls(saved_niches, base_url=None, saved_topics=None):
     """Absolute URLs that belong in the sitemap + IndexNow submissions.
 
@@ -742,12 +912,13 @@ def indexable_urls(saved_niches, base_url=None, saved_topics=None):
     saved_topics: iterable of (parent_slug, slug) for built long-tail pages.
     """
     base = (base_url or BASE_URL).rstrip("/")
-    urls = [base + "/", base + "/blog"]
+    urls = [base + "/", base + "/blog", base + "/stories"]
     for page in STATIC_PAGES:
         urls.append(base + "/" + page)
     for n in (saved_niches or []):
         urls.append(base + "/n/" + _slugify(n["keyword"]))
         urls.append(base + "/lp/" + _slugify(n["keyword"]))
+        urls.append(base + "/stories/" + _slugify(n["keyword"]))
     for p_slug, t_slug in (saved_topics or []):
         urls.append("%s/n/%s/%s" % (base, p_slug, t_slug))
     return urls
@@ -805,6 +976,159 @@ def render_blog(saved_niches):
   live price, rating and review signals, honest methodology. No filler.</p>
 </section>
 {cards}
+</main>
+""".encode("utf-8")
+    return head + body + _footer()
+
+
+def story_cards(keyword, niche, base_url=None):
+    """Slides for one niche's story reel: a cover card + one card per ranked
+    product (image, live price, honest take, tagged link). Shared by the
+    /stories/<slug> page and the /stories gallery so both stay consistent."""
+    items = ((niche.get("products") or []) if isinstance(niche, dict)
+             else list(niche or []))
+    items = score_order(items) if items else []
+    base = (base_url or BASE_URL).rstrip("/")
+    slides = [{
+        "kind": "cover",
+        "title": "Best %s" % keyword,
+        "sub": "Ranked from live Amazon price, rating + review data.",
+        "img": base + "/og/" + _slugify(keyword) + ".png",
+    }]
+    for i, item in enumerate(items, 1):
+        price = item.get("price")
+        have_price = price not in (None, "") and not (
+            isinstance(price, (int, float)) and float(price) <= 0)
+        slides.append({
+            "kind": "product",
+            "position": i,
+            "title": item.get("title") or "pick %d" % i,
+            "stars": item.get("stars"),
+            "reviews": item.get("reviews"),
+            "price": price if have_price else None,
+            "url": item.get("url") or amazon.affiliate_url(item.get("asin") or "") or "",
+            "img": item.get("image") or (base + "/og/" + _slugify(keyword) + ".png"),
+        })
+    return slides
+
+
+def _story_slide_html(slide):
+    if slide.get("kind") == "cover":
+        return ('<section class="story-slide story-cover" style="background-image:linear-gradient(-20deg,#141b31 0%%,#23365c 55%%,#3a5f8f 100%%)">'
+                '<div class="story-inner"><p class="story-kicker">STORIES</p>'
+                '<h1>{}</h1><p class="story-sub">{}</p></div></section>'
+                .format(_clean(slide.get("title", "")),
+                        _clean(slide.get("sub", "") or "")))
+    price = ("%s" % slide["price"]) if slide.get("price") is not None else "check price"
+    rating = ""
+    if slide.get("stars") and slide.get("reviews"):
+        rating = ('<p class="story-rating">%s / 5 from %s reviews</p>'
+                  % (round(float(slide["stars"]), 1),
+                     format(int(slide["reviews"]), ",")))
+    img = (slide.get("img") or "").strip()
+    img_html = ('<img src="%s" alt="%s" loading="lazy">' % (_clean(img),
+                _clean(slide.get("title", "")))) if img else ""
+    url = slide.get("url") or ""
+    cta = ('<a class="story-cta" href="%s" rel="nofollow sponsored noopener">'
+           'See it on Amazon \u2192</a>' % _clean(url)) if url else ""
+    return ('<section class="story-slide">'
+            '<div class="story-img">%s</div>'
+            '<div class="story-inner"><p class="story-rank">Slot %s</p>'
+            '<h2>%s</h2>%s<p class="story-price">%s</p>%s</div></section>'
+            % (img_html, slide.get("position", ""),
+               _clean(slide.get("title", "")), rating,
+               _clean(price), cta))
+
+
+def render_story(niche, keyword=None):
+    """Full-reel /stories/<slug> page: a vertical, swipeable (scroll-snap)
+    story of the niche — the same data as the ranked page, in a format built
+    for thumb-first readers on social and links shared from the /stories reel.
+    Indexable and canonical to itself."""
+    keyword = (keyword or (niche or {}).get("keyword") or "picks").strip()
+    slug = _slugify(keyword)
+    canonical = "/stories/" + slug
+    slides = story_cards(keyword, niche)
+    slides_html = "".join(_story_slide_html(s) for s in slides)
+    desc = "Swipe the %s story: ranked picks from live Amazon price, rating and review data." % keyword
+    jsonld = {"@context": "https://schema.org", "@graph": [
+        {"@type": "ItemList", "name": "Best %s — story" % keyword,
+         "itemListElement": [
+             {"@type": "ListItem", "position": p,
+              "item": {"@type": "Product", "name": s.get("title", "")}}
+             for p, s in enumerate(slides, 1) if s.get("kind") == "product"]},
+        editorial.breadcrumb_jsonld(keyword),
+        _org_jsonld(),
+    ]}
+    head = _head("Best %s — the story" % keyword, desc, canonical, canonical,
+                 jsonld=jsonld,
+                 og_image=BASE_URL + "/og/" + slug + ".png")
+    body = f"""
+<header id="top" class="story-top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
+<nav><a href="/stories">All stories</a><a href="/n/{_clean(slug)}">Full guide \u2192</a></nav></header>
+<main data-niche="{_clean(slug)}" data-source="story" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
+<div class="story-reel">{slides_html}
+{optin_html(keyword, "story", anchor="courier")}</div>
+</main>
+<style>.story-reel{{height:86vh;overflow-y:auto;scroll-snap-type:y proximity;border-radius:18px;margin:6px 0}}
+.story-slide{{min-height:86vh;display:flex;flex-direction:column;justify-content:flex-end;
+scroll-snap-align:start;background:#fff;border-radius:18px;margin-bottom:14px;
+overflow:hidden;padding:66px 22px 24px;box-sizing:border-box;position:relative;
+box-shadow:0 8px 30px rgba(0,0,0,.08)}}
+.story-slide .story-img{{position:absolute;inset:0;background:linear-gradient(180deg,#f3e8ff,#fff)}}
+.story-slide .story-img img{{width:100%;height:100%;object-fit:contain;padding:26px;box-sizing:border-box}}
+.story-slide .story-inner{{position:relative;z-index:2}}
+.story-cover .story-inner{{color:#fff;text-align:center}}
+.story-kicker{{letter-spacing:.3em;font-size:11px;font-weight:800;opacity:.8}}
+.story-cover h1{{font-size:30px;line-height:1.15;margin:8px 0 6px}}
+.story-sub{{opacity:.9;max-width:480px;margin:0 auto;font-size:15px;line-height:1.5}}
+.story-rank{{font-weight:800;color:var(--accent,#2a6fd6);letter-spacing:.1em;font-size:12px}}
+.story-inner h2{{font-size:22px;line-height:1.25;margin:6px 0}}
+.story-rating{{color:#7a6a3c;font-size:14px;margin:0 0 8px}}
+.story-price{{font-size:26px;font-weight:900;margin:8px 0 12px}}
+.story-cta{{display:inline-block;background:#f0a41a;background-image:linear-gradient(180deg,#ffd75e,#f0a41a);
+color:#111;font-weight:800;text-decoration:none;padding:10px 22px;border-radius:999px}}
+.story-slide form.courier{{position:relative;z-index:2;border-radius:16px}}
+.story-top{{margin-bottom:8px}}</style>
+<script src="/courier.js" defer></script>
+<script src="/ui.js" defer></script>
+""".encode("utf-8")
+    return head + body + _footer()
+
+
+def render_stories_gallery(saved_niches):
+    """/stories listing — one reel per saved niche with a real product set."""
+    niches = [n for n in (saved_niches or []) if n.get("products")]
+    desc = "Swipeable stories of every ranked niche — the best picks, by price, rating and review data."
+    jsonld = {"@context": "https://schema.org", "@type": "CollectionPage",
+              "name": "pstore stories", "description": desc,
+              "hasPart": [
+                  {"@type": "WebPage",
+                   "url": BASE_URL + "/stories/" + _slugify(n["keyword"]),
+                   "name": "Best %s — the story" % n["keyword"]}
+                  for n in niches]}
+    head = _head("Stories", desc, "/stories", "/stories", jsonld=jsonld,
+                 noindex=len(niches) == 0, og_image=BASE_URL + "/og/home.png")
+    cards = ""
+    for n in niches:
+        slug = _slugify(n["keyword"])
+        cnt = len(n.get("products") or [])
+        cards += (f'<a class="card story-card" href="/stories/{_clean(slug)}">'
+                  f'<h2>Best {_clean(n["keyword"])} <span class="hint">\u00b7 {cnt} picks</span></h2>'
+                  f'<img src="{_clean(BASE_URL)}/og/{_clean(slug)}.png" alt="{_clean(n["keyword"])}" loading="lazy">'
+                  f'</a>')
+    if not cards:
+        cards = ('<section class="card"><h2>Fresh stories on the way</h2>'
+                 '<p class="hint">We are ranking new niches now — the reel fills up as guides ship. '
+                 '<a href="/">Browse the picks</a>.</p></section>')
+    body = f"""<header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
+<p class="tagline">{_clean(SITE_DESC)}</p>
+<nav><a href="/">🏠 Home</a><a href="/blog">📝 Blog</a><a href="/stories">🎞 Stories</a></nav></header>
+<main data-niche="stories" data-source="stories" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
+<section class="hero-home card"><h1>The <span style="color:var(--accent)">stories</span> reel.</h1>
+<p style="font-size:16px;color:var(--muted);max-width:720px">Every ranked guide as a swipeable story —
+verdict up top, live price per pick, honest takes. Fast to share, easy to read.</p></section>
+<div class="features" style="align-items:stretch">{cards}</div>
 </main>
 """.encode("utf-8")
     return head + body + _footer()

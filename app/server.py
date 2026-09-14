@@ -37,6 +37,7 @@ import ai
 import cms as cms_mod
 import cms_render
 import ebook as ebook_mod
+import editorial
 import earnings
 import indexnow
 import mailer
@@ -1293,6 +1294,107 @@ def _topics_for_rows(parent_slug):
     return existing
 
 
+_PRICE_BAND_LADDER = [25, 30, 40, 50, 75, 100, 150, 200, 300, 500, 1000]
+
+
+def _num_price(item):
+    """Numeric price of an item, or None when it isn't a positive number."""
+    p = (item or {}).get("price")
+    if isinstance(p, (int, float)):
+        return p if p > 0 else None
+    try:
+        f = float(p)
+        return f if f > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _ensure_price_band_topics(niche, amount_cap=2):
+    """Build "Best under $X" topics for a niche from its live price spread.
+    Only bands with >= 2 priced picks and at least one pick above the cap get a
+    page — a band that contains the entire set would not be a real "under $X"
+    answer. Stores plain topics rows so they feed sitemap/indexnow automatically.
+    Returns the new topic dicts (same shape as _build_topic_pages)."""
+    keyword = (niche or {}).get("keyword") or ""
+    if not keyword:
+        return []
+    items = (niche or {}).get("products") or []
+    priced = [(it, _num_price(it)) for it in items]
+    priced = [(it, p) for it, p in priced if p is not None]
+    parent_slug = seo._slugify(keyword)
+    existing = _topics_for_rows(parent_slug)
+    created = []
+    for amt in _PRICE_BAND_LADDER:
+        if len(created) >= amount_cap:
+            break
+        slug = "under-%d" % amt
+        if slug in existing:
+            continue
+        in_band = sum(1 for _it, p in priced if p <= amt)
+        if in_band >= 2 and in_band < len(priced):
+            _insert_topic(parent_slug, "%s under $%d" % (keyword, amt), slug)
+            existing.add(slug)
+            created.append({"term": "%s under $%d" % (keyword, amt),
+                            "slug": slug,
+                            "url": "/n/%s/%s" % (parent_slug, slug)})
+    return created
+
+
+def _ensure_vs_topics(niche, pair_cap=2):
+    """Build "<a> vs <b>" head-to-head topics for a niche from its own ranked
+    picks: the top three products produce the two highest-value matchups
+    (1v2, 1v3). Term rows carry the ASIN pair (`A vs B (@ASA|@BSB)`) so the
+    page resolves both candidates even after a refresh keeps the ASINs.
+    Returns the new topic dicts."""
+    keyword = (niche or {}).get("keyword") or ""
+    if not keyword:
+        return []
+    items = (niche or {}).get("products") or []
+    if len(items) < 2:
+        return []
+    ordered = [it for it, _s in editorial.score_items(items)]
+    top = ordered[:3]
+    if len(top) < 2:
+        return []
+    parent_slug = seo._slugify(keyword)
+    existing = _topics_for_rows(parent_slug)
+    created = []
+
+    def _short(it):
+        words = [w for w in re.split(r"\W+", (it.get("title") or "").lower())
+                 if len(w) >= 3 and w not in ("best", "with", "the", "for")]
+        return " ".join(words[:2]) or (it.get("asin") or "").lower()
+
+    def _label(it):
+        return (it.get("title") or it.get("asin") or "pick")[:90]
+
+    for a, b in [(top[0], top[1]), (top[0], top[2])]:
+        if len(created) >= pair_cap or b is None:
+            break
+        a_asin = str((a or {}).get("asin") or "").strip().upper()
+        b_asin = str((b or {}).get("asin") or "").strip().upper()
+        if not (a_asin and b_asin) or a_asin == b_asin:
+            continue
+        slug = "%s-vs-%s" % (seo._slugify(_short(a)), seo._slugify(_short(b)))
+        if len(slug) < 8 or slug in existing:
+            continue
+        term = "%s vs %s (@%s|@%s)" % (_label(a), _label(b), a_asin, b_asin)
+        _insert_topic(parent_slug, term, slug)
+        existing.add(slug)
+        created.append({"term": term, "slug": slug,
+                        "url": "/n/%s/%s" % (parent_slug, slug)})
+    return created
+
+
+def _insert_topic(parent_slug, term, slug):
+    with _lock:
+        conn = _db()
+        conn.execute("INSERT OR IGNORE INTO topics (parent_slug, term, slug) "
+                     "VALUES (?,?,?)", (parent_slug, term, slug))
+        conn.commit()
+        conn.close()
+
+
 def _send_welcome_email(subscriber_id, keyword):
     """Best-effort immediate email #1 for a just-opted-in lead (welcome + the
     niche's lead-magnet PDF). Runs on a background thread from /subscribe so the
@@ -1581,6 +1683,23 @@ def _content_run(now=None, limit=None):
                     built = []
                 summary["pages_built"] += len(built)
                 pages_left -= len(built)
+            # Budget-slice + head-to-head pages come free (no scraping): derive
+            # them from the niche's own live product set before spending anything
+            # on autosuggest mining, so long-tail intent is covered 2x cheaper.
+            if pages_left > 0:
+                try:
+                    banded = _ensure_price_band_topics(n)
+                except Exception:
+                    banded = []
+                summary["pages_built"] += len(banded)
+                pages_left -= len(banded)
+            if pages_left > 0:
+                try:
+                    vspair = _ensure_vs_topics(n)
+                except Exception:
+                    vspair = []
+                summary["pages_built"] += len(vspair)
+                pages_left -= len(vspair)
             if kits_left > 0 and n["products"]:
                 try:
                     for ts in sorted(_topics_for_rows(slug)):
@@ -4253,6 +4372,11 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._niche_page(path, q)
             if path.startswith("/lp/"):
                 return self._landing_page(path)
+            if path == "/stories":
+                return self._stories_gallery()
+            st = re.match(r"^/stories/([a-z0-9-]+)$", path)
+            if st:
+                return self._story_page(st.group(1))
             post = re.match(r"^/social/([a-z0-9-]+)/([A-Za-z0-9]+)$", path)
             if post:
                 return self._social_post_page(post.group(1), post.group(2))
@@ -5091,7 +5215,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         # previous failed crawls is re-attempted on the next crawl pass.
         from datetime import datetime, timezone
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        entries = [("/", today), ("/blog", today)]
+        entries = [("/", today), ("/blog", today), ("/stories", today)]
         for page in seo.STATIC_PAGES:
             entries.append(("/" + page, "2026-08-28"))
         with _lock:
@@ -5113,6 +5237,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             lm = (r["updated_at"] or r["created_at"] or "")[:10] or "2026-08-28"
             entries.append((f"/n/{kw}", lm))
             entries.append((f"/lp/{kw}", lm))
+            entries.append((f"/stories/{kw}", lm))
             live.add(kw)
         with _lock:
             conn = _db()
@@ -5469,8 +5594,29 @@ document.addEventListener("click", function (e) {{
                 if cached is not None:
                     return self._send_cached(cached, "text/html; charset=utf-8")
                 tpl_pack = template.for_page(niche["keyword"], parent_slug)
-                res = seo.render_topic(term, niche["keyword"], niche, parent_slug,
-                                       style_pack=tpl_pack)
+                # Budget-band page: /n/<parent>/under-<amt>  (detectable pattern)
+                band_m = re.match(r'^under-(\d+)$', term_slug)
+                if band_m:
+                    res = seo.render_priceband(int(band_m.group(1)),
+                                               niche["keyword"], parent_slug,
+                                               niche.get("products") or [])
+                else:
+                    vs_m = re.search(r'\(@([A-Z0-9]{10})\|@([A-Z0-9]{10})\)',
+                                     term)
+                    if vs_m:
+                        a_lbl, b_lbl = term.split(" vs ", 1) \
+                            if " vs " in term else (term, "")
+                        a_lbl = a_lbl.split(" (@")[0][:90]
+                        b_lbl = b_lbl.split(" (@")[0][:90]
+                        res = seo.render_vs(a_lbl, b_lbl,
+                                            vs_m.group(1), vs_m.group(2),
+                                            niche["keyword"], parent_slug,
+                                            niche.get("products") or [])
+                    else:
+                        res = None
+                if res is None:
+                    res = seo.render_topic(term, niche["keyword"], niche,
+                                           parent_slug, style_pack=tpl_pack)
                 if amazon.CACHE_TTL > 0:
                     _render_cache_put(key, res, RENDER_CACHE_DEFAULT_TTL)
                     return self._send_cached(res, "text/html; charset=utf-8")
@@ -5593,6 +5739,28 @@ document.addEventListener("click", function (e) {{
             except Exception:
                 continue
         return self._send(404, b"<html><body><p>Landing page not found.</p></body></html>",
+                          "text/html; charset=utf-8")
+
+    def _stories_gallery(self):
+        """/stories — index of every niche's swipeable story reel."""
+        return self._send(200, seo.render_stories_gallery(self._all_niches()),
+                          "text/html; charset=utf-8")
+
+    def _story_page(self, slug):
+        """/stories/<slug> — one niche's full story reel. Content-keyed cache
+        like /n/ pages; product-less slugs render the noindex placeholder."""
+        for n in self._all_niches():
+            if slug == seo._slugify(n["keyword"]) and n.get("products"):
+                key = ("/story/", slug, seo._variant_key(n))
+                if amazon.CACHE_TTL > 0:
+                    cached = _render_cache_get(key)
+                    if cached is not None:
+                        return self._send_cached(cached, "text/html; charset=utf-8")
+                    res = seo.render_story(n)
+                    _render_cache_put(key, res, RENDER_CACHE_DEFAULT_TTL)
+                    return self._send_cached(res, "text/html; charset=utf-8")
+                return self._send(200, seo.render_story(n), "text/html; charset=utf-8")
+        return self._send(404, seo.render_story({"keyword": slug, "products": []}),
                           "text/html; charset=utf-8")
 
     def _cms_landing_html(self, niche):
@@ -11288,7 +11456,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                     *sorted(live_slugs))
             else:
                 topics_live = 0
-            sitemap_entries = (2 + len(seo.STATIC_PAGES) + 2 * indexable_niches
+            sitemap_entries = (3 + len(seo.STATIC_PAGES) + 3 * indexable_niches
                                + topics_live)
             conn.close()
 

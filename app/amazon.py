@@ -147,6 +147,50 @@ def set_tag(tag):
 AFFILIATE_TAG = ""
 
 
+# --------------------------------------------------------- multi-market support
+_TAG_SUFFIX_RE = re.compile(r"-\d{2}$")
+
+
+def enabled_markets():
+    """Markets the site serves links for, from the PSTORE_MARKETS env (comma
+    separated; defaults to the single active market). Each entry must exist in
+    _MARKETPLACES. Returns a list of market keys in declaration order."""
+    raw = (os.environ.get("PSTORE_MARKETS") or "").strip()
+    keys = [k.strip().lower() for k in raw.split(",") if k.strip()]
+    keys = [k for k in keys if k in _MARKETPLACES]
+    if not keys:
+        return [MARKET]
+    # the engine's own market always stays present, first
+    return [MARKET] + [k for k in keys if k != MARKET]
+
+
+def market_tag(market):
+    """Affiliate tag for another marketplace, derived from the configured tag's
+    root: same tag, market-specific suffix (`-20` US, `-21` UK/DE, `-22`
+    JP/AU). Empty when no tag is configured at all."""
+    root = (_TAG_SUFFIX_RE.sub("", AFFILIATE_TAG or "").strip() or AFFILIATE_TAG or "")
+    if not root:
+        return ""
+    info = _MARKETPLACES.get(market) or _MARKETPLACES[DEFAULT_MARKET]
+    return "%s-%s" % (root, info["tag_suffix"])
+
+
+def market_target(market):
+    """(host, tag) pair for the client-side market switcher."""
+    info = _MARKETPLACES.get(market) or _MARKETPLACES[DEFAULT_MARKET]
+    return info["host"], market_tag(market)
+
+
+def markets_blob():
+    """JSON-serializable map {market: {"host": …, "tag": …}} for the small
+    market switcher embedded on public pages. Empty map -> no switcher."""
+    blob = {}
+    for m in enabled_markets():
+        host, tag = market_target(m)
+        blob[m] = {"host": host, "tag": tag}
+    return blob
+
+
 def _urlopen(req, timeout):
     return urllib.request.urlopen(req, timeout=timeout)
 

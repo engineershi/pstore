@@ -19,6 +19,7 @@ from http.server import ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import amazon
+import editorial
 import indexnow
 import io
 import security
@@ -588,6 +589,247 @@ class TestSemSeoSite(unittest.TestCase):
 def urllib_quote(s):
     import urllib.parse
     return urllib.parse.quote(s)
+
+
+class TestMmeWaveA(unittest.TestCase):
+    """Tests for MME-1 … MME-4 Wave A: structured-data completion, stories
+    pages, cross-market switcher, budget-band + vs head-to-head pages."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.db = "/tmp/pstore_test_mme_%s.db" % uuid.uuid4().hex[:8]
+        shutil.copy(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "..", "pstore.db"), cls.db)
+        os.environ["PSTORE_DB"] = cls.db
+        os.environ["PSTORE_ADMIN_EMAIL"] = "owner@test.example"
+        os.environ["PSTORE_ADMIN_PASSWORD"] = "test-pass-123"
+        os.environ.pop("PSTORE_URL", None)
+        os.environ.pop("PSTORE_MARKETS", None)
+        import importlib
+        importlib.reload(server)
+        amazon.CACHE_TTL = 0
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        cls.PORT = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.cookie = cls._login()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        try:
+            os.unlink(cls.db)
+        except Exception:
+            pass
+        os.environ.pop("PSTORE_DB", None)
+        os.environ.pop("PSTORE_MARKETS", None)
+
+    @classmethod
+    def _login(cls):
+        import urllib.parse
+        ph = server.security.hash_password("test-pass-123")
+        with server._lock:
+            conn = server._db()
+            row = conn.execute("SELECT id FROM users WHERE lower(email)=?",
+                               ("owner@test.example",)).fetchone()
+            if not row:
+                conn.execute("INSERT INTO users (email, pass_hash) VALUES (?,?)",
+                             ("owner@test.example", ph))
+                conn.commit()
+            conn.close()
+        conn = http.client.HTTPConnection("127.0.0.1", cls.PORT, timeout=10)
+        body = urllib.parse.urlencode({"email": "owner@test.example",
+                                       "password": "test-pass-123"}).encode()
+        conn.request("POST", "/admin/login", body,
+                     {"Content-Type": "application/x-www-form-urlencoded"})
+        resp = conn.getresponse()
+        resp.read()
+        cookie = resp.getheader("Set-Cookie", "").split(";")[0]
+        conn.close()
+        return cookie
+
+    def _get(self, path, cookie=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.PORT, timeout=10)
+        headers = {}
+        if cookie or self.cookie:
+            headers["Cookie"] = cookie or self.cookie
+        conn.request("GET", path, headers=headers)
+        resp = conn.getresponse()
+        ct = resp.getheader("Content-Type", "")
+        body = resp.read()
+        conn.close()
+        return resp.status, ct, body
+
+    def _seed_niche(self, keyword, products):
+        with server._lock:
+            conn = server._db()
+            conn.execute(
+                "INSERT OR REPLACE INTO niches (keyword, market, products) "
+                "VALUES (?,?,?)", (keyword, "com", json.dumps(products)))
+            conn.commit()
+            conn.close()
+
+    # ---- MME-1 structured data ----
+
+    def test_breadcrumb_3level(self):
+        bcr = editorial.breadcrumb_jsonld("headphones", parent="audio")
+        self.assertEqual(len(bcr["itemListElement"]), 3)
+        self.assertEqual(bcr["itemListElement"][1]["name"], "audio picks")
+        self.assertIn("/n/audio", bcr["itemListElement"][1]["item"])
+
+    def test_topic_includes_faq_jsonld(self):
+        kw = "camping gear"
+        items = [{"asin": "B0T1", "title": "Tent one", "price": 49.99,
+                  "stars": 4.4, "reviews": 700, "currency": "USD",
+                  "url": "https://www.amazon.com/dp/B0T1"},
+                 {"asin": "B0T2", "title": "Tent two", "price": 89.00,
+                  "stars": 4.6, "reviews": 300, "currency": "USD",
+                  "url": "https://www.amazon.com/dp/B0T2"}]
+        self._seed_niche(kw, items)
+        slug = seo._slugify(kw)
+        with server._lock:
+            conn = server._db()
+            conn.execute(
+                "INSERT OR IGNORE INTO topics (parent_slug, term, slug) "
+                "VALUES (?,?,?)", (slug, "best camping tents", "best-camping-tents"))
+            conn.commit()
+            conn.close()
+        st, ct, body = self._get("/n/%s/best-camping-tents" % slug)
+        self.assertEqual(st, 200)
+        html = body.decode("utf-8", "replace")
+        self.assertIn("FAQPage", html)
+        self.assertIn("BreadcrumbList", html)
+
+    # ---- MME-2 stories ----
+
+    def test_stories_gallery_route(self):
+        st, ct, body = self._get("/stories")
+        self.assertEqual(st, 200)
+        html = body.decode("utf-8", "replace").lower()
+        self.assertIn("stories", html)
+
+    def test_story_per_niche_route(self):
+        kw = "keto snacks"
+        items = [{"asin": "B0KS1", "title": "Keto bar 1", "price": 9.99,
+                  "stars": 4.5, "reviews": 1200, "currency": "USD",
+                  "url": "https://www.amazon.com/dp/B0KS1"}]
+        self._seed_niche(kw, items)
+        st, ct, body = self._get("/stories/%s" % seo._slugify(kw))
+        self.assertEqual(st, 200)
+        html = body.decode("utf-8", "replace")
+        self.assertIn("story-slide", html)
+        self.assertIn("data-source=\"story\"", html)
+
+    def test_story_404_unknown_slug(self):
+        st, ct, body = self._get("/stories/no-such-niche-here")
+        self.assertEqual(st, 404)
+
+    # ---- MME-3 market switcher ----
+
+    def test_market_switcher_absent_by_default(self):
+        kw = "keto snacks"
+        self._seed_niche(kw, [{"asin": "B0M1", "title": "M1", "price": 12.0,
+                               "stars": 4.1, "reviews": 10, "currency": "USD",
+                               "url": "https://www.amazon.com/dp/B0M1"}])
+        st, ct, body = self._get("/n/%s" % seo._slugify(kw))
+        self.assertEqual(st, 200)
+        self.assertNotIn("market-switch", body.decode("utf-8", "replace"))
+
+    def test_market_switcher_shows_with_multimarket(self):
+        os.environ["PSTORE_MARKETS"] = "com,co.uk,de"
+        os.environ["PSTORE_TAG"] = "bestpicks-20"
+        try:
+            amazon.set_market("com")
+            amazon.set_tag("bestpicks-20")
+            kw = "keto snacks"
+            self._seed_niche(kw, [{"asin": "B0M2", "title": "M2", "price": 12.0,
+                                   "stars": 4.1, "reviews": 10, "currency": "USD",
+                                   "url": "https://www.amazon.com/dp/B0M2"}])
+            st, ct, body = self._get("/n/%s" % seo._slugify(kw))
+            self.assertEqual(st, 200)
+            html = body.decode("utf-8", "replace")
+            self.assertIn("market-switch", html)
+            self.assertIn("co.uk", html)
+        finally:
+            os.environ.pop("PSTORE_MARKETS", None)
+            amazon.set_market("com")
+            amazon.set_tag("")
+
+    def test_market_tag_derivation(self):
+        amazon.set_tag("bestpicks-20")
+        amazon.set_market("com")
+        self.assertEqual(amazon.market_tag("com"), "bestpicks-20")
+        self.assertEqual(amazon.market_tag("co.uk"), "bestpicks-21")
+        self.assertEqual(amazon.market_tag("de"), "bestpicks-21")
+        self.assertEqual(amazon.market_tag("ca"), "bestpicks-20")
+        amazon.set_tag("")
+
+    # ---- MME-4 price-band + vs pages ----
+
+    def test_priceband_and_vs_topic_routes(self):
+        kw = "camping gear"
+        items = [
+            {"asin": "B0C1", "title": "Light tent", "price": 22.00,
+             "stars": 4.2, "reviews": 500, "currency": "USD",
+             "url": "https://www.amazon.com/dp/B0C1"},
+            {"asin": "B0C2", "title": "Medium tent", "price": 55.00,
+             "stars": 4.4, "reviews": 800, "currency": "USD",
+             "url": "https://www.amazon.com/dp/B0C2"},
+            {"asin": "B0C3", "title": "Pro tent", "price": 149.00,
+             "stars": 4.7, "reviews": 200, "currency": "USD",
+             "url": "https://www.amazon.com/dp/B0C3"},
+        ]
+        self._seed_niche(kw, items)
+        banded = server._ensure_price_band_topics({"keyword": kw, "products": items})
+        vs = server._ensure_vs_topics({"keyword": kw, "products": items})
+        slug = seo._slugify(kw)
+        if banded:
+            amt = banded[0]["slug"].split("-", 1)[1]
+            st, ct, body = self._get("/n/%s/under-%s" % (slug, amt))
+            self.assertEqual(st, 200)
+            self.assertIn("under $", body.decode("utf-8", "replace").lower())
+        if vs:
+            st, ct, body = self._get("/n/%s/%s" % (slug, vs[0]["slug"]))
+            self.assertEqual(st, 200)
+            self.assertIn("vs", body.decode("utf-8", "replace").lower())
+
+    def test_priceband_noindex_when_band_empty(self):
+        """When no items fit the band, the page goes noindex."""
+        kw = "minimal"
+        items = [{"asin": "B0MN1", "title": "One", "price": 199.00,
+                  "stars": 4.1, "reviews": 50, "currency": "USD",
+                  "url": "https://www.amazon.com/dp/B0MN1"}]
+        self._seed_niche(kw, items)
+        res = seo.render_priceband(15, kw, seo._slugify(kw), items)
+        self.assertIn("noindex", res.decode("utf-8", "replace"))
+
+    def test_stories_sitemap_inclusion(self):
+        kw = "keto snacks"
+        self._seed_niche(kw, [{"asin": "B0SM", "title": "SM", "price": 12.0,
+                               "stars": 4.1, "reviews": 10, "currency": "USD",
+                               "url": "https://www.amazon.com/dp/B0SM"}])
+        st, ct, body = self._get("/sitemap.xml")
+        self.assertEqual(st, 200)
+        xml = body.decode("utf-8", "replace")
+        self.assertIn("/stories", xml)
+        self.assertIn("/stories/%s" % seo._slugify(kw), xml)
+
+    def test_priceband_indexable(self):
+        kw = "audio gear"
+        items = [
+            {"asin": "B0AG1", "title": "Earbuds 20", "price": 18.00,
+             "stars": 4.0, "reviews": 100, "currency": "USD",
+             "url": "https://www.amazon.com/dp/B0AG1"},
+            {"asin": "B0AG2", "title": "Earbuds 50", "price": 48.00,
+             "stars": 4.4, "reviews": 700, "currency": "USD",
+             "url": "https://www.amazon.com/dp/B0AG2"},
+            {"asin": "B0AG3", "title": "Earbuds 120", "price": 119.00,
+             "stars": 4.6, "reviews": 400, "currency": "USD",
+             "url": "https://www.amazon.com/dp/B0AG3"},
+        ]
+        urls = seo.indexable_urls([{"keyword": kw}], "https://pstore.example")
+        self.assertTrue(any("/stories/%s" % seo._slugify(kw) in u for u in urls))
+        self.assertIn("https://pstore.example/stories", urls)
 
 
 if __name__ == "__main__":

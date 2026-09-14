@@ -460,11 +460,20 @@ def faq_jsonld(keyword, best):
         for q, a in qas]}
 
 
-def breadcrumb_jsonld(keyword):
-    return {"@type": "BreadcrumbList", "itemListElement": [
-        {"@type": "ListItem", "position": 1, "name": "Home", "item": BASE_URL + "/"},
-        {"@type": "ListItem", "position": 2, "name": "%s picks" % keyword},
-    ]}
+def breadcrumb_jsonld(keyword, parent=None):
+    """BreadcrumbList for a page's position in the site. A topic page passes
+    its parent niche as `parent`, yielding Home > Parent > Term so Google's
+    breadcrumb rich result matches the visible breadcrumb trail."""
+    steps = [{"@type": "ListItem", "position": 1, "name": "Home",
+              "item": BASE_URL + "/"}]
+    parent_picks = (parent or "").strip()
+    if parent_picks:
+        steps.append({"@type": "ListItem", "position": 2,
+                      "name": "%s picks" % parent_picks,
+                      "item": BASE_URL + "/n/" + _slug(parent_picks)})
+    steps.append({"@type": "ListItem", "position": len(steps) + 1,
+                  "name": "%s picks" % keyword})
+    return {"@type": "BreadcrumbList", "itemListElement": steps}
 
 
 def item_list_jsonld(items, keyword):
