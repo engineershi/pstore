@@ -134,6 +134,13 @@ def _chapters():
             "eligible. Re-check '/admin/seo' after a change - the Schema column turns "
             "green when the emitted markup is valid.")
         doc.paragraph(
+            "Every indexable money page - the niche guide, its topic pages, "
+            "budget-band pages (under-$X) and head-to-head pages (a-vs-b) - carries an "
+            "email-gated free-guide block: a self-styled gate that unlocks the niche's "
+            "PDF with a short-lived download token the moment a visitor subscribes. "
+            "More targeted pages means more places to capture the email in exchange "
+            "for something the visitor actually wants.")
+        doc.paragraph(
             "Own the site everywhere it is listed: claim your domain with Google, "
             "Bing, Yandex and Pinterest from the Keys page (/keys) - paste each "
             "engine's verification token (or the meta tag it gives you) and every "
@@ -168,6 +175,9 @@ def _chapters():
             "Emails are only sent to opted-in subscribers.",
             "Re-subscribing reactivates a previously unsubscribed address.",
             "An unsubscribe link and List-Unsubscribe header are added to every email.",
+            "If a reader scrolls deep or is about to leave without opting in, a gentle "
+            "last-chance nudge card drops once per visit and captures the same email, "
+            "so wandering readers on niche pages still get caught.",
         ])
         doc.page_break()
 
@@ -227,6 +237,7 @@ def _chapters():
             "Switches control the tracked affiliate link, open-tracking pixel, PDF attachment, dedup and sequence progress.",
             "Dry-run first to preview the send counts without emailing anyone.",
             "Auto-send runs the 5-step sequence to every ready subscriber on your chosen UTC hours; the Email Studio page shows the last run and lets you toggle it.",
+            "Sequence progress is tracked per keyword interest: a lead who subscribes to one niche and later another rides a separate progress counter for each, so scoped sends never mix steps across keywords.",
             "Replies are captured too: the Studio's Inbox tab polls your IMAP mailbox (IMAP_HOST/USER/PASSWORD, or a forwarder hitting /api/cron/inbox) and maps each reply back to the subscriber via a tagged Reply-To address, so you can read, archive, mark read or reply from the same page.",
         ])
         doc.page_break()
@@ -333,6 +344,7 @@ def _chapters():
             ("SEM /admin/sem", "long-tails + briefs"),
             ("SEO audit /admin/seo", "indexability strip"),
             ("Search engines /admin/seoengines", "GSC, Yandex, Bing"),
+            ("A/B headlines /admin/variants", "auto-enrolled tests"),
             ("Refresh /admin/refresh", "auto + manual re-mine"),
             ("Users & roles /admin/users", "accounts + function matrix"),
             ("Public pages /n, /lp, sitemap", "the ranked site"),
@@ -358,6 +370,12 @@ def _chapters():
                       [4.2, 3.1, 2.4, 1.6], ["SEO", "Social", "Email", "Direct"],
                       (ACC, SAGE, TEAL, PLUM), title="Clicks by source")
         doc.spacer(8)
+        doc.paragraph(
+            "Headlines test themselves: the daily engine auto-enrolls your most-"
+            "clicked niche into a permanent control-vs-alternative headline matchup "
+            "(/admin/variants), then auto-disables any variant that converts below "
+            "25% of the leader once enough clicks are in. Your best money page is "
+            "always being optimised - no manual setup.")
         doc.paragraph(
             "Use the numbers to pick your next niche: high demand, lower saturation "
             "first - and always let the honest referral data, never a guess, tell "
@@ -549,7 +567,9 @@ def render_admin_manual(nav_html, totop_html):
         a("/admin/social", "📣 Social", "tracked posts"),
         a("/admin/sem", "🎯 SEM", "keywords + funnel"),
         a("/admin/seo", "🔍 SEO audit", "indexability"),
+        a("/admin/opportunities", "🪴 Grow", "daily content engine"),
         a("/admin/refresh", "📡 Refresh", "auto + manual"),
+        a("/admin/variants", "⚗️ A/B headlines", "auto-enrolled tests"),
         a("/admin", "🗺 All pages", "hub"),
     ])
     pages = "".join([
@@ -652,9 +672,10 @@ def render_admin_manual(nav_html, totop_html):
   <a href="#team">12 · Team access &amp; roles</a>
   <a href="#inbox">13 · Inbox &amp; conversations</a>
   <a href="#engine">14 · Daily content engine</a>
-  <a href="#audience">15 · Audience &amp; geo</a>
-  <a href="#look">16 · Look &amp; feel</a>
-  <a href="#founder">17 · About the founder</a>
+  <a href="#ab">15 · A/B headlines</a>
+  <a href="#audience">16 · Audience &amp; geo</a>
+  <a href="#look">17 · Look &amp; feel</a>
+  <a href="#founder">18 · About the founder</a>
 </nav>
 
 <h3 id="what">1 · What pstore is</h3>
@@ -691,6 +712,7 @@ def render_admin_manual(nav_html, totop_html):
 <p><b>Google re-crawls in seconds, not weeks.</b> Once GSC is connected, pstore pushes every new niche/topic page through the URL Inspection API (crawl-request) the moment it's saved — up to 190 pages a day stays under Google's quota — and re-submits your sitemap daily. The Grow page's expand buttons do the same for every page they mint, so a fresh site stops waiting on discovery.</p>
 <p><b>Paid traffic gets its own affiliate tag.</b> Set <code>PSTORE_PAID_TAG</code> (env) or a <code>paid.tag</code> via the Engines hub, and any visit that lands with <code>?utm_source=</code> on a paid network (or <code>utm_campaign</code>, or a Facebook/TikTok/Google <code>…clid</code>) renders every Amazon link on that page with the paid tag instead of the organic one — paid clicks are credited and reported separately (<code>source=paid</code>) while organic links keep the default tag.</p>
 <p>Prove every <b>social and search-engine header tag</b> is active, not just written: on the Engines hub pick a page and press <b>Verify live tags</b>. pstore fetches the live page like a crawler and checks each og:/twitter: card, canonical, robots, ownership meta, sitemap.xml and robots.txt — then really downloads the og:image to confirm it resolves. Every tag turns <span style="color:#1e8e3e">green</span> or <span style="color:#c0392b">red</span>, so a broken share card or a token that never reached the live head shows up instantly.</p>
+<p>Every indexable money page — the niche guide, its topic pages (<code>/n/&lt;parent&gt;/&lt;term&gt;</code>), budget-band pages (<code>under-$X</code>) and head-to-head pages (<code>a-vs-b</code>) — carries a <b>📥 email-gated PDF offer</b>: a self-styled gate block that unlocks the niche's free guide with the short-lived download token the moment a visitor subscribes (mirrors the CMS landing gate, so the courier handler already knows it). More targeted pages means more places to capture the email in exchange for something the visitor actually wants.</p>
 
 <h3 id="s3">5 · Step 3 — Capture the email</h3>
 <p>Every niche page and the homepage already render an <b>opt-in form</b> that collects first name + email. The first name personalises every email (<i>"Hi Jane,"</i>) to lift open rates.</p>
@@ -698,6 +720,7 @@ def render_admin_manual(nav_html, totop_html):
 <li>Only <b>opted-in</b> subscribers are emailed.</li>
 <li>Re-subscribing reactivates an unsubscribed address.</li>
 <li>Every email carries an <b>unsubscribe</b> link + <code>List-Unsubscribe</code>.</li>
+<li>A gentle <b>last-chance nudge</b> pops up once per visitor (at ~55% scroll depth, on the way out of the tab, or after 45s of idle reading) on any niche page where they haven't opted in — the same one-tap capture form, so wandering readers still get caught.</li>
 </ul>
 
 <h3 id="lp">6 · The landing page — CMS sales page</h3>
@@ -721,6 +744,7 @@ def render_admin_manual(nav_html, totop_html):
 <li>Switches control the <b>tracked link</b>, <b>open pixel</b>, <b>PDF attachment</b>, <b>dedup</b> and <b>sequence progress</b>.</li>
 <li><b>Dry-run</b> first to preview the counts without emailing anyone.</li>
 <li><b>Auto-send</b> runs the 5-step sequence to every ready subscriber on your chosen UTC hours; the Studio shows the last run and lets you toggle it on/off.</li>
+<li><b>Interest-aware sequencing:</b> pstore tracks the exact keyword each subscriber opted in for (<code>sub_interests</code>), so a lead who subscribes to <i>keto snacks</i> and later to <i>yoga mat</i> rides a separate 5-step sequence per niche — scoped sends and the daily autosend advance each interest independently, never a mix-and-match of progress counters.</li>
 </ul>
 
 <h3 id="s5">8 · Step 5-6 — Ebook lead magnet + social posts + boosts</h3>
@@ -736,6 +760,7 @@ def render_admin_manual(nav_html, totop_html):
 <li>Set the <b>affiliate tag</b> and <b>SMTP</b> first — nothing else matters until those work.</li>
 <li><b>Stack traffic</b>: SEO (compounding) + social (fast) + email (cheap) + QR/landing pages (offline).</li>
 <li>Watch <a class="tooltag" href="/admin/analytics">📊 Analytics</a> and double down on the most-clicked products and best sources. It now also shows <b>page views</b> (leads + public site) and <b>lead-page interactions</b> — promo taps, countdown, sticky-CTAs and PDF downloads — so you can optimize the landing page itself, not just the links.</li>
+<li><b>Headlines A/B-test themselves:</b> the daily engine auto-enrolls your highest-clicked niche into a permanent control-vs-alternative headline matchup, then auto-disables a variant that converts below 25% of the leader once the niche has enough clicks — your best money page is always being optimised, no manual setup.</li>
 <li>Choose niches like a fund: <b>high demand, lower saturation</b> first.</li>
 <li><b>Comply always</b>: opted-in email, FTC/Associates disclosure, direct tagged links.</li>
 </ul>
@@ -790,7 +815,15 @@ def render_admin_manual(nav_html, totop_html):
 <li>Everything is idempotent and cheap: no network, no double posts, nothing to clean up — turn it on and let it feed the machine.</li>
 </ul>
 
-<h3 id="audience">15 · Audience &amp; geo</h3>
+<h3 id="ab">15 · A/B headlines — auto-enrolled on your money page</h3>
+<p>pstore A/B-tests the <b>headline</b> of each niche guide for you — the single most-read line on your highest-revenue page. Open the <a class="tooltag" href="/admin/variants">⚗️ A/B headlines</a> page to see every matchup, its per-variant clicks and the run button; the engine also handles everything unattended:</p>
+<ul class="step-list">
+<li>The daily engine <b>auto-enrolls</b> whichever niche has drawn the most Amazon clicks but has no live matchup yet (threshold adjustable). Control is <i>"Best X: ranked picks"</i>; the alternative is auto-written from your market engine's best-buyer language, title-capped at a readable length.</li>
+<li>Once a matchup has enough combined traffic, a variant that converts below <b>25% of the leader</b> is <b>auto-disabled</b> so the loser stops burning impressions — your strongest money page stays optimised without you touching anything.</li>
+<li>The <code>/api/variants/autoclean</code> endpoint runs the same enroll+cleanup pass on demand from the admin UI.</li>
+</ul>
+
+<h3 id="audience">16 · Audience &amp; geo</h3>
 <p>The courier beacon now records <b>where every click comes from</b>, and the SEM briefs tell you exactly who is searching — so you optimise for the actual buyer, not the keyword alone.</p>
 <ul class="step-list">
 <li>Every page view and Amazon click is tagged with the visitor's <b>country</b> (beacon <code>CF-IPCountry</code>) and stored per-niche, per-ASIN.</li>
@@ -799,7 +832,7 @@ def render_admin_manual(nav_html, totop_html):
 <li>Audience, personas and intents respect your <b>demography settings</b> (household sizes, incomes, age bands on the 🛠 <a class="tooltag" href="/tool">Workbench</a> 🌍 Market demography panel) — the profile answers read from the same settings you already keep.</li>
 </ul>
 
-<h3 id="look">16 · Look &amp; feel — template &amp; style</h3>
+<h3 id="look">17 · Look &amp; feel — template &amp; style</h3>
 <p>Give every one-pager a house style without touching a single template. The <a class="tooltag" href="/admin/template">🎨 Template &amp; style</a> page is the site-wide styling console.</p>
 <ul class="step-list">
 <li><b>Preset looks</b>: Ocean, Forest, Coral, Violet, Mono — or keep the classic Base. Each recolors the accent, gradients, rings and accent-2 across all <code>/n/</code> pages at once.</li>
@@ -809,7 +842,7 @@ def render_admin_manual(nav_html, totop_html):
 <li>Untouched niches keep rendering byte-identical — styling only ever appears on pages you explicitly target.</li>
 </ul>
 
-<h3 id="founder">17 · About the founder</h3>
+<h3 id="founder">18 · About the founder</h3>
 <p>pstore was conceived, architected and built <b>from scratch</b> by <a href="mailto:salahuddinhabibisah@gmail.com"><b>Engr Salahuddin Habibu Isah</b></a> — one software engineer, one codebase, and not a single third-party library. The whole machine is hand-written Python on the standard library: the mining engine, the search-ranked review pages, the landing-page CMS, the email studio with its 5-part sequence, the AI ebook builder, the social kits, the UTM boosts, the click analytics, the auto-refresh loop, the security layer — and this manual's PDF, drawn page by page by the app's own book-format PDF engine.</p>
 <ul class="step-list">
 <li><b>Role</b> — Founder and lead engineer.</li>
