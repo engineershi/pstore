@@ -6483,6 +6483,14 @@ document.addEventListener("click", function (e) {{
         if not code or not expect or not state or scope != "oauth:pinterest" \
                 or not hmac.compare_digest(expect, state):
             denied = (q.get("error") or [""])[0]
+            detail = ("no code" if not code else
+                      ("no state" if not state else
+                       ("no cookie" if not expect else
+                        ("scope=%s" % scope if scope != "oauth:pinterest"
+                         else "state mismatch"))))
+            _set_setting("social.key.pinterest.last_error",
+                         "state check failed (%s): %s"
+                         % (detail, (denied[:120] if denied else "no provider error")))
             if denied and denied != "access_denied":
                 return go("consent error: %s" % denied[:120], True)
             return go("consent was denied or the link was stale — "
@@ -6491,7 +6499,10 @@ document.addEventListener("click", function (e) {{
             access_token, refresh_token = oauth.pinterest_exchange(
                 cid, csec, code, redir)
         except Exception as exc:
-            return go("Pinterest connect failed: %s" % str(exc)[:200], True)
+            err = str(exc)[:300]
+            _set_setting("social.key.pinterest.last_error", err)
+            return go("Pinterest connect failed: %s" % err, True)
+        _set_setting("social.key.pinterest.last_error", "")
         _set_setting("social.key.pinterest.token", access_token)
         if refresh_token:
             _set_setting("social.key.pinterest.refresh_token", refresh_token)
@@ -10442,6 +10453,18 @@ fresh();
         pint_ok = bool(_get_setting("social.key.pinterest.token", ""))
         pint_cid = self._maskkv("cid", "social.key.pinterest.client_id")
         pint_csec = self._maskkv("csec", "social.key.pinterest.client_secret")
+        _pint_err = _get_setting("social.key.pinterest.last_error", "")
+        _pint_query_msg = (q.get("msg") or [""])[0]
+        _pint_query_err = (q.get("err") or [""])[0]
+        if _pint_query_err:
+            pint_notice = "✗ " + seo._clean(_pint_query_err[:300])
+        elif _pint_query_msg:
+            pint_notice = "✓ " + seo._clean(_pint_query_msg[:300])
+        elif _pint_err:
+            pint_notice = ("⚠ Last Pinterest connect failed — %s"
+                           % seo._clean(_pint_err[:300]))
+        else:
+            pint_notice = ""
         if pint_ok:
             pint_btn = "Reconnect Pinterest"
             pint_status = "Connected — pins post natively to your account."
@@ -10517,6 +10540,7 @@ fresh();
 {self._admin_nav('apikeys')}
 </header>
 <main>
+<div id="pint-notice" class="msg" style="margin-bottom:10px">{pint_notice}</div>
 <section class="card"><h2>🛒 Amazon PA-API (official product data)</h2>
 <p class="hint">Status: {pa_ready}. Enables official, richer product lookups instead of the public scraper. Get these at the Amazon Associates <b>Product Advertising API</b> console.</p>
 <form class="cols-form" id="fpa" onsubmit="return pa_save();">
