@@ -21,6 +21,7 @@ if sys_path not in os.sys.path:
 import security
 import seo
 import webmasters
+import indexnow
 
 GSC_TOK = {"access_token": "gsc-at", "refresh_token": "gsc-rt",
            "expires_in": 3600, "expires_at": 2 ** 40}
@@ -516,6 +517,23 @@ class TestWebmastersClients(unittest.TestCase):
         self.assertEqual(st["bing"]["state"], "ready")
         self.assertEqual(st["yandex"]["state"], "ready")
 
+    def test_passive_engines_duckduckgo_yahoo(self):
+        st = {r["engine"]: r for r in webmasters.engines_status()}
+        for e in ("duckduckgo", "yahoo"):
+            self.assertTrue(st[e]["passive"])
+            self.assertIn("via", st[e])
+            self.assertFalse(st[e]["token"])
+            # IndexNow key is always set -> coverage is live.
+            self.assertEqual(st[e]["state"], "ready")
+        saved = indexnow._RUNTIME_KEY
+        try:
+            indexnow.set_key("")
+            st = {r["engine"]: r for r in webmasters.engines_status()}
+            self.assertEqual(st["duckduckgo"]["state"], "needs-key")
+            self.assertEqual(st["yahoo"]["state"], "needs-key")
+        finally:
+            indexnow.set_key(saved if saved is not None else "")
+
     def test_bing_state_key_fallback(self):
         saved = (webmasters.BING_API_KEY, self.wm.store.get("seoeng.bing.apikey"))
         try:
@@ -647,6 +665,10 @@ class TestSeoengineServer(unittest.TestCase):
         self.assertIn("Google Search Console", html)
         self.assertIn("Bing Webmaster", html)
         self.assertIn("Yandex Webmaster", html)
+        self.assertIn("DuckDuckGo", html)
+        self.assertIn("Yahoo (via Bing)", html)
+        self.assertIn('id="st-duckduckgo"', html)
+        self.assertIn('id="st-yahoo"', html)
         self.assertIn("Traffic by engine", html)
         self.assertIn("/api/seoengines", html)
         # Regression: the inline action-JS must carry \n escapes as backslash-n,
@@ -727,12 +749,31 @@ class TestSeoengineServer(unittest.TestCase):
         self.assertIn("traffic", d)
         self.assertIn("host", d)
         self.assertIn("sitemap", d)
-        self.assertEqual(len(d["engines"]), 3)
+        self.assertEqual(len(d["engines"]), 5)
         for e in d["engines"]:
             self.assertIn("state", e)
             self.assertIn("engine", e)
+        by_engine = {e["engine"]: e for e in d["engines"]}
+        self.assertIn("duckduckgo", by_engine)
+        self.assertIn("yahoo", by_engine)
+        self.assertTrue(by_engine["duckduckgo"]["passive"])
+        self.assertTrue(by_engine["yahoo"]["passive"])
         self.assertIn("totals", d["traffic"])
         self.assertIn("google", d["traffic"]["engines"])
+
+    def test_seoengines_sync_passive_engine(self):
+        st, _, body = self._raw(
+            "POST", "/api/seoengines", cookie=self.cookie,
+            body=json.dumps({"action": "sync", "engine": "duckduckgo",
+                             "days": 28}),
+            ctype="application/json")
+        self.assertEqual(st, 200)
+        d = json.loads(body)
+        self.assertTrue(d["ok"])
+        self.assertEqual(d["engine"], "DuckDuckGo")
+        self.assertIn("totals", d)
+        self.assertIn("clicks", d["totals"])
+        self.assertIn("impressions", d["totals"])
 
     def test_seoengines_api_requires_auth(self):
         st, _, _ = self._raw("GET", "/api/seoengines")

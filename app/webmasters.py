@@ -21,6 +21,7 @@ import urllib.parse
 import urllib.request
 
 import seo
+import indexnow
 
 # ------------------------------------------------------------------ hooks
 _STORE_GET = None   # callable(key, default="") -> str
@@ -166,6 +167,24 @@ def engines_status():
     for r in rows:
         last = _json_get("seoeng.%s.last" % r["engine"])
         r["last_sync"] = (last or {}).get("at") if last else None
+    # DuckDuckGo + Yahoo have no self-serve console/API. DuckDuckGo's crawler
+    # participates in IndexNow and Yahoo Search is powered by Bing's index, so
+    # coverage flows through the IndexNow pings the site already sends every run
+    # (and, for Yahoo, the Bing Webmaster sitemap submission). Surfaced here as
+    # first-class engines so the hub shows them explicitly alongside the
+    # consoles, their stats filled from on-site referrer attribution.
+    covered = bool(indexnow.key())
+    for eng, name, via in (
+            ("duckduckgo", "DuckDuckGo",
+             "No console to connect. DuckDuckGo's crawler consumes IndexNow, so the sitemap the site pings covers it; stats below are referral-attributed visits/clicks from your own beacon."),
+            ("yahoo", "Yahoo (via Bing)",
+             "No console to connect. Yahoo Search is served from Bing's index, so the Bing Webmaster sitemap submission and IndexNow pings cover it; stats below are referral-attributed visits/clicks from your own beacon.")):
+        rows.append({
+            "engine": eng, "name": name,
+            "client": covered, "token": False, "site": site_url(),
+            "passive": True, "via": via,
+            "state": "ready" if covered else "needs-key",
+        })
     return rows
 
 

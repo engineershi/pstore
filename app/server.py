@@ -6424,6 +6424,19 @@ document.addEventListener("click", function (e) {{
             ok, data = webmasters.sync_engine(engine,
                                               int(body.get("days") or 28))
             return self._send(200, {"ok": ok, **data})
+        if action == "sync" and engine in ("duckduckgo", "yahoo"):
+            days = int(body.get("days") or 28)
+            tr = self._seoengines_traffic(days)["engines"].get(engine) or {}
+            views = tr.get("views", 0)
+            clicks = tr.get("clicks", 0)
+            return self._send(200, {
+                "ok": True,
+                "engine": {"duckduckgo": "DuckDuckGo",
+                           "yahoo": "Yahoo (via Bing)"}[engine],
+                "days": days,
+                "totals": {"clicks": clicks, "impressions": 0, "position": 0,
+                           "ctr": round(clicks * 100.0 / views, 1) if views else 0},
+                "rows": []})
         if action == "submit" and engine in ("gsc", "bing"):
             if engine == "gsc":
                 ok, msg = webmasters.gsc_submit_sitemap()
@@ -6662,12 +6675,41 @@ document.addEventListener("click", function (e) {{
             "yandex": "Create a Yandex OAuth app (PSTORE_YANDEX_CLIENT_ID / PSTORE_YANDEX_CLIENT_SECRET) with redirect URI %s/admin/oauth/seoengines/cb/yandex, add this host in Yandex Webmaster, then Connect. After connecting: Test connection lists every host the token controls, Add this site registers this host, and Recrawl URL forces Yandex to re-crawl any page."
                    % seo.BASE_URL,
         }
+        via = {
+            "duckduckgo": "No console to connect. DuckDuckGo's crawler consumes "
+                          "IndexNow, so the sitemap this site pings whenever it "
+                          "changes already covers it. The stats below are "
+                          "referral-attributed visits/clicks from your own beacon.",
+            "yahoo": "No console to connect. Yahoo Search is served from Bing's "
+                     "index, so the Bing Webmaster sitemap submission and the "
+                     "IndexNow pings already cover it. The stats below are "
+                     "referral-attributed visits/clicks from your own beacon.",
+        }
         names = {"gsc": "Google Search Console",
                  "bing": "Bing Webmaster",
-                 "yandex": "Yandex Webmaster"}
-        engines = [("gsc",), ("bing",), ("yandex",)]
+                 "yandex": "Yandex Webmaster",
+                 "duckduckgo": "DuckDuckGo",
+                 "yahoo": "Yahoo (via Bing)"}
+        engines = [("gsc",), ("bing",), ("yandex",),
+                   ("duckduckgo",), ("yahoo",)]
         cards = []
         for (eng,) in engines:
+            if eng in ("duckduckgo", "yahoo"):
+                cards.append("""
+        <div class="card" style="margin:0">
+         <h2>%s</h2>
+         <div class="row">
+          <div class="feature"><h3 id="st-%s">…</h3><p class="hint">state</p></div>
+          <div class="feature"><h3 id="tok-%s">…</h3><p class="hint">coverage</p></div>
+          <div class="feature"><h3 id="last-%s">never</h3><p class="hint">last sync</p></div>
+         </div>
+         <p class="hint" style="margin-top:8px">%s</p>
+         <div class="row" style="margin-top:8px;flex-wrap:wrap;gap:8px">
+          <button class="btn" onclick="act('sync','%s')">⟳ Fetch stats</button>
+         </div>
+         <pre class="preview" id="out-%s" style="display:none"></pre>
+        </div>""" % (names[eng], eng, eng, eng, via[eng], eng, eng))
+                continue
             if eng == "bing":
                 connect_btn = ('<button class="warm" onclick="act(\'bingtest\',\'bing\')">'
                                'Test key</button>'
@@ -6836,7 +6878,7 @@ function formatStats(d){const t=(d.totals||{});const r=(d.rows||[]).slice(0,12);
  if(r.length) s+="\\n\\n" + r.map(x=>`${esc(x.page)}  → ${x.clicks}c / ${x.impressions}i @pos ${x.position}`).join("\\n");
  return s;}
 function load(){fetch("/api/seoengines").then(r=>r.json()).then(d=>{
-  for(const e of d.engines){$("st-"+e.engine).innerHTML=badge(e.state);$("tok-"+e.engine).textContent=e.state==="ready"?"connected":(e.client?"token pending":"client ids missing");$("last-"+e.engine).textContent=e.last_sync||"never";}
+  for(const e of d.engines){$("st-"+e.engine).innerHTML=badge(e.state);$("tok-"+e.engine).textContent=e.passive?(e.state==="ready"?"covered ✓":"not wired"):(e.state==="ready"?"connected":(e.client?"token pending":"client ids missing"));$("last-"+e.engine).textContent=e.last_sync||"never";}
   const tr=d.traffic; const tgs={"google":"Google","bing":"Bing","yandex":"Yandex","duckduckgo":"DuckDuckGo","yahoo":"Yahoo","direct":"Direct","other":"Other"};
   const snapKeys={"google":"gsc","bing":"bing","yandex":"yandex"};
   const consoleCell=(k)=>{const s=d.snapshots[snapKeys[k]];if(!s||!s.totals)return '<span class="hint" style="font-size:12px">—</span>';
@@ -9313,6 +9355,8 @@ document.addEventListener("click", (e)=>{{
                         + "&hl=en"),
             engine_link("Bing / IndexNow", "https://www.bing.com/indexnow"),
             engine_link("Yandex Webmaster", "https://webmaster.yandex.com/"),
+            engine_link("DuckDuckGo (IndexNow)",
+                        "https://duckduckgo.com/?q=site%3A" + urllib.parse.quote(audit['site_url'], safe="")),
             engine_link("Yahoo (via Bing)", "https://www.bing.com/webmasters"),
         ]))
         body = f"""<!DOCTYPE html>
@@ -9336,7 +9380,7 @@ document.addEventListener("click", (e)=>{{
 <p class="hint" style="margin-top:4px">Locked to team members granted the <b>SEO &amp; consoles</b> function — the owner hands it out under <a href="/admin/users">Users &amp; roles</a>.</p>
 {site_keys}
 <div class="sub"><h3>🚀 Push to the engines now</h3>
-<p class="hint">Ping IndexNow with every live URL ({audit['count']} niches → {len(self._all_urls())} URLs). Bing, Yandex, Naver & Seznam crawl in minutes. To also reach Google, verify ownership via <a href="/keys/site/gsc">/keys/site/gsc</a> and submit the sitemap in Search Console.</p>
+<p class="hint">Ping IndexNow with every live URL ({audit['count']} niches → {len(self._all_urls())} URLs). Bing, Yandex, Naver, Seznam and DuckDuckGo crawl in minutes — DuckDuckGo feeds its results straight from the IndexNow-submitted sitemap. To also reach Google and Yahoo, verify ownership via <a href="/keys/site/gsc">/keys/site/gsc</a> and submit the sitemap in Search Console (Yahoo indexes from the Bing submission on <a href="/admin/seoengines">/admin/seoengines ↗</a>).</p>
 <button id="submitNow" class="warm">▶ Submit all URLS to IndexNow</button>
 <p id="inmsg" class="msg"></p>
 <div class="table-wrap"><table class="plain"><thead><tr><th>Engine</th><th>Console / submit</th><th>Sitemap to submit (click to copy)</th></tr></thead><tbody>{engines}</tbody></table></div></div>
