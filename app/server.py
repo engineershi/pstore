@@ -5138,14 +5138,15 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         """Verifies credentials against the live API. PA-API looks up a sample
         ASIN; an `ai` payload fires one tiny chat request to prove the key (and
         model/base) work, showing model + latency on success."""
-        a = self._body().get("ai")
+        b = self._body()
+        a = b.get("ai")
         if isinstance(a, dict):
             provider = str(a.get("provider") or "").strip().lower() or "opencode"
             key = str(a.get("key") or "").strip() or ai.key_for(provider)
             model = str(a.get("model") or "").strip() or ai.model_for(provider)
             base = str(a.get("base") or "").strip()
             return self._send(200, ai.test(provider, key, model, base))
-        if self._body().get("pinterest"):
+        if b.get("pinterest"):
             return self._settings_pinterest_test()
         if not paapi.ready():
             return self._send(200, {
