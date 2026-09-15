@@ -99,3 +99,48 @@ def exchange(provider, code):
         info = json.loads(_open(urllib.request.Request(url)).read().decode("utf-8", "replace"))
         return (info.get("email") or "").lower(), info.get("name") or ""
     raise ValueError("Unknown OAuth provider: %s" % provider)
+
+
+# ------------------------------------------------------------------ Pinterest
+# Pinterest OAuth 2.0 (v5 API) — connect-account flow, not login.
+# Credentials are read from DB settings by the server route; passed as params
+# here so oauth.py stays env-only for the login providers.
+
+PINTEREST_AUTH = "https://www.pinterest.com/oauth/"
+PINTEREST_TOKEN = "https://api.pinterest.com/v5/oauth/token"
+
+
+def pinterest_authorize_url(client_id, redirect_uri, state):
+    scopes = "boards:read,boards:write,pins:read,pins:write"
+    return ("%s?client_id=%s&redirect_uri=%s&response_type=code"
+            "&scope=%s&state=%s"
+            % (PINTEREST_AUTH,
+               urllib.parse.quote(str(client_id), safe=""),
+               urllib.parse.quote(redirect_uri, safe=""),
+               urllib.parse.quote(scopes, safe=""),
+               urllib.parse.quote(state, safe="")))
+
+
+def pinterest_exchange(client_id, client_secret, code, redirect_uri):
+    """Exchange authorization code for access + refresh tokens.
+    Returns (access_token, refresh_token) on success; raises ValueError."""
+    form = urllib.parse.urlencode({
+        "grant_type": "authorization_code",
+        "client_id": str(client_id),
+        "client_secret": str(client_secret),
+        "code": code,
+        "redirect_uri": redirect_uri,
+    }).encode("utf-8")
+    req = urllib.request.Request(PINTEREST_TOKEN, data=form,
+                                headers={"Content-Type":
+                                         "application/x-www-form-urlencoded"})
+    try:
+        resp = json.loads(_open(req).read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace") if exc.fp else ""
+        raise ValueError("Pinterest token exchange failed: %s" % body[:200])
+    access = resp.get("access_token")
+    if not access:
+        raise ValueError("Pinterest token exchange failed: %s"
+                         % str(resp)[:200])
+    return access, resp.get("refresh_token") or ""

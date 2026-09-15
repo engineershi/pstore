@@ -4540,6 +4540,9 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             eng_oauth = re.match(r"^/admin/oauth/seoengines/cb/(gsc|yandex)$", path)
             if eng_oauth:
                 return self._seoengine_oauth_cb(eng_oauth.group(1), q)
+            pint_oauth = re.match(r"^/admin/oauth/pinterest(/callback)?$", path)
+            if pint_oauth:
+                return self._pinterest_oauth(bool(pint_oauth.group(1)), q)
             # public opt-out + click beacons never need a session
             if path.startswith("/unsubscribe"):
                 return self._unsubscribe(q)
@@ -5090,6 +5093,15 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                     continue
                 if val:
                     _set_setting("social.key.twitter.%s" % f, val)
+            # Pinterest OAuth app credentials persist so the Connect button and
+            # token exchange can reuse them across restarts.
+            pint = s.get("pinterest") or {}
+            for f in ("client_id", "client_secret"):
+                val = pint.get(f) if f in pint else (
+                    pint.get("pinterest." + f)
+                    if "pinterest." + f in pint else "")
+                if val:
+                    _set_setting("social.key.pinterest.%s" % f, val)
         # Optional AI provider keys (the /admin/apikeys 'AI writing' section):
         # persist to DB so they survive restart/redeploy and apply immediately
         # by reconfiguring the runtime module (env vars still win at read time).
@@ -6401,6 +6413,53 @@ document.addEventListener("click", function (e) {{
         if ok:
             return go("connected ✓")
         return go(msg[:200] if msg else "connect failed", True)
+
+    def _pinterest_oauth(self, callback, q):
+        """Pinterest OAuth 2.0 connect-account flow (v5 API).
+        Start: sign state cookie, bounce to Pinterest consent.
+        Callback: exchange code, store access_token, redirect to apikeys."""
+        cid = _get_setting("social.key.pinterest.client_id", "")
+        csec = _get_setting("social.key.pinterest.client_secret", "")
+        redir = seo.BASE_URL.rstrip("/") + "/admin/oauth/pinterest/callback"
+        def go(msg, failed=False):
+            if msg:
+                return self._redirect("/admin/apikeys?%s=%s" % (
+                    "err" if failed else "msg", urllib.parse.quote(msg, safe="")))
+            return self._redirect("/admin/apikeys")
+        if not cid or not csec:
+            return go("Pinterest OAuth app id/secret not configured", True)
+        if not callback:
+            state = security.make_token("oauth:pinterest", 600)
+            url = oauth.pinterest_authorize_url(cid, redir, state)
+            self.send_response(302)
+            self._set_cookie(state, max_age=600, cookie=_OAUTH_COOKIE,
+                             path="/admin/oauth")
+            self.send_header("Location", url)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return None
+        code = (q.get("code") or [""])[0]
+        state = (q.get("state") or [""])[0]
+        expect = self._cookie_token(_OAUTH_COOKIE)
+        scope = security.verify_token(expect) if expect else None
+        self._set_cookie("x", max_age=0, cookie=_OAUTH_COOKIE,
+                         path="/admin/oauth")
+        if not code or not expect or not state or scope != "oauth:pinterest" \
+                or not hmac.compare_digest(expect, state):
+            denied = (q.get("error") or [""])[0]
+            if denied and denied != "access_denied":
+                return go("consent error: %s" % denied[:120], True)
+            return go("consent was denied or the link was stale — "
+                      "try again", True)
+        try:
+            access_token, refresh_token = oauth.pinterest_exchange(
+                cid, csec, code, redir)
+        except Exception as exc:
+            return go("Pinterest connect failed: %s" % str(exc)[:200], True)
+        _set_setting("social.key.pinterest.token", access_token)
+        if refresh_token:
+            _set_setting("social.key.pinterest.refresh_token", refresh_token)
+        return go("Pinterest connected")
 
     def _redirect(self, location):
         self.send_response(302)
@@ -10342,6 +10401,22 @@ fresh();
             'placeholder="API key/token" autocomplete="off" data-masked="1"></label>'
             % (seo._clean(p), seo._clean(social._key(p)), self._maskkv(social._key(p)))
             for p in social.PLATFORMS)
+        pint_cfg = bool(_get_setting("social.key.pinterest.client_id", "")) \
+            and bool(_get_setting("social.key.pinterest.client_secret", ""))
+        pint_ok = bool(_get_setting("social.key.pinterest.token", ""))
+        pint_cid = self._maskkv("cid", "social.key.pinterest.client_id")
+        pint_csec = self._maskkv("csec", "social.key.pinterest.client_secret")
+        if pint_ok:
+            pint_btn = "Reconnect Pinterest"
+            pint_status = "Connected — pins post natively to your account."
+        elif pint_cfg:
+            pint_btn = "Connect Pinterest"
+            pint_status = ("App id/secret set — authorize this site to post pins "
+                           "for you (OAuth).")
+        else:
+            pint_btn = "Connect Pinterest"
+            pint_status = ("Set app id + secret above then connect. Get them at "
+                           "developers.pinterest.com.")
         tw_meta = [
             ("twitter.client_id", "Consumer key (API key)", "Twitter client_id"),
             ("twitter.client_secret", "Consumer secret (API secret)", "client_secret"),
@@ -10419,8 +10494,17 @@ fresh();
 <p class="hint">Per-platform {len(social.PLATFORMS)} keys power native posting. Leave blank to skip that platform. Enable native posting by pasting each platform's API key/token here; real posting also fires <code>SOCIAL_WEBHOOK</code> if set.</p>
 <form class="cols-form" id="fsoc" onsubmit="return soc_save();">
   <label>Webhook URL <input type="url" name="webhook" value="{webhook_val}" placeholder="https://hook.example/hook (Zapier/Make)"></label>
-  {key_rows}
-  <h3>Twitter / X (optional, 4 fields)</h3>
+{key_rows}
+   <h3>Pinterest app (OAuth connect)</h3>
+   <div class="row">
+     <label>App id <input type="password" name="pint_client_id" value="{pint_cid}" placeholder="Pinterest app id" autocomplete="off" data-masked="1" data-pint="1"></label>
+     <label>App secret <input type="password" name="pint_client_secret" value="{pint_csec}" placeholder="Pinterest app secret" autocomplete="off" data-masked="1" data-pint="1"></label>
+   </div>
+   <div class="row">
+     <a class="btn" href="/admin/oauth/pinterest" style="color:#fff">{pint_btn}</a>
+     <span class="hint">{pint_status}</span>
+   </div>
+   <h3>Twitter / X (optional, 4 fields)</h3>
   <div class="row">{tw_rows}</div>
   <div class="row"><button class="btn">Save social keys</button><span id="socout" class="msg"></span></div>
 </form>
@@ -10456,14 +10540,19 @@ async function pa_test(){{
   return false;
 }}
 async function soc_save(){{
-  $("socout").textContent = "Saving…";
-  const keys = collect_filled("#fsoc input[data-masked]:not([data-tw])");
-  const twitter = collect_filled("#fsoc input[data-tw]");
-  const d = await post("/api/settings", {{social: {{
-    webhook: document.querySelector('[name="webhook"]').value,
-    keys: keys,
-    twitter: twitter
-  }}}});
+   $("socout").textContent = "Saving…";
+   const keys = collect_filled("#fsoc input[data-masked]:not([data-tw]):not([data-pint])");
+   const twitter = collect_filled("#fsoc input[data-tw]");
+   const pinterest = {{}};
+   document.querySelectorAll("#fsoc input[data-pint]").forEach(el => {{
+     if (el.value && el.value.indexOf("•") === -1) pinterest[el.name.replace("pint_", "")] = el.value;
+   }});
+   const d = await post("/api/settings", {{social: {{
+     webhook: document.querySelector('[name="webhook"]').value,
+     keys: keys,
+     twitter: twitter,
+     pinterest: pinterest
+   }}}});
   $("socout").textContent = d && d.ok ? "Saved ✓" : ((d && d.error) || "Save failed");
   return false;
 }}
@@ -11703,6 +11792,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                     pass
             native_keys = [r[0] for r in conn.execute(
                 "SELECT key FROM settings WHERE key LIKE 'social.key.%' "
+                "AND (key NOT LIKE 'social.key.%.%' OR key LIKE 'social.key.twitter.%') "
                 "AND value!=''")]
             # end-user funnel + discovery inventory (all read-only aggregations)
             subs_today = cnt("SELECT COUNT(*) FROM subscribers WHERE "
