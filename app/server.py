@@ -83,6 +83,41 @@ def _stamp_style_version(data, ctype):
     return data
 
 
+_TG_JOIN_MARK = b"data-pstore-tg-join"
+
+
+def _telegram_button_html():
+    """Floating "Join on Telegram" button for public pages, or "" when the
+    operator hasn't turned it on (telegram.on_page) with a bot username."""
+    try:
+        if _get_setting("telegram.on_page", "0") != "1":
+            return ""
+        bot = (_get_setting("telegram.botname", "") or "").strip().lstrip("@")
+    except Exception:
+        return ""
+    if not bot:
+        return ""
+    url = "https://t.me/%s?start=site" % urllib.parse.quote(bot)
+    return ('<a data-pstore-tg-join href="%s" target="_blank" rel="noopener" '
+            'style="position:fixed;right:16px;bottom:16px;z-index:9999;background:#229ED9;'
+            'color:#fff;padding:10px 16px;border-radius:24px;font-family:system-ui,sans-serif;'
+            'font-size:14px;text-decoration:none;box-shadow:0 2px 8px rgba(0,0,0,.25)">'
+            '\u2708\ufe0f Join on Telegram</a>') % url
+
+
+def _inject_telegram_button(data, path):
+    """Append the opt-in button to a public HTML page (never /admin or /api)."""
+    path = path or ""
+    if path.startswith(("/admin", "/api", "/dashboard", "/tool", "/keys")):
+        return data
+    if _TG_JOIN_MARK in data or b"</body>" not in data:
+        return data
+    btn = _telegram_button_html()
+    if not btn:
+        return data
+    return data.replace(b"</body>", btn.encode("utf-8") + b"</body>", 1)
+
+
 # ---------------------------------------------------------- live head-tag check
 _TITLE_RX = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.S)
 _CANON_RX = re.compile(r'<link[^>]*\brel="canonical"[^>]*\bhref="([^"]+)"[^>]*>',
@@ -1924,6 +1959,8 @@ webmasters._STORE_SET = _set_setting
 telegram._STORE_GET = _get_setting
 telegram._STORE_SET = _set_setting
 telegram._set_transport(publish._post)
+telegram_admin._STORE_GET = _get_setting
+telegram_admin._STORE_SET = _set_setting
 
 
 # ------------------------------------------------------------ RBAC data access
@@ -2875,6 +2912,8 @@ class Handler(BaseHTTPRequestHandler):
         _tally_api(getattr(self, "path", ""), code, self._latency())
         data = body if isinstance(body, bytes) else json.dumps(body).encode("utf-8")
         data = _stamp_style_version(data, ctype)
+        if "text/html" in ctype:
+            data = _inject_telegram_button(data, getattr(self, "path", ""))
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
@@ -2899,6 +2938,8 @@ class Handler(BaseHTTPRequestHandler):
         per-visitor headline intact."""
         data = body if isinstance(body, bytes) else body.encode("utf-8")
         data = _stamp_style_version(data, ctype)
+        if "text/html" in ctype:
+            data = _inject_telegram_button(data, getattr(self, "path", ""))
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
@@ -4253,6 +4294,7 @@ for (const id of ["me-name","me-pw","me-pw2"])
               ("/admin/marketing", "📊 ROI", "marketing"),
               ("/admin/emails", "📨 Email Studio", "emails"),
               ("/admin/social", "📣 Social", "social"),
+              ("/admin/telegram", "✈️ Telegram", "telegram"),
               ("/admin/variants", "⚗️ A/B", "variants"),
               ("/admin/segments", "🎚 Lead segments", "segments"),
               ("/admin/pricedrop", "🏷 Price drops", "pricedrop"),
@@ -4331,6 +4373,7 @@ for (const id of ["me-name","me-pw","me-pw2"])
             ("/admin/marketing", "📊 Marketing ROI", "email + social + traffic"),
             ("/admin/emails", "📨 Email Studio", "compose, switches & scheduling"),
             ("/admin/social", "📣 Social publishing", "tracked posts"),
+            ("/admin/telegram", "✈️ Telegram broadcast", "subscriber opt-in + admin send"),
             ("/admin/variants", "⚗️ A/B headline tests", "per-niche split test"),
             ("/admin/segments", "🎚 Lead lifecycle segments", "hot / warm / cold"),
             ("/admin/pricedrop", "🏷 Price-drop deal engine", "scarcity pushes"),

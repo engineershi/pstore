@@ -294,6 +294,17 @@ def _chapters():
             "dropped. Set the SOCIAL_WEBHOOK env var to that URL (or any "
             "Make/Zapier URL) and the whole publishing loop runs in-house for free.")
         doc.paragraph(
+            "The Telegram broadcast page (/admin/telegram) is the messenger "
+            "equivalent of Email Studio. Paste a BotFather bot token, a webhook "
+            "secret and the bot's @username, then turn on 'Show join button on "
+            "every page': every public page floats a 'Join on Telegram' button "
+            "that deep-links to t.me/<bot>?start=<page>, and each reader who taps "
+            "Start lands in the subscribers table as an organic Telegram lead. The "
+            "webhook at POST /api/telegram/hook captures them in real time "
+            "(validated by the secret header), understands /start, /join, "
+            "/subscribe and /stop, and the admin panel broadcasts one tracked "
+            "message or share-card image to every subscriber in one click.")
+        doc.paragraph(
             "Every review card on a live page carries a 'Track price' button. A "
             "visitor who clicks it becomes a subscriber AND a price-watcher; the "
             "moment that product genuinely drops, the daily email pass sends them a "

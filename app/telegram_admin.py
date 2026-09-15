@@ -92,9 +92,8 @@ def _tg_subs(self):
 
 def admin_telegram(self, q):
     """GET /admin/telegram — admin broadcast + subscriber management page."""
-    authed = self._authed()
-    if not authed:
-        return self._render(q, "Telegram broadcast", self._admin_login_html(q))
+    if not self._authed():
+        return self._redirect_login("/admin/telegram")
     subs = _tg_subs(self)
     cfg = _config_blob(self)
     rows_html = "\n".join(
@@ -165,57 +164,53 @@ async function tgMe(){const r=await api("/api/telegram/state",{action:"me"});
 async function tgBroadcast(){const r=await api("/api/telegram/broadcast",
   {text:document.getElementById("msg").value,image:document.getElementById("img").value});
   document.getElementById("bres").textContent = r.ok ? "Broadcast started" : "Error: "+r.error;}
-function fill(){fetch("/api/telegram/state").then(r=>r.json()).then(j=>{
+async function fill(){const j=await api("/api/telegram/state",{});
   if(j.ok){document.getElementById("token").value=j.token||"";document.getElementById("secret").value=j.secret||"";
     document.getElementById("botname").value=j.botname||"";
-    document.getElementById("on_page").checked=!!j.on_page;}});}
+    document.getElementById("on_page").checked=!!j.on_page;}}
 fill();
 </script></body></html>""".replace("__HOOK_URL__",
-        _tg.site_url().rstrip("/") + "/api/telegram/hook"
+        (self._site_base() or "https://YOUR-DOMAIN").rstrip("/") + "/api/telegram/hook"
     ).replace("__ROWS__", rows_html).replace("__CNT__", str(len(subs)))
-    return self._send(q, html)
+    return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
 
 
 def telegram_state_api(self):
     """POST /api/telegram/state — settings editor fill + getMe."""
-    q = self._body_json()
+    q = self._body()
     cfg = _config_blob(self)
     if q and q.get("action") == "me":
-        try:
-            info = _tg.get_me(_tg.token())
-            return self._json(q, {"ok": True, "result": info.get("result", info)})
-        except Exception as ex:
-            return self._json(q, {"ok": False, "error": str(ex)}, status=400)
-    return self._json(q, {"ok": True,
+        ok, info = _tg.get_me(_tg.token())
+        if ok:
+            handle = info.get("username") or info.get("name") or "?"
+            return self._send(200, {"ok": True, "result": "Bot @" + handle})
+        return self._send(200, {"ok": False, "error": info.get("error") or "not connected"})
+    return self._send(200, {"ok": True,
         "token": cfg["token"], "secret": cfg["secret"],
         "botname": cfg["botname"], "on_page": cfg["on_page"]})
 
 
 def telegram_config_api(self):
-    q = self._body_json()
+    q = self._body()
     try:
         _config_save(self, q)
-        return self._json(q, {"ok": True})
+        return self._send(200, {"ok": True})
     except Exception as ex:
-        return self._json(q, {"ok": False, "error": str(ex)}, status=400)
+        return self._send(400, {"ok": False, "error": str(ex)})
 
 
 def telegram_broadcast_api(self):
-    q = self._body_json()
+    q = self._body()
     text = (q or {}).get("text", "")
     image = (q or {}).get("image", "")
     subs = _tg_subs(self)
     if not text.strip():
-        return self._json(q, {"ok": False, "error": "empty message"}, status=400)
+        return self._send(400, {"ok": False, "error": "empty message"})
     if not subs:
-        return self._json(q, {"ok": False, "error": "no subscribers yet"}, status=400)
+        return self._send(400, {"ok": False, "error": "no subscribers yet"})
 
     def worker():
         tok = _tg.token()
-        try:
-            _tg._set_transport_default()
-        except Exception:
-            pass
         for sub in subs:
             try:
                 _tg.send_message(tok, sub["chat_id"], text.strip(), image)
@@ -225,29 +220,28 @@ def telegram_broadcast_api(self):
                 continue
 
     threading.Thread(target=worker, daemon=True).start()
-    return self._json(q, {"ok": True, "sent": len(subs)})
+    return self._send(200, {"ok": True, "sent": len(subs)})
 
 
 def telegram_hook(self):
-    """PUBLIC POST /api/telegram/hook (no auth) — Telegram servers call this."""
+    """PUBLIC POST /api/telegram/hook (no auth) — Telegram servers call this.
+    When telegram.secret is configured the X-Telegram-Bot-Api-Secret-Token
+    header must match, so nobody else can inject fake subscribers."""
     try:
-        raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-        update = json.loads(raw.decode("utf-8", "replace"))
-        msg = update.get("message") or {}
-        chat = msg.get("chat") or {}
-        cid = str(chat.get("id", "")).strip()
-        if not cid:
-            return self._json(update, {"ok": False, "error": "no chat"}, status=400)
-        first = (msg.get("from") or {}).get("first_name", "") or chat.get("first_name", "")
-        username = (msg.get("from") or {}).get("username", "") or chat.get("username", "")
-        _tg_upsert_sub(self, cid, first, username, "site")
-        text = msg.get("text") or ""
+        want = _tg.secret()
+        if want:
+            got = (self.headers.get("X-Telegram-Bot-Api-Secret-Token") or "").strip()
+            if got != want:
+                return self._send(403, {"ok": False, "error": "bad secret"})
+        update = self._body()
+        parsed = _tg.parse_update(update)
+        if not parsed:
+            return self._send(200, {"ok": True, "ignored": True})
+        cid = parsed["chat_id"]
+        text = str(((update.get("message") or {}).get("text")) or "").strip()
         args = text.split()
         cmd = args[0].split("@")[0] if args else ""
-        reply = ""
-        if cmd in ("/start", "/join", "/subscribe", "💌"):
-            reply = "👋 Welcome! You're subscribed to pstore price drops."
-        elif cmd == "/stop":
+        if cmd == "/stop":
             db = _get_db()
             try:
                 with db:
@@ -255,23 +249,24 @@ def telegram_hook(self):
             finally:
                 _close_db(db)
             reply = "You're unsubscribed. Sad to see you go!"
+        else:
+            _tg_upsert_sub(self, cid, parsed["first_name"], parsed["username"],
+                           parsed["source"])
+            reply = ("👋 Welcome! You're subscribed to pstore price drops."
+                     if cmd in ("/start", "/join", "/subscribe", "💌") else "")
         if reply:
             try:
                 _tg.send_message(_tg.token(), cid, reply)
             except Exception:
                 pass
-        return self._json(update, {"ok": True})
+        return self._send(200, {"ok": True})
     except Exception as ex:
-        return self._json({}, {"ok": False, "error": str(ex)}, status=400)
+        return self._send(400, {"ok": False, "error": str(ex)[:200]})
 
 
 def _get_db():
-    try:
-        from server import _db_connect
-        return _db_connect()
-    except Exception:
-        from server import db_path
-        return sqlite3.connect(db_path())
+    from server import _db
+    return _db()
 
 
 def _close_db(db):
