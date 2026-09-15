@@ -232,6 +232,20 @@ class TestTelegramServer(unittest.TestCase):
         with self.assertRaises(ValueError):
             telegram_admin._config_save(None, "{not json")
 
+    def test_telegram_config_save_registers_webhook(self):
+        """Saving a bot token auto-registers the update webhook against the
+        live origin, signed with the configured secret so the hook can verify
+        inbound updates."""
+        st, d = self._set_cfg(token="123:TOK", secret="wh-secret",
+                              botname="pstorebot")
+        self.assertTrue(d["ok"])
+        self.assertEqual(d.get("webhook"), "webhook set")
+        calls = [c for c in self._sink.calls if c[0].endswith("/setWebhook")]
+        self.assertEqual(len(calls), 1)
+        payload = calls[0][1]
+        self.assertIn("/api/telegram/hook", payload["url"])
+        self.assertEqual(payload["secret_token"], "wh-secret")
+
     # ------------------------------------------------------------ broadcast API
     def test_broadcast_requires_subscribers(self):
         st, ct, body = self._raw("/api/telegram/broadcast", method="POST",

@@ -199,9 +199,17 @@ def telegram_config_api(self):
     q = self._body()
     try:
         _config_save(self, q)
-        return self._send(200, {"ok": True})
     except Exception as ex:
         return self._send(400, {"ok": False, "error": str(ex)})
+    res = {"ok": True}
+    tok = _tg.token()
+    if tok:
+        base = (self._site_base() or "").rstrip("/")
+        if base:
+            ok, desc = _tg.set_webhook(
+                tok, base + "/api/telegram/hook", _tg.secret())
+            res["webhook"] = desc if ok else ("failed: " + desc)
+    return self._send(200, res)
 
 
 def telegram_broadcast_api(self):
