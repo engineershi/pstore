@@ -24,6 +24,7 @@ class Base(unittest.TestCase):
         self._orig_get = publish._get
         self._orig_img = publish.og_image
         publish._PINT_BOARD_CACHE.clear()
+        publish._PINT_BOARDS_CACHE.clear()
         publish.og_image = lambda url: "https://example.com/og.png"
         self.captured = []
         self.requests = []
@@ -37,6 +38,9 @@ class Base(unittest.TestCase):
         boards = boards if boards is not None else [{"id": "board-1", "name": "Default"}]
         def fake(url, payload_, headers, timeout=15):
             self.requests.append((url, payload_, headers))
+            if "/v5/boards" in url and payload_.get("name"):
+                # POST /v5/boards (auto-create) -> fresh board id
+                return 201, {"id": "board-new", "name": payload_.get("name")}
             if "/v5/boards" in url:
                 return 200, {"items": boards}
             return 201, (payload or json.loads('{"id":"r1"}' if url.endswith("/pins") else '{}'))
@@ -49,9 +53,10 @@ class Base(unittest.TestCase):
             return mapping.get((ns, name), "")
         return kv
 
-    def _kit(self, platform, body="Hello world"):
+    def _kit(self, platform, body="Hello world", keyword=""):
         return {"platform": platform, "slug": "keto", "body": body,
-                "link": "https://x/lp/keto?utm_content=ab", "name": "post"}
+                "link": "https://x/lp/keto?utm_content=ab", "name": "post",
+                "keyword": keyword, "hashtags": "#keto"}
 
 
 class TestNativeScaffold(Base):
@@ -111,6 +116,38 @@ class TestNativeScaffold(Base):
         self.assertFalse(res["ok"])
         self.assertEqual(res["via"], "native")
         self.assertIn("no board", res["message"].lower())
+
+    def test_pinterest_auto_creates_per_niche_board(self):
+        # Zero-follower playbook: a fresh niche pin (keyword present) with no
+        # matching board creates its own board on the account, then lands there.
+        self._ok(boards=[{"id": "board-1", "name": "Default"}])
+        res = publish.post_to("Pinterest", self._kit("Pinterest", body="Keto picks",
+                                                     keyword="keto snacks"),
+                              self._keys({("pinterest", "token"): "PIN",
+                                          ("pinterest", "auto_board"): "1",
+                                          ("pinterest", "max_boards"): "15"}))
+        self.assertTrue(res["ok"])
+        creates = [(u, p, h) for u, p, h in self.requests
+                   if "/v5/boards" in u and isinstance(p, dict) and p.get("name")]
+        self.assertEqual(len(creates), 1)
+        self.assertEqual(creates[0][1]["name"], "Keto Snacks")
+        pins = [p for u, p, _ in self.requests
+                if "/v5/pins" in u]
+        self.assertEqual(pins[-1]["board_id"], "board-new")
+
+    def test_pinterest_no_auto_create_when_disabled(self):
+        self._ok(boards=[{"id": "board-1", "name": "Default"}])
+        res = publish.post_to("Pinterest", self._kit("Pinterest", body="Keto picks",
+                                                     keyword="keto snacks"),
+                              self._keys({("pinterest", "token"): "PIN",
+                                          ("pinterest", "auto_board"): "0"}))
+        self.assertTrue(res["ok"])
+        creates = [(u, p, h) for u, p, h in self.requests
+                   if "/v5/boards" in u and isinstance(p, dict) and p.get("name")]
+        self.assertEqual(creates, [])
+        pins = [p for u, p, _ in self.requests
+                if "/v5/pins" in u]
+        self.assertEqual(pins[-1]["board_id"], "board-1")
 
     def test_facebook_posts_with_token(self):
         self._ok()

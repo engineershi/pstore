@@ -31,6 +31,7 @@ import os
 import re
 import secrets
 import threading
+import time
 import urllib.parse
 import urllib.request
 
@@ -200,12 +201,61 @@ def _post_twitter(b, kv):
 
 
 _PINT_BOARD_CACHE = {}
+_PINT_BOARDS_CACHE = {}
+_PINT_AUTO_CAP = 15
+
+
+def _get_user_account(token):
+    """GET the authenticated account (v5) — username + follower count for the
+    console view. Returns (status, json)."""
+    return _get("https://api.pinterest.com/v5/user_account",
+                {"Authorization": "Bearer " + token}, timeout=10)
 
 
 def _get_board_items(token):
     """GET the authenticated account's boards (v5). Returns (status, json)."""
     return _get("https://api.pinterest.com/v5/boards?page_size=100",
                 {"Authorization": "Bearer " + token}, timeout=15)
+
+
+def _pint_boards(token, max_age=60):
+    """Cached list of the account's boards (sane dicts) — never rawer than
+    ``max_age`` so a blitz / console poll doesn't hammer the boards API."""
+    now = time.time()
+    hit = _PINT_BOARDS_CACHE.get(token)
+    if hit and now - hit[0] < max_age:
+        return hit[1]
+    st, data = _get_board_items(token)
+    items = (data or {}).get("items") if isinstance(data, dict) else None
+    boards = [b for b in (items or []) if isinstance(b, dict)]
+    _PINT_BOARDS_CACHE[token] = (now, boards)
+    return boards
+
+
+def _pint_create_board(token, board_name):
+    """Best-effort create a board (boards:write). Returns the new board id or
+    '' on failure (never raises). Invalidates the boards cache on success."""
+    name = str(board_name or "").strip()[:60]
+    if not name:
+        return ""
+    st, data = _post("https://api.pinterest.com/v5/boards",
+                     {"name": name,
+                      "description": "Fresh ranked picks, updated daily."},
+                     {"Authorization": "Bearer " + token})
+    if not (200 <= st < 300) or not isinstance(data, dict):
+        return ""
+    bid = str(data.get("id") or "")
+    if bid:
+        _PINT_BOARDS_CACHE.pop(token, None)
+    return bid
+
+
+def _pint_board_name(keyword):
+    """Human per-niche board name (mirrors server._pinterest_board): the
+    keyword, title-cased and capped. 'Deals' when there's no keyword."""
+    kw = (keyword or "").replace("-", " ").strip()
+    name = " ".join(w.capitalize() for w in re.split(r"[^A-Za-z0-9]+", kw) if w)
+    return (name or "Deals")[:60]
 
 
 def _pint_api_error(status, data):
@@ -221,42 +271,60 @@ def _pint_api_error(status, data):
     return "HTTP %s" % status
 
 
-def _pint_board_id(kv):
+def _pint_resolve_board(kv, requested="", auto=True):
     """Best-effort Pinterest board id for the token's account. Resolution order:
     an explicit board NAME from `kv("pinterest", "board")` (settings key
-    social.key.pinterest.board) wins; otherwise the account's "Default" board;
-    otherwise the first board in the list. Cached per (token, name) in-process so
-    a blitz doesn't call the boards API per pin. Returns '' when the account has
-    no boards or the lookup fails (the caller then fails the post and the webhook
-    fallback takes over)."""
+    social.key.pinterest.board) wins; otherwise `requested` (a per-niche board
+    name, e.g. the pin's keyword) — and when `auto` is on AND the "auto-create a
+    per-niche board" setting is enabled, that board is CREATED on the account
+    (boards:write) as long as the account stays under
+    `social.key.pinterest.max_boards` total; otherwise the account's "Default"
+    board; otherwise the first board in the list. Cached per (token, name) in
+    process so a blitz doesn't call the boards API per pin. Returns '' when the
+    account has no boards or the lookup fails (the caller then fails the post
+    and the webhook fallback takes over)."""
     tok = _pint_cred(kv)[0] or ""
     if not tok:
         return ""
-    wanted = str(kv("pinterest", "board") or "").strip().lower()
+    override = str(kv("pinterest", "board") or "").strip()
+    requested = (requested or "").strip()
+    wanted = (override or requested).lower()
+    wanted_orig = override or requested
     cache_key = tok + "|" + wanted
     if cache_key in _PINT_BOARD_CACHE:
         return _PINT_BOARD_CACHE[cache_key]
-    st, data = _get("https://api.pinterest.com/v5/boards?page_size=100",
-                    {"Authorization": "Bearer " + tok}, timeout=15)
-    items = (data or {}).get("items") if isinstance(data, dict) else None
-    if not isinstance(items, list):
-        return ""
+    boards = _pint_boards(tok)
     board_id = ""
-    for it in items:
-        if wanted and str(it.get("name") or "").strip().lower() == wanted:
+    for it in boards:
+        nm = str(it.get("name") or "").strip().lower()
+        if wanted and nm == wanted:
             board_id = str(it.get("id") or "")
             break
-        if not wanted and str(it.get("name") or "").strip().lower() == "default":
+        if not wanted and nm == "default":
             board_id = str(it.get("id") or "")
             break
+    if not board_id and auto and not override and wanted:
+        auto_on = str(kv("pinterest", "auto_board") or "1") not in ("0", "")
+        try:
+            cap = int(kv("pinterest", "max_boards") or _PINT_AUTO_CAP)
+        except (TypeError, ValueError):
+            cap = _PINT_AUTO_CAP
+        if auto_on and len(boards) < max(1, cap):
+            board_id = _pint_create_board(tok, wanted_orig)
     if not board_id:
-        for it in items:
+        for it in boards:
             if it.get("id"):
                 board_id = str(it.get("id"))
                 break
     if board_id:
         _PINT_BOARD_CACHE[cache_key] = board_id
     return board_id
+
+
+def _pint_board_id(kv):
+    """Compatibility shim: resolve the global board override / default board
+    without a per-niche request (auto-create still applies when enabled)."""
+    return _pint_resolve_board(kv)
 
 
 _EMOJI_RE = re.compile(
@@ -307,7 +375,9 @@ def _post_pinterest(b, kv):
     if not tok:
         return {"ok": False, "platform": "Pinterest", "via": "skipped",
                 "message": "No Pinterest board token configured."}
-    board = b.get("board_id") or _pint_board_id(kv)
+    board = b.get("board_id") or _pint_resolve_board(
+        kv, _pint_board_name(b.get("keyword") or ""),
+        auto=bool(b.get("keyword") or ""))
     if not board:
         return {"ok": False, "platform": "Pinterest", "via": "native",
                 "message": "Pinterest account has no board to pin to (add one "

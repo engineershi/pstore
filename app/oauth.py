@@ -112,7 +112,7 @@ PINTEREST_TOKEN = "https://api.pinterest.com/v5/oauth/token"
 
 
 def pinterest_authorize_url(client_id, redirect_uri, state):
-    scopes = "boards:read,boards:write,pins:read,pins:write"
+    scopes = "boards:read,boards:write,pins:read,pins:write,user_accounts:read"
     return ("%s?client_id=%s&redirect_uri=%s&response_type=code"
             "&scope=%s&state=%s"
             % (PINTEREST_AUTH,

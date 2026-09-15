@@ -672,6 +672,14 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
             self.assertIn(key, lv["surface"])
         m = data["queues"]
         self.assertGreaterEqual(m["clicks_today"], 2)
+        # Pinterest quick-traffic zone
+        pz = data.get("pinterest")
+        self.assertIsInstance(pz, dict)
+        for key in ("connected", "boards", "auto_board", "pins_today",
+                    "pins_total", "clicks_today", "clicks_7d", "clicks_total",
+                    "top_niches", "drip_on", "drip_daily", "drip_last"):
+            self.assertIn(key, pz)
+        self.assertIsInstance(pz["top_niches"], list)
 
     def test_system_api_route_telemetry_tallies_responses(self):
         """Per-route tallies count every dispatched _send response, so API health

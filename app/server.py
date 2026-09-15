@@ -1081,6 +1081,11 @@ def _publish_key_getter():
 
 _SOCIAL_SOURCE_KEYS = frozenset(social._key(p) for p in social.PLATFORMS) | {"pin", "x"}
 
+# Live Pinterest "quick traffic & click zone": network parts (username /
+# followers / boards) are cached ~60s because the system console polls /api/system
+# every 4s — we never spam the Pinterest API at that cadence.
+_PINT_ZONE_CACHE = {"at": 0.0, "data": None}
+
 
 def _click_channel(source):
     """Canonical acquisition channel for a click's raw `source`. Social links
@@ -5102,6 +5107,11 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                     if "pinterest." + f in pint else "")
                 if val:
                     _set_setting("social.key.pinterest.%s" % f, val)
+            # Posting strategy: board override ('' = auto per-niche), the
+            # auto-create toggle, and the board-count cap.
+            for f in ("board", "auto_board", "max_boards"):
+                if f in pint:
+                    _set_setting("social.key.pinterest.%s" % f, pint.get(f) or "")
         # Optional AI provider keys (the /admin/apikeys 'AI writing' section):
         # persist to DB so they survive restart/redeploy and apply immediately
         # by reconfiguring the runtime module (env vars still win at read time).
@@ -5198,11 +5208,69 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 "error": "Pinterest rejected the token: %s" % err,
             })
         names = [str(b.get("name") or "") for b in items if b.get("id")]
+        acct = ""
+        try:
+            ast, adata = publish._get_user_account(token)
+            if ast == 200 and isinstance(adata, dict):
+                u = (adata.get("username") or "").strip()
+                f = adata.get("followers")
+                acct = (" @%s · %s followers"
+                        % (u, f if f is not None else "?")) if u else ""
+        except Exception:
+            acct = ""
         return self._send(200, {
             "ok": True, "provider": "pinterest",
-            "detail": ("Connected ✓ token works — account has %d board(s): %s"
-                       % (len(names), ", ".join(names[:6]) or "none")),
+            "detail": ("Connected ✓ token works — account has %d board(s): %s%s"
+                       % (len(names), ", ".join(names[:6]) or "none", acct)),
         })
+
+    def _pinterest_zone_data(self):
+        """Live Pinterest snapshot for the system console. Network parts
+        (username / followers / boards) are cached ~60s so the 4s polling tick
+        never hits the Pinterest API; the DB counters are added by
+        :func:`_system_payload`."""
+        now = time.time()
+        if now - _PINT_ZONE_CACHE["at"] < 60 and _PINT_ZONE_CACHE["data"]:
+            return _PINT_ZONE_CACHE["data"]
+        token = _get_setting("social.key.pinterest.token", "")
+        zone = {
+            "connected": bool(token),
+            "username": "",
+            "followers": None,
+            "boards": 0,
+            "board_names": [],
+            "auto_board": (_get_setting("social.key.pinterest.auto_board", "1")
+                           not in ("0", "")),
+            "max_boards": (_get_setting("social.key.pinterest.max_boards", "")
+                           or 15),
+            "board_override": _get_setting("social.key.pinterest.board", ""),
+            "account_err": "",
+        }
+        if token:
+            try:
+                st, data = publish._get_user_account(token)
+                if st == 200 and isinstance(data, dict):
+                    zone["username"] = str(data.get("username")
+                                           or data.get("id") or "")
+                    f = data.get("followers")
+                    try:
+                        zone["followers"] = int(f) if f is not None else None
+                    except (TypeError, ValueError):
+                        zone["followers"] = None
+                else:
+                    zone["account_err"] = publish._pint_api_error(st, data)
+            except Exception as e:
+                zone["account_err"] = str(e)[:120]
+            try:
+                zbs = publish._pint_boards(token)
+                zone["boards"] = len(zbs)
+                zone["board_names"] = [str(b.get("name") or "")
+                                       for b in zbs if b.get("id")][:10]
+            except Exception:
+                pass
+        _PINT_ZONE_CACHE["at"] = now
+        _PINT_ZONE_CACHE["data"] = zone
+        return zone
 
     def _save_niche(self):
         body = self._body()
@@ -10476,6 +10544,21 @@ fresh();
             pint_btn = "Connect Pinterest"
             pint_status = ("Set app id + secret above then connect. Get them at "
                            "developers.pinterest.com.")
+        pint_board_val = seo._clean(_get_setting("social.key.pinterest.board", ""))
+        pint_auto_board = _get_setting("social.key.pinterest.auto_board", "1") not in ("0", "")
+        pint_max_boards = _get_setting("social.key.pinterest.max_boards", "") or "15"
+        pint_boards_opts = ""
+        if pint_ok:
+            try:
+                for _it in publish._pint_boards(
+                        _get_setting("social.key.pinterest.token", "")):
+                    _nm = str(_it.get("name") or "").strip()
+                    if _it.get("id") and _nm:
+                        pint_boards_opts += (
+                            '<option value="%s">%s</option>'
+                            % (seo._clean(_nm), seo._clean(_nm)))
+            except Exception:
+                pint_boards_opts = ""
         tw_meta = [
             ("twitter.client_id", "Consumer key (API key)", "Twitter client_id"),
             ("twitter.client_secret", "Consumer secret (API secret)", "client_secret"),
@@ -10565,6 +10648,12 @@ fresh();
      <button type="button" class="btn" onclick="pint_test()">Test Pinterest connection</button>
      <span class="hint">{pint_status}</span>
    </div>
+   <div class="row">
+     <label>Board <input type="text" name="pint_board" value="{pint_board_val}" list="pint_boards" placeholder="auto (one board per niche) — or type an exact board name" autocomplete="off" data-pint="1"></label>
+     <datalist id="pint_boards">{pint_boards_opts}</datalist>
+     <label><input type="checkbox" name="pint_auto_board" data-pint="1"{' checked' if pint_auto_board else ''}> Auto-create a per-niche board</label>
+     <label>Max boards <input type="number" min="1" max="60" name="pint_max_boards" value="{pint_max_boards}" data-pint="1" style="width:90px"></label>
+   </div>
    <h3>Twitter / X (optional, 4 fields)</h3>
   <div class="row">{tw_rows}</div>
   <div class="row"><button class="btn">Save social keys</button><span id="socout" class="msg"></span></div>
@@ -10612,7 +10701,10 @@ async function soc_save(){{
    const twitter = collect_filled("#fsoc input[data-tw]");
    const pinterest = {{}};
    document.querySelectorAll("#fsoc input[data-pint]").forEach(el => {{
-     if (el.value && el.value.indexOf("•") === -1) pinterest[el.name.replace("pint_", "")] = el.value;
+     const k = el.name.replace("pint_", "");
+     if (el.type === "checkbox") {{ pinterest[k] = el.checked ? "1" : "0"; }}
+     else if (el.name === "pint_board") {{ pinterest.board = (el.value && el.value.indexOf("•") === -1) ? el.value : ""; }}
+     else if (el.value && el.value.indexOf("•") === -1) {{ pinterest[k] = el.value; }}
    }});
    const d = await post("/api/settings", {{social: {{
      webhook: document.querySelector('[name="webhook"]').value,
@@ -11891,6 +11983,24 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                 "SELECT COALESCE(NULLIF(source,''),'unknown') source, COUNT(*) c "
                 "FROM clicks WHERE created_at >= datetime('now','-7 days') "
                 "GROUP BY source ORDER BY c DESC")]
+            pint_pins_today = cnt("SELECT COUNT(*) FROM social_posts "
+                                  "WHERE platform='Pinterest' AND status='published' "
+                                  "AND published_at >= date('now')")
+            pint_pins_total = cnt("SELECT COUNT(*) FROM social_posts "
+                                  "WHERE platform='Pinterest' AND status='published'")
+            pint_clicks_today = cnt("SELECT COUNT(*) FROM clicks "
+                                    "WHERE source IN ('pinterest','pin') "
+                                    "AND created_at >= date('now')")
+            pint_clicks_7d = cnt("SELECT COUNT(*) FROM clicks "
+                                 "WHERE source IN ('pinterest','pin') "
+                                 "AND created_at >= datetime('now','-7 days')")
+            pint_clicks_total = cnt("SELECT COUNT(*) FROM clicks "
+                                    "WHERE source IN ('pinterest','pin')")
+            pint_top_niches = [dict(r) for r in conn.execute(
+                "SELECT COALESCE(NULLIF(slug,''),'?') slug, COUNT(*) c "
+                "FROM clicks WHERE source IN ('pinterest','pin') "
+                "AND created_at >= datetime('now','-7 days') "
+                "GROUP BY slug ORDER BY c DESC LIMIT 6")]
             nics = conn.execute("SELECT keyword, products FROM niches").fetchall()
             niche_rows = len(nics)
             live_slugs = set()
@@ -11911,6 +12021,12 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             conn.close()
 
         pd = self._price_run_state()
+        pz = self._pinterest_zone_data()
+        _drip_gate = _get_setting("social.drip")
+        drip_on = (_drip_gate == "" or str(_drip_gate).strip().lower()
+                   in ("1", "on", "true", "yes"))
+        pint_drip_daily = _get_setting("social.drip.daily", "6")
+        pint_drip_last = _get_setting("social.drip.last", "")
         healths = {"http": health("http"), "content": health("content"),
                    "social": health("social"), "outbox": health("outbox"),
                    "inbox": health("inbox"), "refresh": health("refresh"),
@@ -12054,9 +12170,25 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                     {"engine": e, "views": v, "clicks": c}
                     for e, v, c in eng_buckets],
             },
+            "pinterest": {
+                "connected": pz["connected"], "username": pz["username"],
+                "followers": pz["followers"], "boards": pz["boards"],
+                "board_names": pz["board_names"],
+                "auto_board": pz["auto_board"], "max_boards": pz["max_boards"],
+                "board_override": pz["board_override"],
+                "account_err": pz["account_err"],
+                "pins_today": pint_pins_today, "pins_total": pint_pins_total,
+                "clicks_today": pint_clicks_today,
+                "clicks_7d": pint_clicks_7d,
+                "clicks_total": pint_clicks_total,
+                "top_niches": pint_top_niches,
+                "drip_on": drip_on, "drip_daily": pint_drip_daily,
+                "drip_last": pint_drip_last,
+            },
             "funnel": {
                 "subs_today": subs_today, "views_today": views_today,
-                "opens_today": opens_today, "email_clicks_today": email_clicks_today,
+                "opens_today": opens_today,
+                "email_clicks_today": email_clicks_today,
                 "referrers": referrers, "referred_total": referred_total,
                 "gate_subs_today": gate_subs_today, "gate_subs_7d": gate_subs_7d,
                 "gate_rate": (round(100.0 * gate_subs_today / views_today, 1)
@@ -12269,6 +12401,67 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                fun.get("gate_subs_7d", 0), fun.get("nudge_today", 0),
                fun.get("referred_total", 0), fun.get("pricewatch_drops", 0),
                est_amt or "—"))
+        # ---- Pinterest quick traffic & click zone ----
+        pz = rep.get("pinterest") or {}
+        pz_fol = ("%s" % pz["followers"]) if pz.get("followers") is not None else "—"
+        pz_max = pz.get("max_boards") or 15
+        pz_auto_s = "on" if pz.get("auto_board") else "off"
+        pz_drip_s = "on" if pz.get("drip_on") else "off"
+        pz_daily = pz.get("drip_daily") or 6
+        pz_last = pz.get("drip_last") or "—"
+        pz_over = pz.get("board_override") or ""
+        if pz.get("connected"):
+            pz_tiles = (
+                '<div class="stat-tile st-ok"><b id="pz-user">@%s</b><span>Pinterest account</span></div>'
+                '<div class="stat-tile"><b id="pz-fol">%s</b><span>Followers</span></div>'
+                '<div class="stat-tile"><b id="pz-boards">%d</b><span>Boards</span></div>'
+                '<div class="stat-tile"><b id="pz-auto">auto %s · %d cap</b><span>Board strategy</span></div>'
+                '<div class="stat-tile"><b id="pz-pins-today">%d</b><span>Pins today</span></div>'
+                '<div class="stat-tile"><b id="pz-pins-total">%d</b><span>Pins all-time</span></div>'
+                '<div class="stat-tile"><b id="pz-clicks-today">%d</b><span>Clicks today</span></div>'
+                '<div class="stat-tile"><b id="pz-clicks-7d">%d</b><span>Clicks 7d</span></div>'
+                '<div class="stat-tile"><b id="pz-clicks-total">%d</b><span>Clicks all-time</span></div>'
+                '<div class="stat-tile"><b id="pz-drip">%s · %s/day</b><span>Fresh-pin drip (last %s)</span></div>'
+                % (seo._clean(pz.get("username") or "?"), pz_fol,
+                   pz.get("boards") or 0, pz_auto_s, pz_max,
+                   pz.get("pins_today") or 0, pz.get("pins_total") or 0,
+                   pz.get("clicks_today") or 0, pz.get("clicks_7d") or 0,
+                   pz.get("clicks_total") or 0, pz_drip_s, pz_daily,
+                   seo._clean(pz_last)))
+            if pz_over:
+                pz_strat = ("Board override: <b>%s</b> — every pin lands there; "
+                            "auto-create disabled." % seo._clean(pz_over))
+            else:
+                pz_strat = ("Board strategy: <b>auto per-niche</b> — a fresh "
+                            "pin creates its own board (up to %d) so the "
+                            "algorithm shows it to the right crowd." % pz_max)
+        else:
+            pz_tiles = ('<div class="stat-tile"><b>—</b><span>Not connected</span></div>'
+                        '<div class="stat-tile"><b>0</b><span>Followers</span></div>'
+                        '<div class="stat-tile"><b>0</b><span>Boards</span></div>')
+            pz_strat = ("Pinterest is not connected — set app id + secret and "
+                        "hit Connect on /admin/apikeys to open the quick "
+                        "traffic zone.")
+        pz_niches = "".join(
+            '<tr><td>%s</td><td class="ct">%d</td></tr>'
+            % (seo._clean(r.get("slug") or "?"), int(r.get("c") or 0))
+            for r in pz.get("top_niches") or []) or \
+            "<tr><td colspan='2'>No Pinterest clicks in the last 7 days yet.</td></tr>"
+        pz_state = pz_strat + (" · " + seo._clean(pz.get("account_err") or "")
+                               if pz.get("account_err") else "")
+        pz_card = f"""
+<section class="card"><h2>📌 Pinterest — quick traffic &amp; click zone
+<span class="hint">(zero-follower playbook: every fresh pin is a free look from the algorithm — per-niche boards get it in front of the right crowd, tracked links turn pins into clicks)</span></h2>
+<div class="stat-tiles" id="pinzone">{pz_tiles}</div>
+<div class="features" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr))">
+ <div class="feature"><h4>Top Pinterest niches (7d clicks)</h4>
+  <div class="table-wrap" style="margin-top:4px"><table><tbody id="pz-top">{pz_niches}</tbody></table></div></div>
+ <div class="feature"><h4>Quick actions</h4>
+  <p><button type="button" class="btn" onclick="pinNewest()">Pin newest now</button> <span id="pzout" class="msg"></span></p>
+  <p class="hint">Config on <a href="/admin/apikeys">API keys</a>. Manage the daily fresh-pin drip and the per-niche board strategy there; this panel refreshes with the console every 4s.</p></div>
+</div>
+<p class="hint" id="pz-state">{pz_state}</p></section>
+"""
         body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>System console — pstore</title><link rel="stylesheet" href="/style.css">
@@ -12331,6 +12524,7 @@ stay <b>IDLE</b>. Redrawn automatically every 4s.</p>
   <div class="table-wrap" style="margin-top:4px"><table><tbody>{pub_rows}</tbody></table></div></div>
 </div>
 <p class="hint">Full cross-channel ROI lives on <a href="/admin/analytics">Analytics</a>; referral breakdown on <a href="/admin/segments">Segments</a>.</p></section>
+{pz_card}
 <section class="card"><h2>📡 Live surface status <span class="hint">(self-check of the public URLs as a crawler/feed-reader sees them, refreshed ~60s)</span></h2>
 <div class="table-wrap"><table><thead><tr><th>Asset</th><th class="ct">Coverage</th><th class="ct">Live HTTP</th></tr>
 </thead><tbody>{live_rows}</tbody></table></div>
@@ -12381,7 +12575,39 @@ async function tick(){{
         (x.last||'—')+'</td><td class="ct">'+(x.last_ms!=null?x.last_ms+'ms':'—')+'</td></tr>';
     }});
     if(a2) document.getElementById('api-routes').innerHTML = a2;
+    var pz = d.pinterest || {{}};
+    function pzset(id, v){{
+      var e = document.getElementById(id); if (e) e.textContent = v;
+    }}
+    pzset('pz-user', pz.username ? '@' + pz.username : '—');
+    pzset('pz-fol', (pz.followers != null) ? pz.followers : '—');
+    pzset('pz-boards', (pz.boards != null) ? pz.boards : '—');
+    pzset('pz-auto', 'auto ' + (pz.auto_board ? 'on' : 'off') + ' · ' + (pz.max_boards || 15) + ' cap');
+    pzset('pz-pins-today', pz.pins_today || 0);
+    pzset('pz-pins-total', pz.pins_total || 0);
+    pzset('pz-clicks-today', pz.clicks_today || 0);
+    pzset('pz-clicks-7d', pz.clicks_7d || 0);
+    pzset('pz-clicks-total', pz.clicks_total || 0);
+    pzset('pz-drip', (pz.drip_on ? 'on' : 'off') + ' · ' + (pz.drip_daily || 0) + '/day');
+    var pt = '';
+    (pz.top_niches || []).forEach(function(n){{
+      pt += '<tr><td>' + esc(n.slug) + '</td><td class="ct">' + n.c + '</td></tr>';
+    }});
+    if (pt) document.getElementById('pz-top').innerHTML = pt;
+    var pzs = document.getElementById('pz-state');
+    if (pzs && pz.board_override) pzs.textContent = 'Board override: ' + pz.board_override + ' — every pin lands there; auto-create disabled.';
+    else if (pzs && pz.connected) pzs.textContent = 'Board strategy: auto per-niche — a fresh pin creates its own board (up to ' + (pz.max_boards || 15) + ') so the algorithm shows it to the right crowd.' + (pz.account_err ? ' · ' + pz.account_err : '');
+    else if (pzs) pzs.textContent = 'Pinterest is not connected — set app id + secret and hit Connect on /admin/apikeys to open the quick traffic zone.';
   }}catch(e){{document.getElementById('stamp').textContent='⚠ live refresh failed: '+e;}}
+}}
+async function pinNewest(){{
+  var o = document.getElementById('pzout');
+  if (o) o.textContent = 'pinning newest niches…';
+  try{{
+    var r = await fetch('/api/social/blitz', {{method:'POST', headers:{{'Content-Type':'application/json'}}, body:'{{}}'}});
+    var d = await r.json().catch(function(){{return {{}};}});
+    if (o) o.textContent = d && d.ok ? ('pinned ' + (d.niches || []).length + ' niche(s)' + (d.skipped ? ' · ' + d.skipped + ' skipped' : '')) : 'blitz failed';
+  }}catch(e){{ if (o) o.textContent = 'request failed: ' + e; }}
 }}
 function esc(s){{return (s==null?'':String(s)).replace(/[&<>"]/g,function(c){{return {{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}}[c];}});}}
 tick(); setInterval(tick, 4000);
