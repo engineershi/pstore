@@ -1341,6 +1341,9 @@ class TestRoutes(unittest.TestCase):
         self.assertIn('data-tw="1"', html)
         # the optional AI writing section is present with per-provider rows
         self.assertIn("AI writing keys", html)
+        # collapsible section navigator + back-to-top on the long keys page
+        self.assertIn('class="secfab"', html)
+        self.assertIn("section-nav.js", html)
         self.assertIn('data-aik="openai"', html)
         self.assertIn('data-aik="opencode"', html)
         self.assertIn('data-aik="nvidia"', html)

@@ -90,8 +90,15 @@ def _tg_subs(self):
         _close_db(db)
 
 
+_TOTOP = ('<div class="totop"><a href="#top" aria-label="Back to top">&uarr;</a></div>'
+          '<script src="/ui.js" defer></script>')
+
+
 def admin_telegram(self, q):
-    """GET /admin/telegram — admin broadcast + subscriber management page."""
+    """GET /admin/telegram — admin broadcast + subscriber management page.
+    Rendered with the same shared design system as every other admin page
+    (/style.css + admin nav + card chrome), subscribers table scrolling
+    horizontally on narrow screens."""
     if not self._authed():
         return self._redirect_login("/admin/telegram")
     subs = _tg_subs(self)
@@ -101,63 +108,49 @@ def admin_telegram(self, q):
         <td>{last}</td></tr>""".format_map(r)
         for r in subs
     )
+    nav = self._admin_nav("telegram") if hasattr(self, "_admin_nav") else ""
     html = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
 <title>Telegram broadcast — pstore</title>
-<style>
-body{font-family:system-ui,sans-serif;margin:0;background:#fff;color:#111;
--webkit-text-size-adjust:100%}
-main{max-width:1000px;margin:2em auto;padding:0 1em}
-h1{font-size:1.4em}
-.chip{display:inline-block;background:#eef3fb;color:#1d4f91;border-radius:4px;
-padding:3px 10px;margin:2px;font-size:.85em;cursor:pointer}
-form{background:#f7f9fc;border:1px solid #dfe6f0;border-radius:8px;padding:1.2em;margin:1.2em 0}
-label{display:block;font-weight:600;margin:.6em 0 .2em}
-input[type=text],input[type=password],textarea{width:100%;box-sizing:border-box;
-padding:.55em;border:1px solid #ccd6e4;border-radius:6px;font-size:16px}
-button{background:#1d4f91;color:#fff;border:0;border-radius:6px;padding:.6em 1.4em;
-cursor:pointer;margin:.3em .3em 0 0;font-size:.95em}
-.small{font-size:.85em;color:#555;overflow-wrap:anywhere}.ok{color:#0a6}.
-.table-wrap{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
-table{border-collapse:collapse;width:100%;min-width:520px}
-td,th{border:1px solid #e3e9f1;padding:.5em;text-align:left;font-size:.9em;
-white-space:nowrap}
-@media(max-width:640px){
-  main{margin:1em auto;padding:0 .7em}
-  h1{font-size:1.2em}
-  form{padding:.9em}
-  button{width:100%;margin:.4em 0 0}
-  .chip{margin:2px 2px 2px 0}
-}
-</style></head><body>
+<link rel="stylesheet" href="/style.css">
+</head><body>
+<header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
+<div class="hero"><h1>Telegram <span>broadcast.</span></h1>
+<p class="tagline">Subscribers opt in from a join button on every page, and you send price-drop pushes from here — every tap tracked back to clicks.</p></div>
+__NAV__
+</header>
 <main>
-<div class="chip" onclick="location.href='/admin'">Back</div>
-<div class="chip" onclick="location.href='/admin/telegram'">Telegram</div>
-<h1>📣 Telegram broadcast</h1>
-<p class="small">Webhook: <b>__HOOK_URL__</b></p>
-
-<form id="cfg">
-<label>Bot token</label><input type="password" id="token" placeholder="123:ABC…">
-<label>Secret (webhook verification)</label><input type="text" id="secret">
-<label>Bot username</label><input type="text" id="botname" placeholder="@MyPstoreBot">
-<label><input type="checkbox" id="on_page"> Show join button on every page</label><br>
-<button type="button" onclick="tgSave()">Save</button>
-<button type="button" onclick="tgMe()">Test connection</button>
-<span id="res"></span>
+<section class="card"><h2>🤖 Bot config</h2>
+<p class="hint" style="overflow-wrap:anywhere">Webhook: <code>__HOOK_URL__</code> — Telegram servers call this whenever someone taps your bot.</p>
+<form class="cols-form" id="cfg">
+  <label>Bot token <input type="password" id="token" placeholder="123:ABC…" autocomplete="off"></label>
+  <label>Secret (webhook verification) <input type="text" id="secret" placeholder="pick a secret, set it in BotFather too"></label>
+  <label>Bot username <input type="text" id="botname" placeholder="@MyPstoreBot"></label>
+  <label style="flex-direction:row;align-items:center;gap:10px;min-height:46px">
+    <input type="checkbox" id="on_page" style="width:auto;height:auto;flex:none"> Show join button on every page</label>
+  <div class="row">
+    <button type="button" class="btn" onclick="tgSave()">Save config</button>
+    <button type="button" class="btn" onclick="tgMe()">Test connection</button>
+    <span id="res" class="msg"></span>
+  </div>
 </form>
-
-<form id="bc">
-<h3>Broadcast to all subscribers</h3>
-<label>Text</label><textarea id="msg" rows="3"></textarea>
-<label>Image URL (optional)</label><input type="text" id="img">
-<button type="button" onclick="tgBroadcast()">Send broadcast</button>
-<span id="bres"></span>
+</section>
+<section class="card"><h2>📨 Broadcast to all subscribers</h2>
+<form class="cols-form" id="bc">
+  <label>Text <textarea id="msg" rows="3" placeholder="Drop today's price moves…"></textarea></label>
+  <label>Image URL (optional) <input type="text" id="img" placeholder="https://…/banner.png"></label>
+  <div class="row"><button type="button" class="btn" onclick="tgBroadcast()">Send broadcast</button>
+  <span id="bres" class="msg"></span></div>
 </form>
-
-<h3>Subscribers (<span id="cnt">__CNT__</span>)</h3>
-<div class="table-wrap"><table><thead><tr><th>Name</th><th>Username</th><th>Chat</th><th>Source</th>
+</section>
+<section class="card"><h2>👥 Subscribers <span class="hint">(</span><span id="cnt" class="hint">__CNT__</span><span class="hint">)</span></h2>
+<div class="table-wrap"><table class="plain"><thead><tr><th>Name</th><th>Username</th><th>Chat</th><th>Source</th>
 <th>Last seen</th></tr></thead><tbody id="rows">__ROWS__</tbody></table></div>
+<p class="hint">On a phone the subscriber table rolls sideways inside its card — swipe to see all columns.</p>
+</section>
 </main>
+__TOTOP__
 <script>
 const T = () => document.getElementById("token").value;
 const S = () => document.getElementById("secret").value;
@@ -182,7 +175,8 @@ async function fill(){const j=await api("/api/telegram/state",{});
 fill();
 </script></body></html>""".replace("__HOOK_URL__",
         (self._site_base() or "https://YOUR-DOMAIN").rstrip("/") + "/api/telegram/hook"
-    ).replace("__ROWS__", rows_html).replace("__CNT__", str(len(subs)))
+    ).replace("__ROWS__", rows_html).replace("__CNT__", str(len(subs))
+    ).replace("__NAV__", nav).replace("__TOTOP__", _TOTOP)
     return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
 
 

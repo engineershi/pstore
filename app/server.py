@@ -4807,6 +4807,10 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 with open(os.path.join(STATIC, "table-flow.js"), "rb") as fh:
                     return self._send_cached(fh.read(),
                                              "application/javascript; charset=utf-8", 600)
+            if path == "/section-nav.js":
+                with open(os.path.join(STATIC, "section-nav.js"), "rb") as fh:
+                    return self._send_cached(fh.read(),
+                                             "application/javascript; charset=utf-8", 600)
             if path == "/ui.js":
                 with open(os.path.join(STATIC, "ui.js"), "rb") as fh:
                     return self._send_cached(fh.read(),
@@ -10742,11 +10746,16 @@ fresh();
 <p class="tagline">No env vars, no restart. Keys are stored on this instance and used on the next request.</p></div>
 {self._admin_nav('apikeys')}
 </header>
-<nav class="seccrumbs" id="crumbs" aria-label="Jump to a section">
- <a href="#sec-pa">🛒 Product data</a>
- <a href="#sec-social">📣 Social keys</a>
- <a href="#pint-card">📌 Pinterest</a>
- <a href="#sec-ai">🤖 AI keys</a>
+<nav class="secfab" id="secnav" aria-label="Jump to a section">
+ <button type="button" class="secfab-btn" aria-expanded="false" aria-controls="secnav-menu" aria-label="Page sections" title="Page sections">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+ </button>
+ <div class="secfab-menu" id="secnav-menu" role="menu">
+  <a role="menuitem" href="#sec-pa">🛒 Product data</a>
+  <a role="menuitem" href="#sec-social">📣 Social keys</a>
+  <a role="menuitem" href="#pint-card">📌 Pinterest</a>
+  <a role="menuitem" href="#sec-ai">🤖 AI keys</a>
+ </div>
 </nav>
 <main>
 <section class="card" id="sec-pa"><h2>🛒 Amazon PA-API (official product data)</h2>
@@ -10880,27 +10889,8 @@ async function ai_test(p){{
     ? ("Test ✓ " + (d.reply || "") + " · " + (d.latency_ms || 0) + "ms")
     : ((d && d.error) || "Test failed");
 }}
-// Scroll-spy for the section jump bar + reveal the back-to-top pill.
-(function(){{
-  var crumbs = document.getElementById('crumbs');
-  if(!crumbs) return;
-  var links = [].slice.call(crumbs.querySelectorAll('a'));
-  var secs = links.map(function(a){{return document.querySelector(a.getAttribute('href'));}});
-  var tt = document.querySelector('.totop');
-  function paint(){{
-    var top = window.scrollY + 140, idx = 0;
-    for(var i=0;i<secs.length;i++){{ if(secs[i] && secs[i].offsetTop <= top) idx = i; }}
-    links.forEach(function(a,i){{ a.classList.toggle('active', i===idx); }});
-    if(tt) tt.classList.toggle('show', window.scrollY > 300);
-    var active = links[idx];
-    if(active && crumbs.scrollWidth > crumbs.clientWidth)
-      crumbs.scrollLeft = Math.max(0, active.offsetLeft - crumbs.clientWidth/2 + active.offsetWidth/2);
-  }}
-  window.addEventListener('scroll', paint, {{passive:true}});
-  window.addEventListener('resize', paint, {{passive:true}});
-  paint();
-}})();
 </script>
+<script src="/section-nav.js" defer></script>
 </body></html>"""
         return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
 
@@ -12675,18 +12665,23 @@ td.yes{{color:#2e8b57}} td.no{{color:#c00;font-weight:600}}
 <p class="tagline">Every automation, its schedule and its queue — live. <span id="stamp"></span>
 &middot; up <b id="uptime"></b> &middot; pid <span id="pid"></span></p></div>
 {self._admin_nav('system')}</header>
-<nav class="seccrumbs" id="crumbs" aria-label="Jump to a section">
- <a href="#sec-health">❤️ Health</a>
- <a href="#sec-issues">🌀 Issues</a>
- <a href="#sec-schedule">🕐 Schedule</a>
- <a href="#sec-queues">🗃 Queues</a>
- <a href="#sec-api">🛡 API</a>
- <a href="#sec-indexing">🧭 Indexing</a>
- <a href="#sec-funnel">🎯 Funnel</a>
- <a href="#sec-pinterest">📌 Pinterest</a>
- <a href="#sec-live">📡 Live surface</a>
- <a href="#sec-config">🧩 Config</a>
- <a href="#sec-threads">🧵 Threads</a>
+<nav class="secfab" id="secnav" aria-label="Jump to a section">
+ <button type="button" class="secfab-btn" aria-expanded="false" aria-controls="secnav-menu" aria-label="Page sections" title="Page sections">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+ </button>
+ <div class="secfab-menu" id="secnav-menu" role="menu">
+  <a role="menuitem" href="#sec-health">❤️ Health</a>
+  <a role="menuitem" href="#sec-issues">🌀 Issues</a>
+  <a role="menuitem" href="#sec-schedule">🕐 Schedule</a>
+  <a role="menuitem" href="#sec-queues">🗃 Queues</a>
+  <a role="menuitem" href="#sec-api">🛡 API</a>
+  <a role="menuitem" href="#sec-indexing">🧭 Indexing</a>
+  <a role="menuitem" href="#sec-funnel">🎯 Funnel</a>
+  <a role="menuitem" href="#sec-pinterest">📌 Pinterest</a>
+  <a role="menuitem" href="#sec-live">📡 Live surface</a>
+  <a role="menuitem" href="#sec-config">🧩 Config</a>
+  <a role="menuitem" href="#sec-threads">🧵 Threads</a>
+ </div>
 </nav>
 <main>
 <section class="card" id="sec-health"><h2>❤️ Automation health</h2>
@@ -12812,31 +12807,10 @@ async function pinNewest(){{
 }}
 function esc(s){{return (s==null?'':String(s)).replace(/[&<>"]/g,function(c){{return {{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}}[c];}});}}
 tick(); setInterval(tick, 4000);
-// Scroll-spy: highlight the chip for the section currently in view, and reveal
-// the back-to-top pill once the console has scrolled past the first card.
-(function(){{
-  var crumbs = document.getElementById('crumbs');
-  if(!crumbs) return;
-  var links = [].slice.call(crumbs.querySelectorAll('a'));
-  var secs = links.map(function(a){{return document.querySelector(a.getAttribute('href'));}});
-  var tt = document.querySelector('.totop');
-  function paint(){{
-    var top = window.scrollY + 140, idx = 0;
-    for(var i=0;i<secs.length;i++){{ if(secs[i] && secs[i].offsetTop <= top) idx = i; }}
-    links.forEach(function(a,i){{ a.classList.toggle('active', i===idx); }});
-    var on = window.scrollY > 300;
-    if(tt) tt.classList.toggle('show', on);
-    var active = links[idx];
-    if(active && crumbs.scrollWidth > crumbs.clientWidth)
-      crumbs.scrollLeft = Math.max(0, active.offsetLeft - crumbs.clientWidth/2 + active.offsetWidth/2);
-  }}
-  window.addEventListener('scroll', paint, {{passive:true}});
-  window.addEventListener('resize', paint, {{passive:true}});
-  paint();
-}})();
 </script>
 </main>
 {_TOTOP}
+<script src="/section-nav.js" defer></script>
 <footer><p>Everything shown here is live state from the running process and its
 database — no log parsing. If a card stays STALE, the worker has stopped beating.</p></footer>
 </body></html>"""

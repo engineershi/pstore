@@ -174,9 +174,15 @@ class TestTelegramServer(unittest.TestCase):
         self.assertIn(b"Telegram broadcast", body)
         self.assertIn(b"/api/telegram/hook", body)
         self.assertIn(b"tgSave", body)
-        # mobile: viewport meta + horizontally scrollable subscriber table
+        # mobile + shared design system: viewport meta, the app stylesheet and
+        # card chrome (no standalone embed), horizontally scrollable table
         self.assertIn(b'name="viewport"', body)
+        self.assertIn(b'href="/style.css', body)
+        self.assertIn(b'class="card"', body)
+        self.assertIn(b'class="cols-form"', body)
         self.assertIn(b'class="table-wrap"', body)
+        self.assertIn(b'class="plain"', body)
+        self.assertIn(b"/ui.js", body)
 
     def test_admin_nav_surfaces_telegram(self):
         st, ct, body = self._raw("/admin", cookie=self.cookie)

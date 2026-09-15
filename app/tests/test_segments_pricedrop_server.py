@@ -623,11 +623,18 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
         self.assertIn(b"Queues", body)
         self.assertIn(b"Background threads", body)
         self.assertIn(b"setInterval(tick, 4000)", body)
-        # long-page chrome: sticky section jump bar + back-to-top pill
-        self.assertIn(b'class="seccrumbs"', body)
+        # long-page chrome: collapsible section FAB + back-to-top pill
+        self.assertIn(b'class="secfab"', body)
+        self.assertIn(b'section-nav.js', body)
         self.assertIn(b'id="sec-health"', body)
         self.assertIn(b'href="#sec-pinterest"', body)
         self.assertIn(b'class="totop"', body)
+
+    def test_section_nav_js_served(self):
+        st, ct, body = self._raw("/section-nav.js")
+        self.assertEqual(st, 200)
+        self.assertIn("application/javascript", ct)
+        self.assertIn(b"secfab", body)
 
     def test_system_console_engine_state_matches_hub(self):
         """Console engine flags derive from webmasters.engines_status(), so a Bing
