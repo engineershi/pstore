@@ -101,23 +101,34 @@ def admin_telegram(self, q):
         <td>{last}</td></tr>""".format_map(r)
         for r in subs
     )
-    html = """<!doctype html><html><head><meta charset="utf-8">
+    html = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Telegram broadcast — pstore</title>
 <style>
-body{font-family:system-ui,sans-serif;margin:0;background:#fff;color:#111}
+body{font-family:system-ui,sans-serif;margin:0;background:#fff;color:#111;
+-webkit-text-size-adjust:100%}
 main{max-width:1000px;margin:2em auto;padding:0 1em}
 h1{font-size:1.4em}
 .chip{display:inline-block;background:#eef3fb;color:#1d4f91;border-radius:4px;
-padding:3px 10px;margin:2px;font-size:.85em}
+padding:3px 10px;margin:2px;font-size:.85em;cursor:pointer}
 form{background:#f7f9fc;border:1px solid #dfe6f0;border-radius:8px;padding:1.2em;margin:1.2em 0}
 label{display:block;font-weight:600;margin:.6em 0 .2em}
 input[type=text],input[type=password],textarea{width:100%;box-sizing:border-box;
-padding:.55em;border:1px solid #ccd6e4;border-radius:6px}
+padding:.55em;border:1px solid #ccd6e4;border-radius:6px;font-size:16px}
 button{background:#1d4f91;color:#fff;border:0;border-radius:6px;padding:.6em 1.4em;
 cursor:pointer;margin:.3em .3em 0 0;font-size:.95em}
-.small{font-size:.85em;color:#555}.ok{color:#0a6}.
-table{border-collapse:collapse;width:100%}
-td,th{border:1px solid #e3e9f1;padding:.5em;text-align:left;font-size:.9em}
+.small{font-size:.85em;color:#555;overflow-wrap:anywhere}.ok{color:#0a6}.
+.table-wrap{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
+table{border-collapse:collapse;width:100%;min-width:520px}
+td,th{border:1px solid #e3e9f1;padding:.5em;text-align:left;font-size:.9em;
+white-space:nowrap}
+@media(max-width:640px){
+  main{margin:1em auto;padding:0 .7em}
+  h1{font-size:1.2em}
+  form{padding:.9em}
+  button{width:100%;margin:.4em 0 0}
+  .chip{margin:2px 2px 2px 0}
+}
 </style></head><body>
 <main>
 <div class="chip" onclick="location.href='/admin'">Back</div>
@@ -144,8 +155,8 @@ td,th{border:1px solid #e3e9f1;padding:.5em;text-align:left;font-size:.9em}
 </form>
 
 <h3>Subscribers (<span id="cnt">__CNT__</span>)</h3>
-<table><thead><tr><th>Name</th><th>Username</th><th>Chat</th><th>Source</th>
-<th>Last seen</th></tr></thead><tbody id="rows">__ROWS__</tbody></table>
+<div class="table-wrap"><table><thead><tr><th>Name</th><th>Username</th><th>Chat</th><th>Source</th>
+<th>Last seen</th></tr></thead><tbody id="rows">__ROWS__</tbody></table></div>
 </main>
 <script>
 const T = () => document.getElementById("token").value;

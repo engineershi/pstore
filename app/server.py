@@ -4394,6 +4394,7 @@ for (const id of ["me-name","me-pw","me-pw2"])
             ("/admin/analytics", "📊 Click tracking &amp; analytics", "beacons")])
 
         operate_section = section("🧰 Operate — run the site", [
+            ("/admin/system", "🖥 System console", "automation health + live APIs"),
             ("/admin/manual", "📖 User manual", "visual + PDF guide"),
             ("/admin/users", "👥 Users &amp; roles", "team + permissions"),
             ("/admin/pending", "🔎 My access", "functions &amp; roles"),
@@ -10724,7 +10725,7 @@ fresh();
                 seo._clean((_m["models"] or [_m["model"]])[0]),
                 _p, seo._clean(_get_setting("ai.base." + _p)), seo._clean(_m["base"]),
                 _p, seo._clean(_m["label"]), _p, _p))
-        ai_section = f"""<section class="card"><h2>🤖 AI writing keys (optional)</h2>
+        ai_section = f"""<section class="card" id="sec-ai"><h2>🤖 AI writing keys (optional)</h2>
 <p class="hint">{ai_status}. Paste any provider's key below; the first configured one becomes active for ebook/headline copy (env <code>AI_PROVIDER</code> still wins if set). Keys persist across restarts.</p>
 <form class="cols-form" id="fai" onsubmit="return ai_save();">
   {ai_rows}
@@ -10741,8 +10742,14 @@ fresh();
 <p class="tagline">No env vars, no restart. Keys are stored on this instance and used on the next request.</p></div>
 {self._admin_nav('apikeys')}
 </header>
+<nav class="seccrumbs" id="crumbs" aria-label="Jump to a section">
+ <a href="#sec-pa">🛒 Product data</a>
+ <a href="#sec-social">📣 Social keys</a>
+ <a href="#pint-card">📌 Pinterest</a>
+ <a href="#sec-ai">🤖 AI keys</a>
+</nav>
 <main>
-<section class="card"><h2>🛒 Amazon PA-API (official product data)</h2>
+<section class="card" id="sec-pa"><h2>🛒 Amazon PA-API (official product data)</h2>
 <p class="hint">Status: {pa_ready}. Enables official, richer product lookups instead of the public scraper. Get these at the Amazon Associates <b>Product Advertising API</b> console.</p>
 <form class="cols-form" id="fpa" onsubmit="return pa_save();">
   {pa_rows}
@@ -10751,7 +10758,7 @@ fresh();
   <span id="paout" class="msg"></span></div>
 </form>
 </section>
-<section class="card"><h2>📣 Social publishing keys</h2>
+<section class="card" id="sec-social"><h2>📣 Social publishing keys</h2>
 <p class="hint">Per-platform {len(social.PLATFORMS)} keys power native posting. Leave blank to skip that platform. Enable native posting by pasting each platform's API key/token here; real posting also fires <code>SOCIAL_WEBHOOK</code> if set.</p>
 <form class="cols-form" id="fsoc" onsubmit="return soc_save();">
   <label>Webhook URL <input type="url" name="webhook" value="{webhook_val}" placeholder="https://hook.example/hook (Zapier/Make)"></label>
@@ -10784,6 +10791,7 @@ fresh();
 </section>
 {ai_section}
 </main>
+{_TOTOP}
 <footer><p>Keys are stored locally on this install; the live AWS/social account credentials never leave your instance. API keys are shown masked; only overwrite a field to change it.</p></footer>
 <script>
 function $(id){{return document.getElementById(id);}}
@@ -10872,6 +10880,26 @@ async function ai_test(p){{
     ? ("Test ✓ " + (d.reply || "") + " · " + (d.latency_ms || 0) + "ms")
     : ((d && d.error) || "Test failed");
 }}
+// Scroll-spy for the section jump bar + reveal the back-to-top pill.
+(function(){{
+  var crumbs = document.getElementById('crumbs');
+  if(!crumbs) return;
+  var links = [].slice.call(crumbs.querySelectorAll('a'));
+  var secs = links.map(function(a){{return document.querySelector(a.getAttribute('href'));}});
+  var tt = document.querySelector('.totop');
+  function paint(){{
+    var top = window.scrollY + 140, idx = 0;
+    for(var i=0;i<secs.length;i++){{ if(secs[i] && secs[i].offsetTop <= top) idx = i; }}
+    links.forEach(function(a,i){{ a.classList.toggle('active', i===idx); }});
+    if(tt) tt.classList.toggle('show', window.scrollY > 300);
+    var active = links[idx];
+    if(active && crumbs.scrollWidth > crumbs.clientWidth)
+      crumbs.scrollLeft = Math.max(0, active.offsetLeft - crumbs.clientWidth/2 + active.offsetWidth/2);
+  }}
+  window.addEventListener('scroll', paint, {{passive:true}});
+  window.addEventListener('resize', paint, {{passive:true}});
+  paint();
+}})();
 </script>
 </body></html>"""
         return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
@@ -12252,6 +12280,9 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
         eng_buckets = [(k, v.get("views", 0), v.get("clicks", 0))
                        for k, v in eng_traf.get("engines", {}).items()]
         eng_buckets.sort(key=lambda t: t[1] + t[2], reverse=True)
+        # Console engine state comes from the SAME source as the hub, so the two
+        # can never disagree (the saved Bing key lives under seoeng.bing.apikey).
+        engines_status = webmasters.engines_status()
 
         # ---- live surface (self-check) + RSS feed stats ----
         _live_surface_start()
@@ -12295,11 +12326,14 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                 "indexnow_urls": _INDEXNOW_LAST.get("urls", 0),
                 "indexnow_err": _INDEXNOW_LAST.get("err", ""),
                 "engines": {
-                    "gsc": bool(os.environ.get("PSTORE_GSC_CLIENT_ID")),
-                    "bing": bool(os.environ.get("PSTORE_BING_API_KEY")
-                                 or _get_setting("bing.api_key")),
-                    "yandex": bool(os.environ.get("PSTORE_YANDEX_CLIENT_ID")),
-                },
+                    e["engine"]: (e.get("state") == "ready")
+                    for e in engines_status
+                    if e.get("engine") in ("gsc", "bing", "yandex")},
+                "engine_states": [
+                    {"engine": e.get("engine"), "name": e.get("name"),
+                     "state": e.get("state"),
+                     "connected": e.get("state") == "ready"}
+                    for e in engines_status],
                 "engine_traffic": [
                     {"engine": e, "views": v, "clicks": c}
                     for e, v, c in eng_buckets],
@@ -12474,6 +12508,10 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             % (e["engine"], "yes" if e["clicks"] else "no", e["clicks"],
                "yes" if e["views"] else "no", e["views"])
             for e in disc.get("engine_traffic", []))
+        eng_chips = " · ".join(
+            "%s %s" % (e.get("name") or e.get("engine"),
+                       eng_flag(e.get("connected")))
+            for e in disc.get("engine_states", [])) or "—"
         inow = disc.get("indexnow_err") or ""
         indexnow_state = ('key ready' if disc.get("indexnow_key")
                           else 'NO KEY — discovery default landing pages only')
@@ -12599,7 +12637,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
         pz_last_html = ("Last pin %s (UTC)." % pz_last_pin if pz_last_pin else
                         "No pins published yet.")
         pz_card = f"""
-<section class="card"><h2>📌 Pinterest — quick traffic &amp; click zone
+<section class="card" id="sec-pinterest"><h2>📌 Pinterest — quick traffic &amp; click zone
 <span class="hint">(zero-follower playbook: every fresh pin is a free look from the algorithm — per-niche boards get it in front of the right crowd, tracked links turn pins into clicks)</span></h2>
 <p class="hint" id="pz-health" style="padding:8px 12px;border-radius:6px;background:{hp_bg};color:{hp_fg};font-size:.9em"><b>{hp_label}</b> — {hp_note} · {pz_last_html}</p>
 <div class="stat-tiles" id="pinzone">{pz_tiles}</div>
@@ -12637,24 +12675,37 @@ td.yes{{color:#2e8b57}} td.no{{color:#c00;font-weight:600}}
 <p class="tagline">Every automation, its schedule and its queue — live. <span id="stamp"></span>
 &middot; up <b id="uptime"></b> &middot; pid <span id="pid"></span></p></div>
 {self._admin_nav('system')}</header>
+<nav class="seccrumbs" id="crumbs" aria-label="Jump to a section">
+ <a href="#sec-health">❤️ Health</a>
+ <a href="#sec-issues">🌀 Issues</a>
+ <a href="#sec-schedule">🕐 Schedule</a>
+ <a href="#sec-queues">🗃 Queues</a>
+ <a href="#sec-api">🛡 API</a>
+ <a href="#sec-indexing">🧭 Indexing</a>
+ <a href="#sec-funnel">🎯 Funnel</a>
+ <a href="#sec-pinterest">📌 Pinterest</a>
+ <a href="#sec-live">📡 Live surface</a>
+ <a href="#sec-config">🧩 Config</a>
+ <a href="#sec-threads">🧵 Threads</a>
+</nav>
 <main>
-<section class="card"><h2>❤️ Automation health</h2>
+<section class="card" id="sec-health"><h2>❤️ Automation health</h2>
 <p class="hint">Each background worker beats after every tick; a beat older than ~3
 cycles turns <b style="color:#e67e22">STALE</b>, a failing tick flips the card
 <b style="color:#c00">ERROR</b> with its last error, and workers that never started
 stay <b>IDLE</b>. Redrawn automatically every 4s.</p>
 <div class="stat-tiles" id="health">{cards}</div></section>
-<section class="card"><h2>🌀 Issues to look at</h2><ul class="issues" id="issues">{issues_html}</ul></section>
-<section class="card"><h2>🕐 Scheduled automation</h2>
+<section class="card" id="sec-issues"><h2>🌀 Issues to look at</h2><ul class="issues" id="issues">{issues_html}</ul></section>
+<section class="card" id="sec-schedule"><h2>🕐 Scheduled automation</h2>
 <div class="table-wrap"><table><thead><tr><th>Task</th><th>State</th><th>Cycle</th>
 <th class="ct">Next run</th><th class="ct">Last beat</th></tr></thead>
 <tbody id="sched">{sched}</tbody></table></div></section>
-<section class="card"><h2>🗃 Queues &amp; counters</h2>
+<section class="card" id="sec-queues"><h2>🗃 Queues &amp; counters</h2>
 <div class="stat-tiles" id="queues">{queue_tiles}</div></section>
-<section class="card"><h2>🛡 API health <span class="hint">({api_last_hint})</span></h2>
+<section class="card" id="sec-api"><h2>🛡 API health <span class="hint">({api_last_hint})</span></h2>
 <div class="table-wrap"><table><thead><tr><th>Route</th><th class="ct">Hits</th><th class="ct">2xx</th><th class="ct">3xx</th><th class="ct">4xx</th><th class="ct">5xx</th><th class="ct">Last seen</th><th class="ct">Lat</th></tr>
 </thead><tbody id="api-routes">{api_rows}</tbody></table></div></section>
-<section class="card"><h2>🧭 Indexing &amp; search engines</h2>
+<section class="card" id="sec-indexing"><h2>🧭 Indexing &amp; search engines</h2>
 <div class="features" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">
  <div class="feature"><h3>{disc.get('sitemap_entries', 0)}</h3><p class="hint">sitemap entries ({disc.get('indexable_niches', 0)} indexable niches · {disc.get('noindex_niches', 0)} noindex)</p></div>
  <div class="feature"><h3>{indexnow_state}</h3><p class="hint">IndexNow{inow_hint}</p></div>
@@ -12662,8 +12713,7 @@ stay <b>IDLE</b>. Redrawn automatically every 4s.</p>
 </div>
 <div class="table-wrap"><table><thead><tr><th>Engine</th><th class="ct">Clicks (7d)</th><th class="ct">Views (7d)</th></tr></thead>
 <tbody>{eng_rows}</tbody></table></div>
-<p class="hint">GSC {eng_flag(disc.get('engines', {}).get('gsc'))} · Bing {eng_flag(disc.get('engines', {}).get('bing'))} · Yandex {eng_flag(disc.get('engines', {}).get('yandex'))} — console tokens feed real impressions/positions; until then rows are referral-attributed. Manage under <a href="/admin/seoengines">Search engines</a>.</p></section>
-<section class="card"><h2>🎯 End-user funnel</h2>
+<p class="hint">{eng_chips} — console tokens feed real impressions/positions; until then rows are referral-attributed. Manage under <a href="/admin/seoengines">Search engines</a>.</p></section><section class="card" id="sec-funnel"><h2>🎯 End-user funnel</h2>
 <div class="stat-tiles">
  {funnel_tiles}
 </div>
@@ -12675,13 +12725,13 @@ stay <b>IDLE</b>. Redrawn automatically every 4s.</p>
 </div>
 <p class="hint">Full cross-channel ROI lives on <a href="/admin/analytics">Analytics</a>; referral breakdown on <a href="/admin/segments">Segments</a>.</p></section>
 {pz_card}
-<section class="card"><h2>📡 Live surface status <span class="hint">(self-check of the public URLs as a crawler/feed-reader sees them, refreshed ~60s)</span></h2>
+<section class="card" id="sec-live"><h2>📡 Live surface status <span class="hint">(self-check of the public URLs as a crawler/feed-reader sees them, refreshed ~60s)</span></h2>
 <div class="table-wrap"><table><thead><tr><th>Asset</th><th class="ct">Coverage</th><th class="ct">Live HTTP</th></tr>
 </thead><tbody>{live_rows}</tbody></table></div>
 <p class="hint">Feed: <a href="{live.get('feed_url', '')}">/rss.xml</a></p></section>
-<section class="card"><h2>🧩 Config</h2>
+<section class="card" id="sec-config"><h2>🧩 Config</h2>
 <div class="table-wrap"><table><tbody>{cfg_rows}</tbody></table></div></section>
-<section class="card"><h2>🧵 Background threads</h2>
+<section class="card" id="sec-threads"><h2>🧵 Background threads</h2>
 <div class="table-wrap"><table><thead><tr><th>Thread</th><th>State</th><th class="ct">Kind</th></tr>
 </thead><tbody>{thr_rows}</tbody></table></div></section>
 <script>
@@ -12762,8 +12812,31 @@ async function pinNewest(){{
 }}
 function esc(s){{return (s==null?'':String(s)).replace(/[&<>"]/g,function(c){{return {{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}}[c];}});}}
 tick(); setInterval(tick, 4000);
+// Scroll-spy: highlight the chip for the section currently in view, and reveal
+// the back-to-top pill once the console has scrolled past the first card.
+(function(){{
+  var crumbs = document.getElementById('crumbs');
+  if(!crumbs) return;
+  var links = [].slice.call(crumbs.querySelectorAll('a'));
+  var secs = links.map(function(a){{return document.querySelector(a.getAttribute('href'));}});
+  var tt = document.querySelector('.totop');
+  function paint(){{
+    var top = window.scrollY + 140, idx = 0;
+    for(var i=0;i<secs.length;i++){{ if(secs[i] && secs[i].offsetTop <= top) idx = i; }}
+    links.forEach(function(a,i){{ a.classList.toggle('active', i===idx); }});
+    var on = window.scrollY > 300;
+    if(tt) tt.classList.toggle('show', on);
+    var active = links[idx];
+    if(active && crumbs.scrollWidth > crumbs.clientWidth)
+      crumbs.scrollLeft = Math.max(0, active.offsetLeft - crumbs.clientWidth/2 + active.offsetWidth/2);
+  }}
+  window.addEventListener('scroll', paint, {{passive:true}});
+  window.addEventListener('resize', paint, {{passive:true}});
+  paint();
+}})();
 </script>
 </main>
+{_TOTOP}
 <footer><p>Everything shown here is live state from the running process and its
 database — no log parsing. If a card stays STALE, the worker has stopped beating.</p></footer>
 </body></html>"""

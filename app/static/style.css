@@ -656,6 +656,39 @@ body:has(.totop.show) > header:first-of-type { scroll-margin-top: 0; }
 body.show-sticky footer { margin-bottom: 78px; }
 body.show-sticky .totop { bottom: 92px; }
 
+/* Sticky section scroller — a horizontally scrollable chip bar that lets a long
+   admin page jump straight to any card without hunting. Chips scroll on narrow
+   screens and the bar stays pinned under the header while the page scrolls. */
+.seccrumbs {
+  position: sticky; top: 60px; z-index: 45;
+  display: flex; gap: 8px; align-items: center;
+  overflow-x: auto; overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch; scrollbar-width: thin;
+  padding: 8px 2px; margin: 10px 0 4px;
+  background: rgba(244, 247, 251, 0.92); backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
+}
+.seccrumbs a {
+  flex: 0 0 auto; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 6px 12px; border-radius: 999px;
+  background: #fff; border: 1px solid var(--border);
+  color: var(--text); font-size: 12.5px; font-weight: 600;
+  text-decoration: none;
+  transition: border-color 0.14s ease, color 0.14s ease, background 0.14s ease;
+}
+.seccrumbs a:hover, .seccrumbs a:focus-visible {
+  border-color: var(--accent); color: var(--accent);
+}
+.seccrumbs a.active {
+  background: linear-gradient(135deg, var(--grad-from), var(--grad-to));
+  border-color: transparent; color: #fff;
+}
+@media (max-width: 640px) {
+  .seccrumbs { top: 52px; }
+  .seccrumbs a { font-size: 12px; padding: 6px 10px; }
+}
+
 /* ---------- pagination ---------- */
 .pager { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 16px 0; }
 .pager a.pg {

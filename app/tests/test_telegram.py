@@ -174,6 +174,9 @@ class TestTelegramServer(unittest.TestCase):
         self.assertIn(b"Telegram broadcast", body)
         self.assertIn(b"/api/telegram/hook", body)
         self.assertIn(b"tgSave", body)
+        # mobile: viewport meta + horizontally scrollable subscriber table
+        self.assertIn(b'name="viewport"', body)
+        self.assertIn(b'class="table-wrap"', body)
 
     def test_admin_nav_surfaces_telegram(self):
         st, ct, body = self._raw("/admin", cookie=self.cookie)

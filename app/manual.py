@@ -121,6 +121,13 @@ def _chapters():
             "and the Analytics page (/admin/analytics) shows the same totals (clicks, "
             "impressions, position, CTR) next to your own referrer-attributed numbers.")
         doc.paragraph(
+            "DuckDuckGo and Yahoo need no console: DuckDuckGo's crawler consumes the "
+            "same IndexNow pings the site already sends (key visible on /keys), and "
+            "Yahoo Search is served from Bing's index, so the Bing sitemap submission "
+            "covers it. Both show up as first-class engines on /admin/seoengines and "
+            "the System console as 'covered', with their traffic tallied from your own "
+            "referrer beacon until a real console feed exists.")
+        doc.paragraph(
             "Google and Yandex mirror those same buttons once connected: Test "
             "connection lists every property (Google) or host (Yandex) your token "
             "controls, Add this site registers this site's property/host, and the URL "
@@ -268,7 +275,10 @@ def _chapters():
             "For brand-new buyer pages that are invisible to Google, hit 'Pin fresh "
             "niches (Pinterest)': it builds and publishes a Pinterest kit with the "
             "share card for the newest saved niches — the fastest way to put eyeballs "
-            "on pages search engines haven't indexed yet.")
+            "on pages search engines haven't indexed yet. Pinterest pins now use a "
+            "portrait 2:3 share card (1000x1500, served at /og/<slug>-pin.png) instead "
+            "of the landscape og:image, so pins get the tall, feed-friendly format the "
+            "network rewards.")
         doc.paragraph(
             "Because Pinterest suppresses duplicate pins (same image + link + copy), "
             "the fresh-pin drip ('Run drip', or automatically at peak hours every "

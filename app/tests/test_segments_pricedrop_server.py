@@ -623,6 +623,35 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
         self.assertIn(b"Queues", body)
         self.assertIn(b"Background threads", body)
         self.assertIn(b"setInterval(tick, 4000)", body)
+        # long-page chrome: sticky section jump bar + back-to-top pill
+        self.assertIn(b'class="seccrumbs"', body)
+        self.assertIn(b'id="sec-health"', body)
+        self.assertIn(b'href="#sec-pinterest"', body)
+        self.assertIn(b'class="totop"', body)
+
+    def test_system_console_engine_state_matches_hub(self):
+        """Console engine flags derive from webmasters.engines_status(), so a Bing
+        key saved under seoeng.bing.apikey reads 'connected' here too (regression:
+        the console used to read only the bing.api_key setting and always said
+        'not connected' even when Bing was registered and syncing)."""
+        self._seed()
+        saved = server._get_setting("seoeng.bing.apikey")
+        try:
+            server._set_setting("seoeng.bing.apikey", "k-console-test")
+            st, ct, body = self._raw("/api/system", cookie=self.cookie)
+            self.assertEqual(st, 200)
+            d = json.loads(body)["discovery"]
+            self.assertTrue(d["engines"]["bing"])
+            states = {e["engine"]: e for e in d["engine_states"]}
+            self.assertEqual(states["bing"]["state"], "ready")
+            self.assertTrue(states["bing"]["connected"])
+            for eng in ("duckduckgo", "yahoo"):
+                self.assertIn(eng, states)
+            st, ct, page = self._raw("/admin/system", cookie=self.cookie)
+            html = page.decode("utf-8", "replace")
+            self.assertIn("Bing Webmaster", html)
+        finally:
+            server._set_setting("seoeng.bing.apikey", saved or "")
 
     def test_system_api_monitoring_blocks(self):
         """The console payload exposes the full monitoring surface: API health,
@@ -649,6 +678,9 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
         self.assertIsInstance(d["engines"], dict)
         for eng in ("gsc", "bing", "yandex"):
             self.assertIn(eng, d["engines"])
+        self.assertIsInstance(d["engine_states"], list)
+        for eng in ("gsc", "bing", "yandex", "duckduckgo", "yahoo"):
+            self.assertIn(eng, {e["engine"] for e in d["engine_states"]})
         self.assertIsInstance(d["engine_traffic"], list)
         # funnel
         f = data["funnel"]
