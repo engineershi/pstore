@@ -7,6 +7,7 @@ Configure via env (never commit secrets):
 and PSTORE_URL (drives redirect_uri). The callback grants a session only when
 the provider's verified email matches the admin email configured on the server.
 """
+import base64
 import json
 import os
 import urllib.parse
@@ -124,16 +125,17 @@ def pinterest_authorize_url(client_id, redirect_uri, state):
 def pinterest_exchange(client_id, client_secret, code, redirect_uri):
     """Exchange authorization code for access + refresh tokens.
     Returns (access_token, refresh_token) on success; raises ValueError."""
+    basic = base64.b64encode(("%s:%s" % (client_id, client_secret)).encode()).decode()
     form = urllib.parse.urlencode({
         "grant_type": "authorization_code",
-        "client_id": str(client_id),
-        "client_secret": str(client_secret),
         "code": code,
         "redirect_uri": redirect_uri,
     }).encode("utf-8")
     req = urllib.request.Request(PINTEREST_TOKEN, data=form,
                                 headers={"Content-Type":
-                                         "application/x-www-form-urlencoded"})
+                                         "application/x-www-form-urlencoded",
+                                         "Authorization":
+                                         "Basic " + basic})
     try:
         resp = json.loads(_open(req).read().decode("utf-8", "replace"))
     except urllib.error.HTTPError as exc:
