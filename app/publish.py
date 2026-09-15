@@ -153,6 +153,7 @@ def _body_for(platform, kit):
     link = kit.get("link") or ""
     return {"body": body, "link": link, "image": kit.get("image") or "",
             "image_png": kit.get("image_png") or "",
+            "pin_image": kit.get("pin_image") or "",
             "board_id": str(kit.get("board_id") or ""),
             "keyword": kit.get("keyword") or "",
             "hashtags": kit.get("hashtags") or "",
@@ -382,7 +383,8 @@ def _post_pinterest(b, kv):
         return {"ok": False, "platform": "Pinterest", "via": "native",
                 "message": "Pinterest account has no board to pin to (add one "
                            "or set a board name)."}
-    image = b.get("image_png") or b.get("image") or og_image(b["link"])
+    image = (b.get("pin_image") or b.get("image_png") or b.get("image")
+             or og_image(b["link"]))
     payload = {
         "title": _pin_title(b["body"], b.get("keyword") or ""),
         "description": _pin_desc(b["body"], b["link"] or "",

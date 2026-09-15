@@ -292,13 +292,14 @@ class TestSocialSuite(unittest.TestCase):
             self.assertEqual(len(handler.received), len(social.PLATFORMS))
             first = handler.received[0]
             for key in ("body", "link", "platform", "slug", "keyword", "board",
-                        "name", "image", "image_png"):
+                        "name", "image", "image_png", "pin_image"):
                 self.assertIn(key, first)
             self.assertEqual(first["keyword"], "keto snacks")
             self.assertEqual(first["slug"], "keto-snacks")
             self.assertEqual(first["board"], "Keto Snacks")
             self.assertTrue(first["image"].endswith("/og/keto-snacks"))
             self.assertTrue(first["image_png"].endswith("/og/keto-snacks.png"))
+            self.assertTrue(first["pin_image"].endswith("/og/keto-snacks-pin.png"))
         finally:
             if saved is None:
                 os.environ.pop("SOCIAL_WEBHOOK", None)
@@ -1009,6 +1010,38 @@ class TestSocialSuite(unittest.TestCase):
         self.assertEqual("image/png", (ctype2 or "").split(";")[0])
         self.assertNotEqual(base, var)
         self.assertGreater(len(var), 0)
+
+    def _png_dims(self, data):
+        import struct
+        return struct.unpack(">II", data[16:24])
+
+    def test_pint_image_url_base_and_variants(self):
+        self.assertEqual(social.pint_image_png_url("https://x", "keto"),
+                         "https://x/og/keto-pin.png")
+        self.assertEqual(social.pint_image_png_url("https://x", "keto", 0),
+                         "https://x/og/keto-pin.png")
+        self.assertEqual(social.pint_image_png_url("https://x", "keto", 3),
+                         "https://x/og/keto-pin.png.v3")
+        kits = social.post_kits("keto snacks",
+                            [{"asin": "B0KETO1", "title": "Keto Chips",
+                              "reviews": 10, "stars": 4.6, "price": 8.99,
+                              "currency": "USD"}],
+                            "https://x")
+        p = next(k for k in kits if (k.get("platform") or "").lower() == "pinterest")
+        self.assertTrue(p["pin_image"].startswith(
+            "https://x/og/keto-snacks-pin.png"))
+        self.assertTrue(p["pin_image"].endswith("-pin.png"))
+
+    def test_og_pint_portrait_png_is_2x3_and_variant_differs(self):
+        st, _, ctype, base = self._raw("/og/keto-snacks-pin.png")
+        self.assertEqual(st, 200)
+        self.assertEqual("image/png", (ctype or "").split(";")[0])
+        self.assertEqual(self._png_dims(base), (1000, 1500))
+        st2, _, ctype2, var = self._raw("/og/keto-snacks-pin.png.v2")
+        self.assertEqual(st2, 200)
+        self.assertEqual("image/png", (ctype2 or "").split(";")[0])
+        self.assertEqual(self._png_dims(var), (1000, 1500))
+        self.assertNotEqual(base, var)
 
     def test_drip_endpoint_requires_admin_and_runs(self):
         saved = self._drip_settings()

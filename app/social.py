@@ -66,6 +66,16 @@ def og_image_png_url(base_url, slug):
     return "%s/og/%s.png" % (base, slug)
 
 
+def pint_image_png_url(base_url, slug, variant=0):
+    """Absolute URL to the portrait 1000x1500 Pinterest share card (2:3 — the
+    ratio Pinterest grows best, and the one Pinterest crops thumbnails around
+    the centre of). Lives at /og/<slug>-pin.png; a fresh repin variant uses
+    /og/<slug>-pin.png.v<N> so each pin of a niche gets visibly new art."""
+    base = (base_url or "").rstrip("/")
+    url = "%s/og/%s-pin.png" % (base, slug)
+    return url if not variant else "%s.v%s" % (url, variant)
+
+
 def _clip(s, n=80):
     s = str(s or "")
     return s[:n - 1].rstrip() + "…" if len(s) > n else s
@@ -198,6 +208,7 @@ def post_kits(keyword, items, base_url, slug=None):
         kit["target"] = "landing"
         kit["image"] = og_image_url(base_url, slug)
         kit["image_png"] = og_image_png_url(base_url, slug)
+        kit["pin_image"] = pint_image_png_url(base_url, slug)
         kits.append(kit)
     return kits
 
@@ -237,6 +248,7 @@ def topic_post_kits(term, parent_keyword, items, base_url, parent_slug=None, slu
         kit["term"] = term
         kit["image"] = og_image_url(base_url, parent_slug)
         kit["image_png"] = og_image_png_url(base_url, parent_slug)
+        kit["pin_image"] = pint_image_png_url(base_url, parent_slug)
         kits.append(kit)
     return kits
 
@@ -747,6 +759,161 @@ def og_png(slug, keyword, title, stars, reviews, variant=0):
     # repin watermark — small, under the fresh pill, so variant pins are traceable
     if variant:
         _stamp(_raster_text("REPIN %d" % variant, 1010, 118, 3, gap=1), _MUTED)
+
+    rows = (bytes(img[i:i + W * 3]) for i in range(0, len(img), W * 3))
+    return _png_encode(W, H, rows)
+
+
+# ----------------------------------------------------------------------------
+# Pinterest portrait share card — 1000x1500 (2:3). Same calm design system as
+# the landscape card but drawn portrait, so Pinterest gets the deep, tall image
+# it renders best. Variants recolor the palette AND rotate the call-to-action
+# phrase, so every plan of a niche reads as a genuinely new pin to Pinterest.
+# ----------------------------------------------------------------------------
+
+_PINT_CANVAS = (1000, 1500)
+
+_PINT_CTAS = (
+    "FULL LIST + PRICES",
+    "TOP PICKS + PRICES",
+    "RANKED + PRICED NOW",
+    "BEST OF 2026 + PRICES",
+)
+
+
+def _pint_base_canvas(palette=None):
+    """The portrait backdrop: gradient + soft glows + vignette, plus the brand
+    chrome (pill, fresh tag) and a list-teaser row of price bars that fills the
+    tall frame. Painted once per palette and reused by every pin card, so the
+    portrait fleet warms up as fast as the landscape one."""
+    p = palette or _VARIANT_PALETTES[0]
+    key = ("pint:", tuple(p[0]), tuple(p[1]), tuple(p[2]), tuple(p[3]))
+    cached = _BG_CANVAS_CACHE.get(key)
+    if cached is not None:
+        return cached
+    W, H = _PINT_CANVAS
+    t0, t1, soft, accent = p
+    img = bytearray(W * H * 3)
+    for y in range(H):
+        t = y / (H - 1)
+        img[y * W * 3:(y + 1) * W * 3] = bytes((
+            int(t0[0] + (t1[0] - t0[0]) * t),
+            int(t0[1] + (t1[1] - t0[1]) * t),
+            int(t0[2] + (t1[2] - t0[2]) * t))) * W
+    _glow(img, W, H, 850, 420, 520, accent, 0.16)
+    _glow(img, W, H, 150, 1150, 620, (86, 204, 255), 0.12)
+    _vignette(img, W, H)
+
+    def _stamp(pts, rgb, a=1.0):
+        for (px, py) in pts:
+            if 0 <= px < W and 0 <= py < H:
+                _blend(img, W, H, px, py, rgb, a)
+
+    # brand row — quiet, top-left
+    _dot(img, W, H, 86, 96, 7, accent)
+    _stamp(_raster_text("PSTORE", 116, 74, 3, gap=2), _CREAM)
+
+    # fresh pill — top-right, small signal
+    pill = "UPDATED DAILY"
+    pw = _text_width(pill, 3, gap=1) + 40
+    px0, py0, px1, py1 = 920 - pw, 76, 920, 116
+    _fill_round_rect(img, W, H, px0, py0, px1, py1, 20, (255, 255, 255), 0.06)
+    _ring_round_rect(img, W, H, px0, py0, px1, py1, 20, (255, 255, 255), 0.20, 2)
+    _dot(img, W, H, px0 + 18, 96, 5, _GREEN)
+    _stamp(_raster_text(pill, px0 + 36, 82, 3, gap=1), _MUTED)
+
+    # calm dotted divider under the content area
+    for x in range(130, 900, 28):
+        _dot(img, W, H, x, 700, 4, (255, 255, 255), 0.14)
+
+    # list-teaser bars — the "prices" the card promises, as soft parallel rows
+    for y0, bw in ((760, 660), (834, 540), (908, 430)):
+        x0 = 160
+        _fill_round_rect(img, W, H, x0, y0, x0 + bw, y0 + 50, 25,
+                         (255, 255, 255), 0.10)
+        _fill_round_rect(img, W, H, x0 + 34, y0 + 16, x0 + 200, y0 + 34, 9,
+                         (255, 255, 255), 0.10)
+        _dot(img, W, H, x0 + bw - 52, y0 + 25, 7, accent, 0.9)
+
+    # reassurance, bottom
+    _dot(img, W, H, 138, 1280, 5, _GREEN)
+    _stamp(_raster_text("RANKED FRESH", 166, 1262, 4, gap=1), _MUTED)
+    tag = "SAVED DAILY FROM AMAZON"
+    _stamp(_raster_text(tag, (W - _text_width(tag, 3, gap=1)) // 2, 1408,
+                        3, gap=1), _CREAM)
+
+    _BG_CANVAS_CACHE[key] = bytes(img)
+    return _BG_CANVAS_CACHE[key]
+
+
+def pint_png(slug, keyword, title, stars, reviews, variant=0):
+    """Raster 1000x1500 portrait share card for Pinterest (2:3). Same calm
+    chrome family as the landscape card, drawn tall: accent keyword label, a
+    big two-line headline, accent stars + proof, then the list teaser and one
+    accent call to action. `variant` recolors the palette AND rotates the CTA
+    phrase, so fresh pins of a niche are visibly + verbally unique."""
+    W, H = _PINT_CANVAS
+    palette = _palette_for(variant)
+    soft = palette[2]
+    accent = palette[3]
+    img = bytearray(_pint_base_canvas(palette))
+
+    def _stamp(pts, rgb, a=1.0):
+        for (px, py) in pts:
+            if 0 <= px < W and 0 <= py < H:
+                _blend(img, W, H, px, py, rgb, a)
+
+    # keyword — accent label
+    kw = (keyword or slug or "niche").replace("-", " ").upper()
+    kw_t = kw if len(kw) <= 30 else kw[:29] + "..."
+    _stamp(_raster_text(kw_t, 96, 168, 4, gap=2), accent)
+
+    # headline — taller, at most two lines
+    lines = _wrap(title or "Best picks, ranked", 22)
+    for i, ln in enumerate(lines[:2]):
+        ln = ln.upper()
+        if len(ln) > 22:
+            ln = ln[:21] + "..."
+        _stamp(_raster_text(ln, 96, 300 + i * 84, 6, gap=1), _WHITE)
+
+    # trust row — accent stars + proof
+    y_star = 620
+    if stars:
+        try:
+            _s = float(stars)
+        except (TypeError, ValueError):
+            _s = 0.0
+        for i in range(3):
+            _star(img, W, H, 126 + i * 62, y_star, 22, accent)
+        pr = "%.1f" % _s
+        if isinstance(reviews, (int, float)) and reviews:
+            pr += " . %d REVIEWS" % int(reviews)
+        _stamp(_raster_text(pr.upper(), 340, 596, 5, gap=1), _BODY)
+    else:
+        _stroke(img, W, H, 128, 610, 148, 630, accent, 9)
+        _stroke(img, W, H, 148, 630, 184, 592, accent, 9)
+        _stamp(_raster_text("TOP RATED PICKS", 216, 596, 5, gap=1), _BODY)
+
+    # one accent call to action, phrase rotates per variant
+    cta = _PINT_CTAS[variant % len(_PINT_CTAS)]
+    if len(cta) > 21:
+        cta = cta[:20] + "..."
+    x0, y0, x1, y1 = 130, 1000, 870, 1140
+    _fill_round_rect(img, W, H, x0 + 6, y0 + 10, x1 + 6, y1 + 10, 40,
+                     (8, 15, 30), 0.35)
+    _fill_round_rect(img, W, H, x0, y0, x1, y1, 40, soft, 1.0)
+    _fill_round_rect(img, W, H, x0 + 10, y0 + 10, x1 - 10, y1 - 10, 34,
+                     accent, 1.0)
+    _stamp(_raster_text(cta, (W - _text_width(cta, 6, gap=1)) // 2, 1054,
+                        6, gap=1), _INK)
+    ax = (W + _text_width(cta, 6, gap=1)) // 2 + 26
+    _stroke(img, W, H, ax, 1080, ax + 34, 1080, _INK, 7)
+    _stroke(img, W, H, ax + 20, 1066, ax + 34, 1080, _INK, 7)
+    _stroke(img, W, H, ax + 20, 1094, ax + 34, 1080, _INK, 7)
+
+    # repin watermark — small, under the fresh pill
+    if variant:
+        _stamp(_raster_text("REPIN %d" % variant, 812, 140, 3, gap=1), _MUTED)
 
     rows = (bytes(img[i:i + W * 3]) for i in range(0, len(img), W * 3))
     return _png_encode(W, H, rows)

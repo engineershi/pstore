@@ -241,6 +241,19 @@ class TestNativeScaffold(Base):
         self.assertLessEqual(len(payload["title"]), 100)
         self.assertLessEqual(len(payload["description"]), 500)
 
+    def test_pinterest_prefers_portrait_pin_card(self):
+        self._ok()
+        kit = self._kit("Pinterest")
+        kit["image"] = "https://x/og.svg"
+        kit["image_png"] = "https://x/og.png"
+        kit["pin_image"] = "https://x/og-pin.png.v3"
+        res = publish.post_to("Pinterest", kit,
+                              self._keys({("pinterest", "token"): "PIN"}))
+        self.assertTrue(res["ok"])
+        url, payload, _ = self.requests[-1]
+        self.assertIn("/v5/pins", url)
+        self.assertEqual(payload["media_source"]["url"], "https://x/og-pin.png.v3")
+
     def test_pin_title_prefers_keyword_when_body_misses_it(self):
         title = publish._pin_title(
             "See our top list of picks for the best gadget by far today",

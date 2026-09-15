@@ -604,7 +604,9 @@ def _og_card_url(slug):
 
 def _render_og_png(slug, variant=0):
     """Render one raster share card (real niche card, favicon, or the generic
-    brand fallback) as PNG bytes, or None. `variant` >=1 bakes in a distinct
+    brand fallback) as PNG bytes, or None. `slug` ending in `-pin` renders the
+    portrait 1000x1500 Pinterest card instead of the landscape OG card, so a
+    thread can warm either shape by name. `variant` >=1 bakes in a distinct
     palette (+ REPIN watermark) so fresh pins skip Pinterest's duplicate filter.
     Pure function shared by the request handler and the background prewarmer so
     /og/<slug>.png never has to render on the request path in steady state."""
@@ -614,6 +616,8 @@ def _render_og_png(slug, variant=0):
                 return social.favicon_png()
             except Exception:
                 return None
+        pint = slug.endswith("-pin")
+        base = slug[:-4] if pint else slug
         conn = _db()
         try:
             rows = conn.execute("SELECT keyword, products FROM niches").fetchall()
@@ -621,19 +625,21 @@ def _render_og_png(slug, variant=0):
             conn.close()
         for r in rows:
             try:
-                if slug != seo._slugify(r["keyword"]):
+                if base != seo._slugify(r["keyword"]):
                     continue
                 items = json.loads(r["products"] or "[]")
                 pick = market_engine.pick_for_buyers(items)
                 title = (pick or {}).get("title") or ("Best " + r["keyword"])
                 stars = (pick or {}).get("stars")
                 reviews = (pick or {}).get("reviews")
-                return social.og_png(slug, r["keyword"], title, stars, reviews, variant)
+                render = (social.pint_png if pint else social.og_png)
+                return render(base, r["keyword"], title, stars, reviews, variant)
             except Exception:
                 continue
         try:
-            return social.og_png(slug, slug.replace("-", " ").title() or "Niche",
-                                 "Best picks, ranked fresh", None, None, variant)
+            render = (social.pint_png if pint else social.og_png)
+            return render(base, base.replace("-", " ").title() or "Niche",
+                          "Best picks, ranked fresh", None, None, variant)
         except Exception:
             return None
     except Exception:
@@ -1153,12 +1159,15 @@ def _native_posted_count(results):
 def _webhook_payload(kit):
     """One Make/Zapier-ready payload per kit. Everything the robot needs:
     copy + tracked link + platform + niche (slug/keyword/board) + both share
-    cards (SVG for OG, PNG raster for Pinterest-style posting)."""
+    cards (SVG for OG, PNG raster for Pinterest-style posting) plus the tall
+    2:3 Pinterest-native portrait card when one is available."""
     slug = kit.get("slug") or ""
     keyword = (kit.get("keyword") or "").strip() or slug.replace("-", " ") or "niche"
     board = _pinterest_board(keyword)
     image = kit.get("image") or social.og_image_url(seo.BASE_URL, slug)
     image_png = kit.get("image_png") or social.og_image_png_url(seo.BASE_URL, slug)
+    pin_image = (kit.get("pin_image")
+                 or social.pint_image_png_url(seo.BASE_URL, slug))
     return {
         "body": kit.get("body") or "",
         "link": kit.get("link") or "",
@@ -1170,6 +1179,7 @@ def _webhook_payload(kit):
         "board": board,
         "image": image,
         "image_png": image_png,
+        "pin_image": pin_image,
     }
 
 
@@ -2236,9 +2246,7 @@ def _schedule_drip_pin(c, at):
         body = v["caption"]
         code = "%s-c%s" % (base_code, variant)
     link = social.track_link(seo.BASE_URL, slug, "Pinterest", code)
-    image_png = social.og_image_png_url(seo.BASE_URL, slug)
-    if variant:
-        image_png = "%s.v%s" % (image_png, variant)
+    image_png = social.pint_image_png_url(seo.BASE_URL, slug, variant)
     name = pk.get("name") or "Pinterest pin (keyword-rich)"
     try:
         with _lock:
@@ -2262,7 +2270,7 @@ def _schedule_drip_pin(c, at):
     except Exception:
         return False
     try:
-        _warm_og_png(slug, variant)
+        _warm_og_png(slug + "-pin", variant)
     except Exception:
         pass
     return True
