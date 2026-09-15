@@ -53,6 +53,8 @@ import segments
 import sem
 import social
 import publish
+import telegram
+import telegram_admin
 import suggest
 import template
 import webmasters
@@ -304,6 +306,7 @@ FUNCTIONS = [
     ("dashboard", "Idea tools"),
     ("email", "Email Studio"),
     ("social", "Social publisher"),
+    ("telegram", "Telegram broadcast"),
     ("seo", "SEO & consoles"),
     ("content", "Content (CMS/ebooks)"),
     ("marketing", "Marketing & ROI"),
@@ -324,6 +327,7 @@ FUNCTION_PATHS = {
                   "/api/content"),
     "email": ("/admin/emails", "/api/mail", "/api/sequence/", "/api/subscribers"),
     "social": ("/admin/social", "/api/social"),
+    "telegram": ("/admin/telegram", "/api/telegram/hook", "/api/telegram/state", "/api/telegram/config", "/api/telegram/broadcast"),
     "seo": ("/admin/seo", "/admin/seoengines", "/admin/rss", "/admin/sem",
             "/seo/snippet/", "/api/sem", "/api/seo-audit", "/api/seo/topics",
             "/api/seoengines", "/api/indexnow", "/api/topics/generate"),
@@ -348,6 +352,7 @@ NAV_FN = {
     "rss": "seo", "cms": "content", "ebooks": "content", "refresh": "content",
     "funnel": "marketing", "marketing": "marketing", "emails": "email",
     "social": "social", "variants": "marketing", "segments": "marketing",
+    "telegram": "telegram", "variants": "marketing", "segments": "marketing",
     "pricedrop": "marketing", "template": "marketing", "keys": "keys", "apikeys": "keys",
     "analytics": "analytics", "backup": "analytics", "manual": "analytics",
     "system": "system",
@@ -1911,6 +1916,9 @@ def _content_loop():
 # webmasters keeps connector tokens + synced snapshots in the settings table.
 webmasters._STORE_GET = _get_setting
 webmasters._STORE_SET = _set_setting
+telegram._STORE_GET = _get_setting
+telegram._STORE_SET = _set_setting
+telegram._set_transport(publish._post)
 
 
 # ------------------------------------------------------------ RBAC data access
@@ -2416,6 +2424,16 @@ def _ensure_db_schema(conn):
         tag TEXT DEFAULT '',
         created_at TEXT DEFAULT (datetime('now'))
     )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS telegram_subs (
+        chat_id TEXT PRIMARY KEY,
+        first_name TEXT DEFAULT '',
+        username TEXT DEFAULT '',
+        source TEXT DEFAULT 'site',
+        created_at TEXT DEFAULT (datetime('now')),
+        last_seen TEXT DEFAULT (datetime('now'))
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tg_subs_source ON telegram_subs(source)")
+
     conn.execute("""CREATE TABLE IF NOT EXISTS social_posts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         slug TEXT NOT NULL,
@@ -4647,6 +4665,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._admin_priority(q)
             if path == "/admin/social":
                 return self._admin_social(q)
+            if path == "/admin/telegram":
+                return self._admin_telegram(q)
             if path == "/admin/system":
                 return self._admin_system()
             if path == "/api/system":
@@ -4817,6 +4837,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._page_view()
             if parsed.path == "/api/social/webhook":
                 return self._social_webhook()
+            if parsed.path == "/api/telegram/hook":
+                return self._telegram_hook()
             if parsed.path.startswith("/api/public/"):
                 return self._send(405, {"error": "method not allowed",
                                         "hint": "public API is read-only"})
@@ -4869,6 +4891,12 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._social_drip()
             if parsed.path == "/api/social/topics":
                 return self._social_topics()
+            if parsed.path == "/api/telegram/state":
+                return self._telegram_state_api()
+            if parsed.path == "/api/telegram/config":
+                return self._telegram_config_api()
+            if parsed.path == "/api/telegram/broadcast":
+                return self._telegram_broadcast_api()
             if parsed.path == "/api/tools/launch":
                 return self._tools_launch()
             if parsed.path == "/api/boosts/run":
@@ -15026,6 +15054,17 @@ def _outbox_loop():
             _beat("outbox", True)
         except Exception as exc:
             _beat("outbox", False, str(exc))
+
+
+Handler._admin_telegram = telegram_admin.admin_telegram
+Handler._telegram_hook = telegram_admin.telegram_hook
+Handler._telegram_state_api = telegram_admin.telegram_state_api
+Handler._telegram_config_api = telegram_admin.telegram_config_api
+Handler._telegram_broadcast_api = telegram_admin.telegram_broadcast_api
+Handler._tg_upsert_sub = telegram_admin._tg_upsert_sub
+Handler._tg_subs = telegram_admin._tg_subs
+Handler._tg_config_blob = telegram_admin._config_blob
+Handler._tg_config_save = telegram_admin._config_save
 
 
 def main():

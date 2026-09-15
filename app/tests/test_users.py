@@ -526,7 +526,7 @@ class TestUsersServer(unittest.TestCase):
         d = json.loads(body)
         self.assertIn("users", d)
         self.assertIn("roles", d)
-        self.assertEqual(len(d["functions"]), 9)
+        self.assertEqual(len(d["functions"]), 10)
         self.assertIn("system", [f["slug"] for f in d["functions"]])
         slugs = {r["slug"] for r in d["roles"]}
         self.assertIn("full", slugs)
