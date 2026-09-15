@@ -5267,6 +5267,30 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                        % (len(names), ", ".join(names[:6]) or "none", acct)),
         })
 
+    def _pint_health(self, pz):
+        """API-health verdict for the console: off / err / warn / ok."""
+        if not pz.get("connected"):
+            return "off"
+        if pz.get("account_err"):
+            return "err"
+        if pz.get("username"):
+            return "ok"
+        return "warn"
+
+
+    def _pint_health_note(self, pz):
+        if not pz.get("connected"):
+            return ("Not connected — set app id + secret and hit Connect on "
+                    "/admin/apikeys to open the quick traffic zone.")
+        if pz.get("account_err"):
+            return ("Token is set but the last Pinterest API call failed: %s "
+                    "— reconnect on /admin/apikeys." % pz["account_err"])
+        if pz.get("username"):
+            return ("Token verified · @%s · %d boards loaded"
+                    % (pz["username"], pz.get("boards") or 0))
+        return "Token set but the account lookup did not resolve — reconnect to refresh."
+
+
     def _pinterest_zone_data(self):
         """Live Pinterest snapshot for the system console. Network parts
         (username / followers / boards) are cached ~60s so the 4s polling tick
@@ -12031,6 +12055,12 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                                   "AND published_at >= date('now')")
             pint_pins_total = cnt("SELECT COUNT(*) FROM social_posts "
                                   "WHERE platform='Pinterest' AND status='published'")
+            pint_last_pin = conn.execute(
+                "SELECT published_at FROM social_posts "
+                "WHERE platform='Pinterest' AND status='published' "
+                "ORDER BY published_at DESC LIMIT 1").fetchone()
+            pint_last_pin = (pint_last_pin["published_at"]
+                             if pint_last_pin else "")
             pint_clicks_today = cnt("SELECT COUNT(*) FROM clicks "
                                     "WHERE source IN ('pinterest','pin') "
                                     "AND created_at >= date('now')")
@@ -12220,7 +12250,10 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                 "auto_board": pz["auto_board"], "max_boards": pz["max_boards"],
                 "board_override": pz["board_override"],
                 "account_err": pz["account_err"],
+                "health": self._pint_health(pz),
+                "health_note": self._pint_health_note(pz),
                 "pins_today": pint_pins_today, "pins_total": pint_pins_total,
+                "last_pin": pint_last_pin,
                 "clicks_today": pint_clicks_today,
                 "clicks_7d": pint_clicks_7d,
                 "clicks_total": pint_clicks_total,
@@ -12492,9 +12525,22 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             "<tr><td colspan='2'>No Pinterest clicks in the last 7 days yet.</td></tr>"
         pz_state = pz_strat + (" · " + seo._clean(pz.get("account_err") or "")
                                if pz.get("account_err") else "")
+        hp = pz.get("health") or "off"
+        hp_cls = {"ok": "#e6f7ee / #0a6",
+                  "warn": "#fff7e0 / #a05",
+                  "err": "#fdecec / #c00",
+                  "off": "#f1f3f6 / #667"}.get(hp, "#f1f3f6 / #667")
+        hp_bg, hp_fg = hp_cls.split(" / ")
+        hp_label = {"ok": "healthy", "warn": "attention", "err": "error",
+                    "off": "not connected"}.get(hp, "unknown")
+        hp_note = seo._clean(pz.get("health_note") or pz_state)
+        pz_last_pin = seo._clean(pz.get("last_pin") or "")
+        pz_last_html = ("Last pin %s (UTC)." % pz_last_pin if pz_last_pin else
+                        "No pins published yet.")
         pz_card = f"""
 <section class="card"><h2>📌 Pinterest — quick traffic &amp; click zone
 <span class="hint">(zero-follower playbook: every fresh pin is a free look from the algorithm — per-niche boards get it in front of the right crowd, tracked links turn pins into clicks)</span></h2>
+<p class="hint" id="pz-health" style="padding:8px 12px;border-radius:6px;background:{hp_bg};color:{hp_fg};font-size:.9em"><b>{hp_label}</b> — {hp_note} · {pz_last_html}</p>
 <div class="stat-tiles" id="pinzone">{pz_tiles}</div>
 <div class="features" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr))">
  <div class="feature"><h4>Top Pinterest niches (7d clicks)</h4>
@@ -12632,6 +12678,7 @@ async function tick(){{
     pzset('pz-clicks-7d', pz.clicks_7d || 0);
     pzset('pz-clicks-total', pz.clicks_total || 0);
     pzset('pz-drip', (pz.drip_on ? 'on' : 'off') + ' · ' + (pz.drip_daily || 0) + '/day');
+    pzset('pz-health', ({{ok:'healthy', warn:'attention', err:'error', off:'not connected'}}[pz.health]||'unknown') + ' — ' + (pz.health_note || ''));
     var pt = '';
     (pz.top_niches || []).forEach(function(n){{
       pt += '<tr><td>' + esc(n.slug) + '</td><td class="ct">' + n.c + '</td></tr>';

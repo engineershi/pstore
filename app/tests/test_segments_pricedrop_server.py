@@ -680,6 +680,11 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
                     "top_niches", "drip_on", "drip_daily", "drip_last"):
             self.assertIn(key, pz)
         self.assertIsInstance(pz["top_niches"], list)
+        # API-health verdict drives the console strip
+        for key in ("health", "health_note", "last_pin"):
+            self.assertIn(key, pz)
+        self.assertIn(pz["health"], ("ok", "warn", "err", "off"))
+        self.assertIsInstance(pz["health_note"], str)
 
     def test_system_api_route_telemetry_tallies_responses(self):
         """Per-route tallies count every dispatched _send response, so API health
