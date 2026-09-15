@@ -10690,7 +10690,6 @@ fresh();
 {self._admin_nav('apikeys')}
 </header>
 <main>
-<div id="pint-notice" class="msg" style="margin-bottom:10px">{pint_notice}</div>
 <section class="card"><h2>🛒 Amazon PA-API (official product data)</h2>
 <p class="hint">Status: {pa_ready}. Enables official, richer product lookups instead of the public scraper. Get these at the Amazon Associates <b>Product Advertising API</b> console.</p>
 <form class="cols-form" id="fpa" onsubmit="return pa_save();">
@@ -10705,7 +10704,15 @@ fresh();
 <form class="cols-form" id="fsoc" onsubmit="return soc_save();">
   <label>Webhook URL <input type="url" name="webhook" value="{webhook_val}" placeholder="https://hook.example/hook (Zapier/Make)"></label>
 {key_rows}
-   <h3>Pinterest app (OAuth connect)</h3>
+   <h3>Twitter / X (optional, 4 fields)</h3>
+  <div class="row">{tw_rows}</div>
+  <div class="row"><button class="btn">Save social keys</button><span id="socout" class="msg"></span></div>
+</form>
+</section>
+<section class="card" id="pint-card"><h2>📌 Pinterest app (OAuth connect)</h2>
+<div id="pint-notice" class="msg" style="margin-bottom:10px">{pint_notice}</div>
+<p class="hint">{pint_status}. Pins post natively to your account and every pin keeps its own tracked link, so they return as measurable clicks. Board options and the fresh-pin drip live here too.</p>
+<form class="cols-form" id="fpint" onsubmit="return pint_save();">
    <div class="row">
      <label>App id <input type="password" name="pint_client_id" value="{pint_cid}" placeholder="Pinterest app id" autocomplete="off" data-masked="1" data-pint="1"></label>
      <label>App secret <input type="password" name="pint_client_secret" value="{pint_csec}" placeholder="Pinterest app secret" autocomplete="off" data-masked="1" data-pint="1"></label>
@@ -10713,7 +10720,6 @@ fresh();
    <div class="row">
      <a class="btn" href="/admin/oauth/pinterest" style="color:#fff">{pint_btn}</a>
      <button type="button" class="btn" onclick="pint_test()">Test Pinterest connection</button>
-     <span class="hint">{pint_status}</span>
    </div>
    <div class="row">
      <label>Board <input type="text" name="pint_board" value="{pint_board_val}" list="pint_boards" placeholder="auto (one board per niche) — or type an exact board name" autocomplete="off" data-pint="1"></label>
@@ -10721,9 +10727,7 @@ fresh();
      <label><input type="checkbox" name="pint_auto_board" data-pint="1"{' checked' if pint_auto_board else ''}> Auto-create a per-niche board</label>
      <label>Max boards <input type="number" min="1" max="60" name="pint_max_boards" value="{pint_max_boards}" data-pint="1" style="width:90px"></label>
    </div>
-   <h3>Twitter / X (optional, 4 fields)</h3>
-  <div class="row">{tw_rows}</div>
-  <div class="row"><button class="btn">Save social keys</button><span id="socout" class="msg"></span></div>
+   <div class="row"><button class="btn">Save Pinterest settings</button><span id="pintout" class="msg"></span></div>
 </form>
 </section>
 {ai_section}
@@ -10757,7 +10761,7 @@ async function pa_test(){{
   return false;
 }}
 async function pint_test(){{
-  const out = $("socout");
+  const out = $("pintout");
   out.textContent = "Testing Pinterest…";
   const d = await post("/api/settings/test", {{pinterest: true}});
   out.textContent = d && d.ok ? ("Pinterest ✓ " + (d.detail || "")) : ((d && d.error) || "Test failed");
@@ -10766,20 +10770,25 @@ async function soc_save(){{
    $("socout").textContent = "Saving…";
    const keys = collect_filled("#fsoc input[data-masked]:not([data-tw]):not([data-pint])");
    const twitter = collect_filled("#fsoc input[data-tw]");
-   const pinterest = {{}};
-   document.querySelectorAll("#fsoc input[data-pint]").forEach(el => {{
-     const k = el.name.replace("pint_", "");
-     if (el.type === "checkbox") {{ pinterest[k] = el.checked ? "1" : "0"; }}
-     else if (el.name === "pint_board") {{ pinterest.board = (el.value && el.value.indexOf("•") === -1) ? el.value : ""; }}
-     else if (el.value && el.value.indexOf("•") === -1) {{ pinterest[k] = el.value; }}
-   }});
    const d = await post("/api/settings", {{social: {{
      webhook: document.querySelector('[name="webhook"]').value,
      keys: keys,
-     twitter: twitter,
-     pinterest: pinterest
+     twitter: twitter
    }}}});
   $("socout").textContent = d && d.ok ? "Saved ✓" : ((d && d.error) || "Save failed");
+  return false;
+}}
+async function pint_save(){{
+  $("pintout").textContent = "Saving…";
+  const pinterest = {{}};
+  document.querySelectorAll("#fpint input[data-pint]").forEach(el => {{
+    const k = el.name.replace("pint_", "");
+    if (el.type === "checkbox") {{ pinterest[k] = el.checked ? "1" : "0"; }}
+    else if (el.name === "pint_board") {{ pinterest.board = (el.value && el.value.indexOf("•") === -1) ? el.value : ""; }}
+    else if (el.value && el.value.indexOf("•") === -1) {{ pinterest[k] = el.value; }}
+  }});
+  const d = await post("/api/settings", {{social: {{pinterest: pinterest}}}});
+  $("pintout").textContent = d && d.ok ? "Saved ✓" : ((d && d.error) || "Save failed");
   return false;
 }}
 async function ai_save(){{
