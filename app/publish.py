@@ -202,6 +202,25 @@ def _post_twitter(b, kv):
 _PINT_BOARD_CACHE = {}
 
 
+def _get_board_items(token):
+    """GET the authenticated account's boards (v5). Returns (status, json)."""
+    return _get("https://api.pinterest.com/v5/boards?page_size=100",
+                {"Authorization": "Bearer " + token}, timeout=15)
+
+
+def _pint_api_error(status, data):
+    """Human error string from a Pinterest v5 error response (used by the
+    settings test + posting diagnostics). Falls back to the raw status."""
+    if isinstance(data, dict):
+        msg = (data.get("message") or "")
+        if not msg:
+            for it in data.get("error") or []:
+                msg = (msg + " " + str(it.get("message") or "")).strip()
+        if msg:
+            return "%s (%s)" % (msg, status)
+    return "HTTP %s" % status
+
+
 def _pint_board_id(kv):
     """Best-effort Pinterest board id for the token's account. Resolution order:
     an explicit board NAME from `kv("pinterest", "board")` (settings key

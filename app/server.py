@@ -5145,6 +5145,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             model = str(a.get("model") or "").strip() or ai.model_for(provider)
             base = str(a.get("base") or "").strip()
             return self._send(200, ai.test(provider, key, model, base))
+        if self._body().get("pinterest"):
+            return self._settings_pinterest_test()
         if not paapi.ready():
             return self._send(200, {
                 "ok": False, "provider": "paapi",
@@ -5167,6 +5169,39 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 "ok": False, "provider": "paapi",
                 "error": "test failed: %s" % (str(e)[:200]),
             })
+
+    def _settings_pinterest_test(self):
+        """Verify the stored Pinterest access token against the v5 API: fetch
+        the connected account's boards. Mirrors publish._pint_board_id so the
+        test exercises the exact token path that native posting uses."""
+        token = _get_setting("social.key.pinterest.token", "")
+        if not token:
+            return self._send(200, {
+                "ok": False, "provider": "pinterest",
+                "error": ("No Pinterest access token stored — click "
+                          "Connect Pinterest and approve the app first."),
+            })
+        items = []
+        err = ""
+        try:
+            st, data = publish._get_board_items(token)
+            if st != 200 or not isinstance(data, dict):
+                err = publish._pint_api_error(st, data)
+            else:
+                items = data.get("items") or []
+        except Exception as e:
+            err = str(e)[:200]
+        if err:
+            return self._send(200, {
+                "ok": False, "provider": "pinterest",
+                "error": "Pinterest rejected the token: %s" % err,
+            })
+        names = [str(b.get("name") or "") for b in items if b.get("id")]
+        return self._send(200, {
+            "ok": True, "provider": "pinterest",
+            "detail": ("Connected ✓ token works — account has %d board(s): %s"
+                       % (len(names), ", ".join(names[:6]) or "none")),
+        })
 
     def _save_niche(self):
         body = self._body()
@@ -10502,6 +10537,7 @@ fresh();
    </div>
    <div class="row">
      <a class="btn" href="/admin/oauth/pinterest" style="color:#fff">{pint_btn}</a>
+     <button type="button" class="btn" onclick="pint_test()">Test Pinterest connection</button>
      <span class="hint">{pint_status}</span>
    </div>
    <h3>Twitter / X (optional, 4 fields)</h3>
@@ -10538,6 +10574,12 @@ async function pa_test(){{
   const d = await post("/api/settings/test", {{paapi: true}});
   $("paout").textContent = d && d.ok ? ("Test ✓ " + (d.detail || "")) : ((d && d.error) || "Test failed");
   return false;
+}}
+async function pint_test(){{
+  const out = $("socout");
+  out.textContent = "Testing Pinterest…";
+  const d = await post("/api/settings/test", {{pinterest: true}});
+  out.textContent = d && d.ok ? ("Pinterest ✓ " + (d.detail || "")) : ((d && d.error) || "Test failed");
 }}
 async function soc_save(){{
    $("socout").textContent = "Saving…";
