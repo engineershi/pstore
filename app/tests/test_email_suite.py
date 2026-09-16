@@ -4,6 +4,7 @@ analytics, sequence auto-send, admin email/ebook/analytics pages)."""
 
 import json
 import os
+import re
 import shutil
 import sys
 import threading
@@ -758,6 +759,32 @@ class TestEmailSuite(unittest.TestCase):
     def test_optin_widget_captures_first_name(self):
         html = seo.optin_html("keto snacks")
         self.assertIn('name="first_name"', html)
+
+    # ------------------------------------------------- "Also matched" rows
+    def test_runner_rows_render_full_lines_not_stacked_characters(self):
+        """Regression: _runner_rows used to iterate _alternate_lines()[0] over a
+        multiline STRING, emitting one div per CHARACTER, so the 'Also matched'
+        card showed each letter vertically and stretched the email. Rows must
+        be whole product lines and title text must be present."""
+        items = self._bs_items()
+        mail = market_engine.build_email_sequence("keto snacks", items)[0]
+        html = mailer.render_email_html(
+            mail, to_name="Sam", site_name="pstore", email="sam@example.com",
+            keyword="keto snacks", items=items)
+        self.assertIn("Also matched", html)
+        block = html.split("Also matched", 1)[1].split("</div>", 4)[0]
+        # every emitted runner cell is a long joined line, never a lone char
+        cells = re.findall(r'<div style="margin:6px 0;font-size:14px[^"]*">([^<]+)',
+                           html.split("Also matched", 1)[1])
+        self.assertGreaterEqual(len(cells), 2)
+        for cell in cells:
+            self.assertGreater(len(cell.strip()), 10, cell)
+            self.assertIn(":", cell)
+        # and the HTML is a single line per product, no per-character breaks
+        for cell in cells:
+            self.assertNotRegex(cell, r"^.$")
+        self.assertIn("word-break:break-word", html)
+        self.assertIn("Inter", html)
 
     # --------------------------------------------------------------- admin pages
 

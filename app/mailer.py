@@ -247,22 +247,23 @@ def product_card_html(item, link_url="", image_url="", badge="", stars=0, review
     rating = ""
     if stars or reviews:
         sst = "" if not reviews else "s" if reviews != 1 else ""
-        rating = ('<div style="margin:7px 0 0;font-size:13px;color:#5c6b7a">'
+        rating = ('<div style="margin:7px 0 0;font-size:13px;color:#5c6b7a;font-family:\'Inter\',\'Helvetica Neue\',Helvetica,Arial,sans-serif">'
                   '★ <strong style="color:#191b26">%s</strong> · %s rating%s</div>' %
                   (e(str(stars)), e("{:,}".format(reviews) if reviews else "—"), sst))
     badge_html = ('<div style="margin:0 0 8px;font-size:11px;font-weight:800;letter-spacing:.12em;'
-                  'color:#e8600c;text-transform:uppercase">%s</div>' % e(badge)) if badge else ""
+                  'color:#e8600c;text-transform:uppercase;font-family:\'Inter\',\'Helvetica Neue\',Helvetica,Arial,sans-serif">%s</div>' % e(badge)) if badge else ""
     cta = ('<div style="margin:14px 0 0"><a href="%s" rel="nofollow sponsored noopener" '
            'style="display:inline-block;background:#f0a41a;background-image:linear-gradient(180deg,#ffd75e,#f0a41a);'
            'color:#111;text-decoration:none;font-weight:800;font-size:14px;'
-           'padding:10px 26px;border-radius:999px;border:1px solid #e6a700">See it on Amazon →</a></div>'
+           'padding:10px 26px;border-radius:999px;border:1px solid #e6a700;'
+           'font-family:\'Inter\',\'Helvetica Neue\',Helvetica,Arial,sans-serif">See it on Amazon →</a></div>'
            % e(link_url)) if link_url else ""
     return """<div style="margin:20px 0;background:#ffffff;border:1px solid #ececf1;border-radius:16px;overflow:hidden">%s
   <div style="padding:18px 18px 20px;text-align:left">
     %s
-    <div style="font-size:15.5px;line-height:1.4;font-weight:700;color:#191b26;letter-spacing:-.15px">%s</div>
+    <div style="font-size:15.5px;line-height:1.4;font-weight:700;color:#191b26;letter-spacing:-.15px;word-break:break-word;overflow-wrap:break-word;font-family:\'Inter\',\'Helvetica Neue\',Helvetica,Arial,sans-serif">%s</div>
     %s
-    <div style="margin-top:9px;font-size:22px;font-weight:800;color:#b12704;letter-spacing:-.4px">%s</div>
+    <div style="margin-top:9px;font-size:22px;font-weight:800;color:#b12704;letter-spacing:-.4px;font-family:\'Inter\',\'Helvetica Neue\',Helvetica,Arial,sans-serif">%s</div>
     %s
   </div>
 </div>""" % (
@@ -270,7 +271,7 @@ def product_card_html(item, link_url="", image_url="", badge="", stars=0, review
           '<img src="%s" alt="%s" width="280" style="max-width:100%%;height:auto;border:0;display:block;margin:0 auto">'
           '</div>' % (e(image_url), e(title))) if image_url else ""),
         badge_html, e(title), rating,
-        (e(price) if price else '<span style="font-size:15px;color:#5c6b7a">price on Amazon</span>'),
+        (e(price) if price else '<span style="font-size:15px;color:#5c6b7a;font-family:\'Inter\',\'Helvetica Neue\',Helvetica,Arial,sans-serif">price on Amazon</span>'),
         cta)
 
 
@@ -280,17 +281,17 @@ def _runner_rows(items, tracked_link=""):
     if not alt:
         return ""
     row_html = []
-    for line in alt:
+    for line in alt.split("\n"):
         if not (line or "").strip():
             continue
-        row_html.append('<div style="margin:6px 0"><span style="font-size:14px;color:#3a3f4b">%s</span></div>'
+        row_html.append('<div style="margin:6px 0;font-size:14px;line-height:1.5;color:#3a3f4b;word-break:break-word;overflow-wrap:break-word;font-family:\'Inter\',\'Helvetica Neue\',Helvetica,Arial,sans-serif">%s</div>'
                         % re.sub(r"https?://\S+",
-                                 lambda m: '<a href="%s" style="color:#e8600c;font-weight:700;text-decoration:none">view on Amazon</a>'
+                                 lambda m: '<a href="%s" style="color:#e8600c;font-weight:700;text-decoration:none;font-family:\'Inter\',\'Helvetica Neue\',Helvetica,Arial,sans-serif">view on Amazon</a>'
                                            % _html.escape(tracked_link or m.group(0)),
                                  _html.escape(line)))
     return ('<div style="margin:6px 0 0;padding:14px 18px;background:#fafafc;border-radius:12px">'
             '<div style="font-size:11px;font-weight:800;letter-spacing:.12em;color:#9aa0ad;'
-            'text-transform:uppercase;margin-bottom:6px">Also matched</div>%s</div>'
+            'text-transform:uppercase;margin-bottom:6px;font-family:\'Inter\',\'Helvetica Neue\',Helvetica,Arial,sans-serif">Also matched</div>%s</div>'
             % "".join(row_html))
 
 
@@ -321,7 +322,7 @@ def render_email_html(mail, to_name="there", site_name=STORE_NAME, email="",
             inner += ('<div style="text-align:center;margin:26px 0 4px">'
                       '<a href="%s" style="display:inline-block;background:#e8600c;color:#ffffff;'
                       'text-decoration:none;font-weight:700;font-size:15px;padding:13px 30px;'
-                      'border-radius:999px">Check price &amp; reviews →</a></div>'
+                      'border-radius:999px;font-family:\'Inter\',\'Helvetica Neue\',Helvetica,Arial,sans-serif">Check price &amp; reviews →</a></div>'
                       % _html.escape(tracked_link))
         subject = subject or ("Your curated %s picks" % keyword if keyword else "From " + site_name)
         return _brand_shell(subject, subject, inner,
@@ -568,36 +569,37 @@ def transactional_html(preheader, heading, paragraphs, cta_url, cta_label, footn
     """Branded, light-rendered HTML mail (works in Gmail/Outlook/Apple Mail):
     gradient header wordmark, one big rounded CTA button, a plain-text fallback
     link, and a discreet footnote showing expiry / "didn't request this"."""
-    paras = "\n".join('<p style="margin:0 0 14px;font-size:15px;line-height:1.6;color:#3a3f4b">%s</p>' % p
+    paras = "\n".join('<p style="margin:0 0 14px;font-size:15px;line-height:1.6;color:#3a3f4b;font-family:\'Inter\',\'Helvetica Neue\',Helvetica,Arial,sans-serif">%s</p>' % p
                        for p in paragraphs)
-    fallback = ('<p style="margin:20px 0 0;font-size:13px;line-height:1.5;color:#7a8191">'
+    fallback = ('<p style="margin:20px 0 0;font-size:13px;line-height:1.5;color:#7a8191;font-family:\'Inter\',\'Helvetica Neue\',Helvetica,Arial,sans-serif">'
                 'Button not working? Copy and paste this link into your browser:<br>'
                 '<a href="%s" style="color:#a453ff;word-break:break-all">%s</a></p>'
                 % (_esc(cta_url), _esc(cta_url)))
     note = ('<p style="margin:18px 0 0;padding-top:16px;border-top:1px solid #ececf1;'
-            'font-size:12px;line-height:1.6;color:#9aa0ad">%s</p>' % footnote) if footnote else ""
+            'font-size:12px;line-height:1.6;color:#9aa0ad;font-family:\'Inter\',\'Helvetica Neue\',Helvetica,Arial,sans-serif">%s</p>' % footnote) if footnote else ""
     return """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&amp;display=swap" rel="stylesheet">
 <meta name="color-scheme" content="light only"><title>%(store)s</title></head>
-<body style="margin:0;padding:0;background:#f4f4f7;font-family:Arial,Helvetica,sans-serif">
+<body style="margin:0;padding:0;background:#f4f4f7;font-family:'Inter','Helvetica Neue',Helvetica,Arial,sans-serif">
 <span style="display:none;max-height:0;overflow:hidden">%(pre)s</span>
 <div style="max-width:560px;margin:24px auto;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 10px 34px rgba(20,20,40,.10)">
   <div style="background:linear-gradient(120deg,#ff7a18 0%%,#ff4e9e 55%%,#a453ff 100%%);padding:26px 34px">
-    <div style="font-size:19px;font-weight:800;color:#ffffff;letter-spacing:.2px">%(store)s</div>
-    <div style="font-size:12px;color:rgba(255,255,255,.82);margin-top:2px">America-verified product picks</div>
+    <div style="font-size:19px;font-weight:800;color:#ffffff;letter-spacing:.2px;font-family:'Inter','Helvetica Neue',Helvetica,Arial,sans-serif">%(store)s</div>
+    <div style="font-size:12px;color:rgba(255,255,255,.82);margin-top:2px;font-family:'Inter','Helvetica Neue',Helvetica,Arial,sans-serif">America-verified product picks</div>
   </div>
   <div style="padding:34px 34px 28px">
-    <h1 style="margin:0 0 14px;font-size:21px;letter-spacing:-.2px;color:#191b26">%(head)s</h1>
+    <h1 style="margin:0 0 14px;font-size:21px;letter-spacing:-.2px;color:#191b26;font-family:'Inter','Helvetica Neue',Helvetica,Arial,sans-serif;line-height:1.25">%(head)s</h1>
     %(paras)s
     <div style="text-align:center;margin:26px 0 4px">
       <a href="%(url)s" style="display:inline-block;background:#ff7a18;color:#ffffff;text-decoration:none;
-        font-weight:700;font-size:15px;padding:13px 30px;border-radius:999px">%(label)s</a>
+        font-weight:700;font-size:15px;padding:13px 30px;border-radius:999px;font-family:'Inter','Helvetica Neue',Helvetica,Arial,sans-serif">%(label)s</a>
     </div>
     %(fallback)s
     %(note)s
   </div>
   <div style="background:#fafafc;padding:18px 34px;border-top:1px solid #ececf1">
-    <p style="margin:0;font-size:12px;line-height:1.6;color:#9aa0ad">You're receiving this because an account was
+    <p style="margin:0;font-size:12px;line-height:1.6;color:#9aa0ad;font-family:'Inter','Helvetica Neue',Helvetica,Arial,sans-serif">You're receiving this because an account was
     created (or a password change was requested) on %(store)s with this email address.
     If this wasn't you, you can ignore this message — nothing changes unless you use the link above.</p>
   </div>
@@ -611,20 +613,21 @@ def _brand_shell(preheader, heading, inner_html, footnote_html=""):
     """Shared clean email shell (same header family as transactional mail) so
     marketing, sequence and price-drop emails all render consistently."""
     note = ('<div style="background:#fafafc;padding:18px 34px;border-top:1px solid #ececf1">'
-            '<p style="margin:0;font-size:12px;line-height:1.6;color:#9aa0ad">%s</p></div>'
+            '<p style="margin:0;font-size:12px;line-height:1.6;color:#9aa0ad;font-family:\'Inter\',\'Helvetica Neue\',Helvetica,Arial,sans-serif">%s</p></div>'
             % footnote_html) if footnote_html else ""
     return """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&amp;display=swap" rel="stylesheet">
 <meta name="color-scheme" content="light only"><title>%(store)s</title></head>
-<body style="margin:0;padding:0;background:#f4f4f7;font-family:-apple-system,BlinkMacSystemFont,&#39;Segoe UI&#39;,Roboto,Arial,Helvetica,sans-serif">
+<body style="margin:0;padding:0;background:#f4f4f7;font-family:'Inter','Helvetica Neue',Helvetica,Arial,sans-serif">
 <span style="display:none;max-height:0;overflow:hidden">%(pre)s</span>
 <div style="max-width:560px;margin:24px auto;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 10px 34px rgba(20,20,40,.10)">
   <div style="background:linear-gradient(120deg,#ff7a18 0%%,#ff4e9e 55%%,#a453ff 100%%);padding:26px 34px">
-    <div style="font-size:19px;font-weight:800;color:#ffffff;letter-spacing:.2px">%(store)s</div>
-    <div style="font-size:12px;color:rgba(255,255,255,.82);margin-top:2px">America-verified product picks</div>
+    <div style="font-size:19px;font-weight:800;color:#ffffff;letter-spacing:.2px;font-family:'Inter','Helvetica Neue',Helvetica,Arial,sans-serif">%(store)s</div>
+    <div style="font-size:12px;color:rgba(255,255,255,.82);margin-top:2px;font-family:'Inter','Helvetica Neue',Helvetica,Arial,sans-serif">America-verified product picks</div>
   </div>
   <div style="padding:34px 34px 28px">
-    <h1 style="margin:0 0 16px;font-size:21px;letter-spacing:-.2px;color:#191b26;font-weight:800">%(head)s</h1>
+    <h1 style="margin:0 0 16px;font-size:21px;letter-spacing:-.2px;color:#191b26;font-weight:800;font-family:'Inter','Helvetica Neue',Helvetica,Arial,sans-serif;line-height:1.25">%(head)s</h1>
     %(inner)s
   </div>
   %(note)s
