@@ -104,8 +104,8 @@ def admin_telegram(self, q):
     subs = _tg_subs(self)
     cfg = _config_blob(self)
     rows_html = "\n".join(
-        """<tr><td>{first}</td><td>{username}</td><td>{chat}</td><td>{source}</td>
-        <td>{last}</td></tr>""".format_map(r)
+        """<tr><td>{first_name}</td><td>{username}</td><td>{chat_id}</td><td>{source}</td>
+        <td>{last_seen}</td></tr>""".format_map(r)
         for r in subs
     )
     nav = self._admin_nav("telegram") if hasattr(self, "_admin_nav") else ""

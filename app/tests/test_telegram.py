@@ -184,6 +184,20 @@ class TestTelegramServer(unittest.TestCase):
         self.assertIn(b'class="plain"', body)
         self.assertIn(b"/ui.js", body)
 
+    def test_admin_telegram_page_renders_subscriber_rows(self):
+        """A populated subscriber table must render (regression: the row
+        template used {first}/{chat}/{last} but the query returns
+        first_name/chat_id/last_seen, so the first real subscriber crashed the
+        page with KeyError('first'))."""
+        telegram_admin._tg_upsert_sub(self, "424242", "Ann", "ann", "site")
+        st, ct, body = self._raw("/admin/telegram", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        html = body.decode("utf-8", "replace")
+        self.assertIn("Ann", html)
+        self.assertIn("424242", html)
+        self.assertIn("site", html)
+        self.assertNotIn("error", html.lower().split("ann")[0])
+
     def test_admin_nav_surfaces_telegram(self):
         st, ct, body = self._raw("/admin", cookie=self.cookie)
         self.assertEqual(st, 200)
