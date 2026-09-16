@@ -362,7 +362,7 @@ FUNCTION_PATHS = {
                   "/api/content"),
     "email": ("/admin/emails", "/api/mail", "/api/sequence/", "/api/subscribers"),
     "social": ("/admin/social", "/api/social"),
-    "telegram": ("/admin/telegram", "/api/telegram/hook", "/api/telegram/state", "/api/telegram/config", "/api/telegram/broadcast"),
+    "telegram": ("/admin/telegram", "/api/telegram/hook", "/api/telegram/state", "/api/telegram/config", "/api/telegram/broadcast", "/api/telegram/feed"),
     "seo": ("/admin/seo", "/admin/seoengines", "/admin/rss", "/admin/sem",
             "/seo/snippet/", "/api/sem", "/api/seo-audit", "/api/seo/topics",
             "/api/seoengines", "/api/indexnow", "/api/topics/generate"),
@@ -4932,6 +4932,9 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._social_webhook()
             if parsed.path == "/api/telegram/hook":
                 return self._telegram_hook()
+            if parsed.path == "/api/telegram/feed":
+                body = self._body()
+                return self._send(200, self._telegram_feed(dry=bool(body.get("dry_run"))))
             if parsed.path.startswith("/api/public/"):
                 return self._send(405, {"error": "method not allowed",
                                         "hint": "public API is read-only"})
@@ -5077,6 +5080,9 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         self._send(405, {"error": "method not allowed"})
 
     def _body(self):
+        parsed = getattr(self, "_body_parsed", None)
+        if parsed is not None:
+            return parsed
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
@@ -5086,13 +5092,16 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         raw = self.rfile.read(n).decode("utf-8", "replace") if n else ""
         ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip()
         if ctype == "application/x-www-form-urlencoded":
-            return {k: v[0] for k, v in urllib.parse.parse_qs(raw).items()}
-        if raw:
+            parsed = {k: v[0] for k, v in urllib.parse.parse_qs(raw).items()}
+        elif raw:
             try:
-                return json.loads(raw)
+                parsed = json.loads(raw)
             except Exception:
-                return {}
-        return {}
+                parsed = {}
+        else:
+            parsed = {}
+        self._body_parsed = parsed
+        return parsed
 
     def _search(self, q):
         query = (q.get("q") or [""])[0].strip()
@@ -13385,6 +13394,74 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                 "sent": sent, "already_sent": already, "errors": errors,
                 "keyword": kw_filter or None, "watcher_emails": watcher_emails}
 
+    def _telegram_feed(self, drops=None, dry=False, cap=20):
+        """Automatic Telegram digest to every bot subscriber, fired inside each
+        autosend slot: one compact message when today's price-drop scan found
+        something new (never a 'nothing new' note). ASINs already messaged in an
+        earlier slot are skipped via the tg.feed.seen set, so a drop reaches the
+        chat exactly once. Best-effort and never raises.
+
+        Returns {ok, sent, errors, recipients, messages, dedup, dry_run, cap}.
+        """
+        try:
+            import telegram as tg_mod
+        except Exception:
+            return {"ok": True, "sent": 0, "errors": 0, "recipients": 0,
+                    "messages": [], "dedup": False, "dry_run": bool(dry), "cap": cap}
+        subs = telegram_admin._tg_subs(self)
+        recipients = len(subs or [])
+        empty = {"ok": True, "sent": 0, "errors": 0, "recipients": recipients,
+                 "messages": [], "dedup": False, "dry_run": bool(dry), "cap": cap}
+        tok = tg_mod.token()
+        if not subs or not tok:
+            return empty
+        if not drops:
+            try:
+                res = self._pricedrop_send()
+                drops = (res or {}).get("drops") or []
+            except Exception:
+                drops = []
+        seen = dict(tg_mod._json_get("tg.feed.seen", {}) or {})
+        keyed = {}
+        for d in (drops or []):
+            a = str(d.get("asin") or "").strip().upper()
+            if not a or a in seen:
+                continue
+            cur = keyed.get(a)
+            if cur is None or (d.get("drop_pct") or 0) > (cur.get("drop_pct") or 0):
+                keyed[a] = d
+        fresh = [keyed[a] for a in sorted(keyed, key=lambda x: -(keyed[x].get("drop_pct") or 0))]
+        if not fresh:
+            return dict(empty, dedup=True)
+        fmt = lambda v: "$%.2f" % float(v) if v else "?"
+        lines = []
+        for d in fresh[:5]:
+            title = str(d.get("title") or d.get("asin") or "item")[:96]
+            pct = (d.get("drop_pct") or 0)
+            pct_s = (" (-%.1f%%)" % abs(pct)) if pct else ""
+            lines.append("%s\n  %s \u2192 %s%s" % (title, fmt(d.get("old")),
+                                                  fmt(d.get("new")), pct_s))
+        text = "\U0001f4c9 pstore price drops\n\n" + "\n".join(lines)
+        link = (mailer.site_base() or os.environ.get("PSTORE_URL", "")).rstrip("/")
+        if link:
+            text += "\n\n\U0001f310 Full picks: %s" % link
+        sent = errors = 0
+        for s in (subs or [])[:cap]:
+            if dry:
+                break
+            r = tg_mod.send_message(tok, s.get("chat_id"), text)
+            if r.get("ok"):
+                sent += 1
+            else:
+                errors += 1
+        if sent:
+            for d in fresh:
+                seen[str(d.get("asin") or "").strip().upper()] = True
+            tg_mod._json_set("tg.feed.seen", seen)
+        return {"ok": True, "sent": sent, "errors": errors,
+                "recipients": recipients, "messages": fresh[:5],
+                "dedup": False, "dry_run": bool(dry), "cap": cap}
+
     def _pricewatch_rows(self):
         """Distinct watched (email, asin, keyword) rows, newest first."""
         with _lock:
@@ -15577,16 +15654,26 @@ def _autosend_tick():
     # price" cards — highest-intent emails (someone watching a product wants
     # the exact moment it's on sale). Best-effort, separate send budget.
     alerts = 0
+    drops = []
     try:
         res2 = Handler._pricedrop_send(stub)
         alerts = ((res2 or {}).get("sent") or 0)
+        drops = (res2 or {}).get("drops") or []
     except Exception:
         alerts = 0
+    # Telegram subscribers get the same drops as a compact chat digest (one
+    # message per bot user, only when something is actually on sale).
+    tg_sent = 0
+    try:
+        tgres = Handler._telegram_feed(stub, drops=drops)
+        tg_sent = int(tgres.get("sent") or 0)
+    except Exception:
+        tg_sent = 0
     _set_setting(_AUTOSEND_LAST_KEY, marker)
     _set_setting(AUTOSEND_STATE_KEY, json.dumps({
         "status": "sent" if ok else "fail", "sent": sent, "errors": errors,
         "hours": cfg["hours"], "limit": cfg["limit"], "last_run": marker,
-        "price_alerts": alerts}))
+        "price_alerts": alerts, "tg_sent": tg_sent}))
     return "sent" if ok else "fail"
 
 

@@ -144,6 +144,16 @@ __NAV__
   <span id="bres" class="msg"></span></div>
 </form>
 </section>
+<section class="card"><h2>📊 Daily price-drop digest</h2>
+<form class="cols-form">
+  <p class="hint">Fires automatically on each autosend slot (09/13/17 UTC) — one compact chat message to every subscriber when today's scan finds a new drop. Sends nothing on quiet days.</p>
+  <div class="row">
+    <button type="button" class="btn" onclick="tgFeed(true)">Preview</button>
+    <button type="button" class="btn" onclick="tgFeed(false)">Send now</button>
+    <span id="fres" class="msg"></span>
+  </div>
+</form>
+</section>
 <section class="card"><h2>👥 Subscribers <span class="hint">(</span><span id="cnt" class="hint">__CNT__</span><span class="hint">)</span></h2>
 <div class="table-wrap"><table class="plain"><thead><tr><th>Name</th><th>Username</th><th>Chat</th><th>Source</th>
 <th>Last seen</th></tr></thead><tbody id="rows">__ROWS__</tbody></table></div>
@@ -168,6 +178,12 @@ async function tgMe(){const r=await api("/api/telegram/state",{action:"me"});
 async function tgBroadcast(){const r=await api("/api/telegram/broadcast",
   {text:document.getElementById("msg").value,image:document.getElementById("img").value});
   document.getElementById("bres").textContent = r.ok ? "Broadcast started" : "Error: "+r.error;}
+async function tgFeed(dry){const r=await api("/api/telegram/feed",{dry_run:dry});
+  const el=document.getElementById("fres");
+  if(r.ok && r.messages && r.messages.length){
+    const sum=r.messages.map(d=>(d.title||"")+" — $"+(d.new||0)+" (-"+(d.drop_pct||0)+"%)").join(" | ");
+    el.textContent = (dry?"Preview (not sent): ":"Sent to "+r.sent+" chat(s): ")+sum;
+  } else { el.textContent = r.ok ? "No new drops to send." : "Error: "+r.error; }}
 async function fill(){const j=await api("/api/telegram/state",{});
   if(j.ok){document.getElementById("token").value=j.token||"";document.getElementById("secret").value=j.secret||"";
     document.getElementById("botname").value=j.botname||"";

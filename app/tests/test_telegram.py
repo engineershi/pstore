@@ -295,6 +295,59 @@ class TestTelegramServer(unittest.TestCase):
         chats = sorted(c[1]["chat_id"] for c in send_calls)
         self.assertEqual(chats, ["111", "222"])
 
+    # ------------------------------------------------------------- daily digest
+    def test_telegram_feed_price_drop_digest_and_dedup(self):
+        """The feed: dry-run shows the drops without messaging; a real run sends
+        exactly one digest per subscriber; the same drop is never messaged twice
+        across slots (tg.feed.seen)."""
+        self._set_cfg(token="123:TOK")
+        self._seed_sub("555", "Bob")
+        try:
+            server._set_setting("tg.feed.seen", "")
+        except Exception:
+            pass
+        stub = server._AutosendStub()
+        drop = {"asin": "B012345678", "title": "Keto Gummies",
+                "old": 19.99, "new": 9.99, "drop": 10.0, "drop_pct": 50.0}
+        # dry-run preview: computes the messages, never calls sendMessage
+        self._sink.calls = []
+        d = server.Handler._telegram_feed(stub, drops=[drop], dry=True)
+        self.assertTrue(d["ok"], d)
+        self.assertEqual(d["messages"], [drop])
+        self.assertEqual(d["sent"], 0)
+        self.assertEqual(d["recipients"], 1)
+        self.assertEqual(
+            len([c for c in self._sink.calls if c[0].endswith("/sendMessage")]),
+            0)
+        # real send: one digest message to the chat
+        self._sink.calls = []
+        d = server.Handler._telegram_feed(stub, drops=[drop])
+        self.assertTrue(d["ok"], d)
+        self.assertEqual(d["sent"], 1)
+        send_calls = [c for c in self._sink.calls if c[0].endswith("/sendMessage")]
+        self.assertEqual(len(send_calls), 1)
+        self.assertEqual(send_calls[0][1]["chat_id"], "555")
+        self.assertIn("price drops", send_calls[0][1]["text"].lower())
+        self.assertIn("Keto Gummies", send_calls[0][1]["text"])
+        self.assertIn("9.99", send_calls[0][1]["text"])
+        # same drop already messaged: the next slot sends nothing for it
+        self._sink.calls = []
+        d = server.Handler._telegram_feed(stub, drops=[drop])
+        self.assertTrue(d["ok"], d)
+        self.assertEqual(d["dedup"], True)
+        self.assertEqual(
+            len([c for c in self._sink.calls if c[0].endswith("/sendMessage")]),
+            0)
+        # API smoke: the route answers JSON ok (router + _body cache path) and
+        # short-circuits when the bot token is unset (no price re-scrape)
+        server._set_setting("telegram.token", "")
+        st, ct, body = self._raw("/api/telegram/feed", method="POST",
+                                 body=b'{"dry_run":true}', cookie=self.cookie)
+        self.assertEqual(st, 200)
+        d = json.loads(body)
+        self.assertTrue(d["ok"], d)
+        self.assertEqual(d["recipients"], 1)
+
     # ---------------------------------------------------------------- webhook
     def _hook(self, update, secret=None):
         headers = {"Content-Type": "application/json"}

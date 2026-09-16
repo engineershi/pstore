@@ -316,7 +316,11 @@ def _chapters():
             "webhook at POST /api/telegram/hook captures them in real time "
             "(validated by the secret header), understands /start, /join, "
             "/subscribe and /stop, and the admin panel broadcasts one tracked "
-            "message or share-card image to every subscriber in one click.")
+            "message or share-card image to every subscriber in one click. The "
+            "same page also runs the daily price-drop digest: each autosend "
+            "slot (09/13/17 UTC) the bot messages every subscriber a compact "
+            "'price drops' summary only when today's scan actually finds new "
+            "drops (each drop is messaged once, never repeated across slots).")
         doc.paragraph(
             "Every review card on a live page carries a 'Track price' button. A "
             "visitor who clicks it becomes a subscriber AND a price-watcher; the "
