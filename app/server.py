@@ -13416,11 +13416,14 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
         if not subs or not tok:
             return empty
         if not drops:
+            # Reuse the last background price scan instead of blocking an HTTP
+            # request on a fresh scrape. The autosend slot passes its own drops.
             try:
-                res = self._pricedrop_send()
-                drops = (res or {}).get("drops") or []
+                raw = _get_setting(_PRICEDROP_STATE_KEY, "{}") or "{}"
+                state = json.loads(raw) if isinstance(raw, str) and raw else {}
             except Exception:
-                drops = []
+                state = {}
+            drops = state.get("drops") or [] if isinstance(state, dict) else []
         seen = dict(tg_mod._json_get("tg.feed.seen", {}) or {})
         keyed = {}
         for d in (drops or []):
