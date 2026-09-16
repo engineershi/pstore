@@ -22,8 +22,8 @@ import urllib.parse
 
 import market_engine
 
-PLATFORMS = ["Twitter / X", "Facebook", "LinkedIn", "Instagram", "Pinterest", "Threads",
-             "Telegram"]
+PLATFORMS = ["Twitter / X", "Facebook", "LinkedIn", "Instagram", "TikTok",
+             "YouTube", "Pinterest", "Threads", "Telegram"]
 
 # 1-marketing-safe short codes (no 0/1/o/l/i) for per-post attribution.
 _ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
@@ -153,6 +153,31 @@ def _instagram(keyword, title, proof, price, link, slug):
             "body": body, "link": link, "hashtags": hashtags(keyword)}
 
 
+def _tiktok(keyword, title, proof, price, link, slug):
+    ht = " ".join(hashtags(keyword).split()[:5])
+    body = (f"POV: you finally found the best {keyword} 🏆\n\n"
+            f"{_clip(title, 65)} — {proof}"
+            f"{(' · ' + price) if price else ''}\n\n"
+            f"Link in bio 🔗 {link}\n\n{ht}")
+    return {"platform": "TikTok", "name": "TikTok caption (hook + hashtags)",
+            "body": body[:180], "link": link, "hashtags": hashtags(keyword)}
+
+
+def _youtube(keyword, title, proof, price, link, slug):
+    vid_title = (f"Best {keyword} — {_clip(title, 55)} Reviewed ({proof})"
+                 )[:100]
+    ht = " ".join(hashtags(keyword).split()[:10])
+    desc = (f"We ranked the best {keyword} by star rating, review volume, "
+            f"and price — from live Amazon data, not opinions.\n\n"
+            f"🏆 #1 Pick: {_clip(title, 90)}\n"
+            f"{proof}{' · ' + price if price else ''}\n\n"
+            f"👉 Full ranked list + live prices: {link}\n\n"
+            f"#best{slug.replace('-','')} #amazon #review #buynow {ht}")
+    return {"platform": "YouTube", "name": "YouTube title + description",
+            "body": desc[:4000], "link": link,
+            "title": vid_title, "hashtags": hashtags(keyword)}
+
+
 def _pinterest(keyword, title, proof, price, link, slug):
     body = (f"Best {keyword} ranked — see which one buyers keep choosing, why, "
             f"and what it costs. Pin for your next {keyword} decision.\n\n"
@@ -181,8 +206,8 @@ def _telegram(keyword, title, proof, price, link, slug):
 
 _COMPOSERS = {
     "Twitter / X": _twitter, "Facebook": _facebook, "LinkedIn": _linkedin,
-    "Instagram": _instagram, "Pinterest": _pinterest, "Threads": _threads,
-    "Telegram": _telegram,
+    "Instagram": _instagram, "TikTok": _tiktok, "YouTube": _youtube,
+    "Pinterest": _pinterest, "Threads": _threads, "Telegram": _telegram,
 }
 
 

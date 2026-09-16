@@ -200,6 +200,30 @@ class TestSocialSuite(unittest.TestCase):
         self.assertEqual(social._key("Telegram"), "telegram")
         self.assertIn("utm_source=telegram", tg[0]["link"])
 
+    def test_kits_compose_tiktok_and_youtube(self):
+        """"The video composers ship TikTok and YouTube kits (short-form hook
+        caption + a real video title and description) both UTM-tracked to the
+        landing page, and they fall through to webhook posting (no native key)."""
+        d = self._api()
+        tt = [k for k in d["kits"] if k["platform"] == "TikTok"]
+        self.assertEqual(len(tt), 1)
+        self.assertIn("utm_source=tiktok", tt[0]["link"])
+        self.assertIn("utm_campaign=keto-snacks", tt[0]["link"])
+        self.assertLessEqual(len(tt[0]["body"]), 180)
+        self.assertTrue(tt[0]["hashtags"])
+        yt = [k for k in d["kits"] if k["platform"] == "YouTube"]
+        self.assertEqual(len(yt), 1)
+        self.assertIn("utm_source=youtube", yt[0]["link"])
+        self.assertIn("utm_campaign=keto-snacks", yt[0]["link"])
+        self.assertLessEqual(len(yt[0]["title"]), 100)
+        self.assertIn("https://", yt[0]["body"])
+        # no native backend → post_to reports "skipped" (webhook applies)
+        kv = lambda ns, name="": ""
+        res = publish.post_to("TikTok", yt[0], kv)
+        self.assertEqual(res["via"], "skipped")
+        res = publish.post_to("YouTube", yt[0], kv)
+        self.assertEqual(res["via"], "skipped")
+
     def test_publish_single_platform(self):
         d = self._api()
         core = social._ALPHABET.lower()
