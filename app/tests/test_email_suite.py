@@ -432,6 +432,63 @@ class TestEmailSuite(unittest.TestCase):
         finally:
             mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD = saved
 
+    # ----------------------------------------------- generic home 'picks' fallback
+
+    def test_home_picks_keyword_falls_back_to_curated_products(self):
+        """Regression: the homepage opt-in captures keyword='picks' which maps to
+        no niche with products — welcome and sequence used to silently skip those
+        leads (sent_index stuck at 0). They must now ride the curated best-stocked
+        niche and receive email #1 immediately."""
+        saved = (mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD)
+        mailer.SMTP_HOST = "smtp.test.local"
+        mailer.SMTP_USER = "u@example.com"
+        mailer.SMTP_PASSWORD = "pw"
+        try:
+            body = "email=%s&keyword=picks&source=home" % urllib.parse.quote("picks@example.com")
+            st, _, _, data = self._raw("/subscribe", "POST", body=body)
+            self.assertEqual(st, 200)
+            self.assertTrue(json.loads(data)["ok"])
+            self._wait_welcome("picks@example.com")
+            row = self._sub("picks@example.com")
+            self.assertEqual(row["sent_index"], 1)
+            with server._lock:
+                conn = server._db()
+                interest = conn.execute(
+                    "SELECT keyword FROM sub_interests WHERE subscriber_id=?",
+                    (row["id"],)).fetchall()
+                conn.close()
+            tracks = [i["keyword"] for i in interest or []]
+            self.assertTrue(tracks, "expected the lead to be parked on a real track")
+            self.assertTrue(any(t != "picks" for t in tracks),
+                            "expected a real (non-generic) curated track, got %r" % tracks)
+            mail = [s for s in self.sent if s["to"] == "picks@example.com"][-1]
+            self.assertTrue(mail["subject"])
+        finally:
+            mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD = saved
+
+    def test_sequence_send_advances_generic_keyword_leads(self):
+        """The unscoped sequence driver must keep advancing a 'picks' subscriber
+        instead of leaving them at sent_index 0 forever."""
+        saved = (mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD)
+        mailer.SMTP_HOST = "smtp.test.local"
+        mailer.SMTP_USER = "u@example.com"
+        mailer.SMTP_PASSWORD = "pw"
+        try:
+            body = "email=%s&keyword=picks&source=home" % urllib.parse.quote("gen@example.com")
+            st, _, _, data = self._raw("/subscribe", "POST", body=body)
+            self.assertEqual(st, 200)
+            self.assertTrue(json.loads(data)["ok"])
+            self._wait_welcome("gen@example.com")
+            for expect_idx in (2,):
+                st, _, _, data = self._raw("/api/sequence/send", "POST",
+                                           body="{}", cookie=self.cookie)
+                self.assertEqual(st, 200)
+                self.assertTrue(json.loads(data)["ok"])
+                self.assertEqual(json.loads(data)["sent"], 1)
+                self.assertEqual(self._sub("gen@example.com")["sent_index"], expect_idx)
+        finally:
+            mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD = saved
+
     # ----------------------------------------------- tracked email links + opens
 
     def _items_by_asin(self, asin):

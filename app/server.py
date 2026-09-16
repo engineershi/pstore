@@ -1596,6 +1596,32 @@ def _insert_topic(parent_slug, term, slug):
         conn.close()
 
 
+def _default_niche_items():
+    """Curated fallback: the niche holding the most productized picks. Used when
+    a lead's keyword matches no niche with products (e.g. the homepage's generic
+    'picks' opt-in) so every confirmed subscriber rides a real track instead of
+    being silently parked at email #1 forever. Returns (keyword, items)."""
+    try:
+        with _lock:
+            conn = _db()
+            rows = conn.execute(
+                "SELECT keyword, products FROM niches "
+                "WHERE products IS NOT NULL AND length(products) > 2 "
+                "AND products NOT IN ('[]', '{}') "
+                "ORDER BY length(products) DESC LIMIT 5").fetchall()
+            conn.close()
+    except Exception:
+        return "", []
+    for r in rows:
+        try:
+            items = json.loads(r["products"] or "[]")
+        except Exception:
+            continue
+        if items:
+            return (r["keyword"] or "").strip(), items
+    return "", []
+
+
 def _send_welcome_email(subscriber_id, keyword):
     """Best-effort immediate email #1 for a just-opted-in lead (welcome + the
     niche's lead-magnet PDF). Runs on a background thread from /subscribe so the
@@ -1626,7 +1652,10 @@ def _send_welcome_email(subscriber_id, keyword):
             except Exception:
                 continue
         if not items:
-            return  # nothing to sell yet — the autosend retries when products land
+            fkw, fitems = _default_niche_items()
+            if not fitems:
+                return  # nothing to sell anywhere yet — retried when products land
+            kw, items = fkw, fitems
         mail = mailer.next_email(kw, items, 1)
         if not mail:
             return
@@ -13036,6 +13065,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                     "(CASE WHEN i.id IS NOT NULL THEN 1 ELSE 0 END) AS has_interest "
                     "FROM subscribers s "
                     "LEFT JOIN sub_interests i ON i.subscriber_id=s.id "
+                    "AND lower(i.keyword) IN (SELECT lower(keyword) FROM niches) "
                     "WHERE s.unsubscribed=0 AND s.confirmed=1 "
                     "AND ((i.id IS NULL AND s.sent_index < ?) OR "
                     "     (i.id IS NOT NULL AND i.sent_index < ?)) "
@@ -13054,6 +13084,13 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                 kw = niche_kw
             item_row = niche_map.get(kw.lower())
             items = json.loads(item_row["products"] or "[]") if item_row else []
+            if not niche_kw and not items:
+                # Generic keyword (e.g. the home 'picks' opt-in) with no niche —
+                # park the lead on the curated best-stocked track so it is never
+                # silently skipped at email #1.
+                fkw, fitems = _default_niche_items()
+                if fitems:
+                    kw, items = fkw, fitems
             first = sub["first_name"] or ""
             seg = self._subscriber_segment(sub["id"])
             is_converted = seg == "converted"

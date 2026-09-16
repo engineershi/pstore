@@ -615,7 +615,7 @@ def render_landing(saved_niches):
 {editorial.quick_picks_band(saved_niches)}
 {comp_preview and ("<section class='card'><h2>Compare the shortlist — {0}</h2><p class='hint'>Scannable table of the live picks for {1}. Swipe or scroll sideways if it overflows.</p>{2}</section>".format(_clean(comp_kw.title()), _clean(comp_kw), comp_preview)) or ""}
 {editorial.home_trust_strip()}
-{optin_html("", "home", anchor="notify")}
+{optin_html(comp_kw, "home", anchor="notify")}
 
 {editorial.niche_grid(saved_niches, anchor="niches")}
 

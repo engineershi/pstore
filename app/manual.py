@@ -231,7 +231,10 @@ def _chapters():
             "never re-emailed) - only genuinely new leads get the welcome. If SMTP "
             "isn't configured yet, the welcome is skipped silently and the mail just "
             "waits; every step is driven by the subscriber's stored sent_index, so "
-            "the daily auto-send can never double-send a step.")
+            "the daily auto-send can never double-send a step. A keyword that maps "
+            "to no niche (the homepage's generic 'picks' opt-in) transparently falls "
+            "back to the best-stocked curated niche, so no confirmed lead ever sits "
+            "at email #1 waiting for content that isn't there.")
         doc.paragraph(
             "Email Studio (/admin/emails) is the one place to compose and send mail: "
             "pick any niche, segment (hot/warm/cold/converted/inactive) or typed "
