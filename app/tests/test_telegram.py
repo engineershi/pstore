@@ -260,6 +260,22 @@ class TestTelegramServer(unittest.TestCase):
         self.assertIn("/api/telegram/hook", payload["url"])
         self.assertEqual(payload["secret_token"], "wh-secret")
 
+    def test_telegram_config_save_sets_commands_and_description(self):
+        """BotFather-style polish: saving a token also pushes the /command menu
+        and a description so new users see what the bot does."""
+        st, d = self._set_cfg(token="123:TOK", secret="wh-secret",
+                              botname="pstorebot")
+        self.assertTrue(d["ok"])
+        self.assertEqual(d.get("identity"), "commands + description set")
+        desc = [c for c in self._sink.calls if c[0].endswith("/setMyDescription")]
+        self.assertEqual(len(desc), 1)
+        self.assertIn("price-drop", (desc[0][1].get("description") or "").lower())
+        cmds = [c for c in self._sink.calls if c[0].endswith("/setMyCommands")]
+        self.assertEqual(len(cmds), 1)
+        names = [x.get("command") for x in cmds[0][1].get("commands") or []]
+        self.assertIn("start", names)
+        self.assertIn("stop", names)
+
     # ------------------------------------------------------------ broadcast API
     def test_broadcast_requires_subscribers(self):
         st, ct, body = self._raw("/api/telegram/broadcast", method="POST",

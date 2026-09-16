@@ -141,6 +141,33 @@ def set_webhook(tok, url, secret_token, tok_param=None):
     return True, "webhook set"
 
 
+_BOT_COMMANDS = [
+    {"command": "start", "description": "Join for pstore price-drop updates"},
+    {"command": "join", "description": "Subscribe this chat to price drops"},
+    {"command": "subscribe", "description": "Alias of /join"},
+    {"command": "stop", "description": "Unsubscribe and stop price-drop alerts"},
+]
+
+
+def setup_bot_identity(tok, about=None):
+    """BotFather-style polish done programmatically once a token is saved:
+    setMyDescription (+ short description) and setMyCommands so the /command
+    menu shows what this bot actually does. Never raises; returns (ok, note)."""
+    if not tok:
+        return False, "no bot token"
+    about = about or ("pstore price-drop alerts — tap a pick on any page to join "
+                      "and get notified when it drops. Reply /stop anytime.")
+    try:
+        _call("setMyDescription", {"description": about}, tok)
+        _call("setMyShortDescription", {"short_description": "pstore price-drop alerts"}, tok)
+        st, data = _call("setMyCommands", {"commands": _BOT_COMMANDS}, tok)
+        if st == 200 and isinstance(data, dict) and data.get("ok"):
+            return True, "commands + description set"
+        return True, "description set (commands: %s)" % str(data)[:80]
+    except Exception as exc:
+        return False, str(exc)[:160]
+
+
 def send_message(tok, chat_id, text, image=None):
     """Deliver a broadcast/welcome message to one chat. Falls back from the
     photo form (share-card image) to a plain message when no image. Returns

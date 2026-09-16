@@ -225,6 +225,8 @@ def telegram_config_api(self):
             ok, desc = _tg.set_webhook(
                 tok, base + "/api/telegram/hook", _tg.secret())
             res["webhook"] = desc if ok else ("failed: " + desc)
+        ok, desc = _tg.setup_bot_identity(tok)
+        res["identity"] = desc if ok else ("failed: " + desc)
     return self._send(200, res)
 
 
