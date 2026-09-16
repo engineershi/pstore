@@ -267,6 +267,45 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
         self.assertEqual(final["state"]["status"], "done")
         self.assertGreaterEqual(final["state"]["checked"], 1)
 
+    def test_pricedrop_scan_skips_slow_asin_without_stalling(self):
+        """Regression: a single black-holed Amazon fetch must not hang the whole
+        scanner forever. Each ASIN now runs under a per-asin timeout (35s) and
+        the scan skips it, keeping the poll responsive and finishing."""
+        import time
+        self._seed()
+        saved_search = amazon.search
+        saved_timeout = server._PRICEDROP_ASIN_TIMEOUT
+        server._PRICEDROP_ASIN_TIMEOUT = 1.0
+
+        def slow_search(asin, top=1):
+            if asin == "B012345678":
+                time.sleep(3)  # pretend stuck forever
+            return ([{"asin": asin, "title": "Keto Gummies", "price": 19.99}], "stub")
+
+        amazon.search = slow_search
+        try:
+            st, ct, body = self._raw("/api/pricedrop/run", method="POST",
+                                     body=b"{}", cookie=self.cookie)
+            self.assertEqual(st, 200)
+            data = json.loads(body)
+            self.assertTrue(data.get("started"))
+            final = None
+            for _ in range(40):
+                st, ct, body = self._raw("/api/pricedrop", cookie=self.cookie)
+                s = json.loads(body)
+                stt = (s.get("state") or {}).get("status")
+                if stt == "done":
+                    final = s
+                    break
+                time.sleep(0.1)
+            self.assertIsNotNone(final, "scan stalled on slow ASIN")
+            self.assertEqual(final["state"]["status"], "done")
+            self.assertGreaterEqual(final["state"]["checked"], 1)
+            self.assertTrue(final["state"]["error"].lower())
+        finally:
+            amazon.search = saved_search
+            server._PRICEDROP_ASIN_TIMEOUT = saved_timeout
+
     def test_pricedrop_second_run_short_circuits_while_running(self):
         """A price-drop check already in progress must short-circuit new run
         requests (started=False) instead of spinning a second worker on top."""

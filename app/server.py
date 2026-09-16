@@ -708,6 +708,8 @@ _AUTOSEND_LIMIT = int((os.environ.get("AUTOSEND_LIMIT") or "0") or 0) \
 _AUTOSEND_LAST_KEY = "autosend.last"  # "YYYY-MM-DD:HH" marker so a slot runs once/day
 AUTOSEND_STATE_KEY = "autosend.state"  # json: {status,sent,last_run,last_status,next_run,errors}
 _PRICEDROP_STATE_KEY = "pricedrop.state"  # json progress for the background scraper
+_PRICEDROP_ASIN_TIMEOUT = 35.0  # per-ASIN fetch budget; a stuck Amazon
+# call is skipped so one bad ASIN can never stall the whole scan
 SOCIAL_PEAK_SLOTS = (8, 12, 19)  # high-engagement schedule hours (morning/lunch/evening)
 
 
@@ -1021,27 +1023,34 @@ def _pricedrop_scan(rows, min_pct):
     """Background re-scrape worker (shared by the manual button and the auto
     loop): polls update the persisted _PRICEDROP_STATE_KEY state so the admin
     page can paint progress instead of waiting on a blocking HTTP call.
-    Never raises."""
+    Never raises. A single slow/black-holed ASIN must never stall the whole
+    scan: each fetch runs under a per-ASIN timeout and is skipped on any
+    error/slow response."""
     store = _pricedrop_store()
     fresh = {}
     checked = 0
     error = ""
     try:
+        from concurrent.futures import ThreadPoolExecutor
+        pool = ThreadPoolExecutor(max_workers=1)
         for row in rows:
             asin = str(row.get("asin") or "").strip().upper()
             if not asin:
                 continue
+            fut = pool.submit(amazon.search, asin, 1)
             try:
-                items, _src = amazon.search(asin, top=1)
+                items, _src = fut.result(timeout=_PRICEDROP_ASIN_TIMEOUT)
                 if items and items[0].get("price") is not None:
                     fresh[asin] = items[0].get("price")
             except Exception:
-                pass
+                fur_e = str(fut.exception()) if fut.done() and fut.exception() else "timeout"
+                error = f"skipped {asin}: {fur_e[:120]}"
             checked += 1
             _set_setting(_PRICEDROP_STATE_KEY, json.dumps({
                 "running": True, "status": "scanning", "checked": checked,
                 "total": len(rows), "drops": [], "last_run": "",
-                "error": ""}))
+                "error": error}))
+        pool.shutdown(wait=False, cancel_futures=True)
     except Exception as e:
         error = str(e)[:160]
     try:
