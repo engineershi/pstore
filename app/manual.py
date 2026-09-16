@@ -259,10 +259,14 @@ def _chapters():
             "one click. Free AI providers are built in (OpenCode, Mistral, NVIDIA) so "
             "it works with no budget; add an OpenAI key for higher polish.")
         doc.paragraph(
-            "The Social page (/admin/social) generates a ready-to-post kit for X, "
-            "Facebook, LinkedIn, Instagram, Pinterest and Threads. Each kit has a "
-            "platform caption, hashtags and a tracked link with its own code, so every "
-            "post's clicks are counted individually in Analytics.")
+"The Social page (/admin/social) generates a ready-to-post kit for X, "
+             "Facebook, LinkedIn, Instagram, TikTok, YouTube, Pinterest and "
+             "Threads. Each kit has a platform caption (short-form TikTok hook, "
+             "or a full YouTube title + description for video), hashtags and a "
+             "tracked link with its own code, so every "
+             "post's clicks are counted individually in Analytics. Video "
+             "platforms need no native key: they publish through the webhook "
+             "alongside every other platform without credentials.")
         doc.paragraph(
             "Posts can be scheduled to future peak slots under 'Schedule post kits', "
             "then pushed out two ways from the 'Bulk publishing' toolbar: 'Flush due "
@@ -313,10 +317,12 @@ def _chapters():
             "every page': every public page floats a 'Join on Telegram' button "
             "that deep-links to t.me/<bot>?start=<page>, and each reader who taps "
             "Start lands in the subscribers table as an organic Telegram lead. The "
-            "webhook at POST /api/telegram/hook captures them in real time "
-            "(validated by the secret header), understands /start, /join, "
-            "/subscribe and /stop, and the admin panel broadcasts one tracked "
-            "message or share-card image to every subscriber in one click. The "
+"webhook at POST /api/telegram/hook captures them in real time "
+             "(validated by the secret header), understands /start, /join, "
+             "/subscribe and /stop, and the admin panel broadcasts one tracked "
+             "message or share-card image to every subscriber in one click. The "
+             "bot's /command menu and description are set automatically when the "
+             "token is saved, so Telegram shows what it does. The "
             "same page also runs the daily price-drop digest: each autosend "
             "slot (09/13/17 UTC) the bot messages every subscriber a compact "
             "'price drops' summary only when today's scan actually finds new "
@@ -329,7 +335,10 @@ def _chapters():
             "transactional email that both captures a lead and sells, in one step. "
             "Each capture also mints a personal referral link on the lead page "
             "('share the guide, you both win'), and the first capture ever credits "
-            "the referrer in the subscribers table.")
+            "the referrer in the subscribers table. The scanner is resilient: every "
+            "product fetch runs under a per-ASIN timeout (35s), so a single "
+            "black-holed Amazon request is skipped and reported instead of freezing "
+            "the whole scan.")
         doc.paragraph(
             "Marketing boosts on the Workbench (/tool) mint a real, UTM-tracked "
             "campaign per promo angle: Run persists it, folds in the SEM long-tail "
