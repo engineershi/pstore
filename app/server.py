@@ -47,6 +47,7 @@ import niche
 import oauth
 import paapi
 import pricedrop
+import sales_events
 import seo
 import security
 import segments
@@ -1028,6 +1029,7 @@ def _pricedrop_scan(rows, min_pct):
     error/slow response."""
     store = _pricedrop_store()
     fresh = {}
+    reviews = {}
     checked = 0
     error = ""
     try:
@@ -1040,8 +1042,13 @@ def _pricedrop_scan(rows, min_pct):
             fut = pool.submit(amazon.search, asin, 1)
             try:
                 items, _src = fut.result(timeout=_PRICEDROP_ASIN_TIMEOUT)
-                if items and items[0].get("price") is not None:
-                    fresh[asin] = items[0].get("price")
+                if items:
+                    it = items[0]
+                    if it.get("price") is not None:
+                        fresh[asin] = it.get("price")
+                    rv = it.get("reviews")
+                    if rv is not None:
+                        reviews[asin] = rv
             except Exception:
                 fur_e = str(fut.exception()) if fut.done() and fut.exception() else "timeout"
                 error = f"skipped {asin}: {fur_e[:120]}"
@@ -1059,13 +1066,36 @@ def _pricedrop_scan(rows, min_pct):
     except Exception as e:
         result = {"drops": [], "tracked": 0, "checked": checked}
         error = error or str(e)[:160]
+    for asin, price in fresh.items():
+        try:
+            store.record(asin, price=price, reviews=reviews.get(asin))
+        except Exception:
+            continue
+    try:
+        trending = pricedrop.trend_report(store, rows)
+    except Exception:
+        trending = []
+    try:
+        events = sales_events.upcoming_summary()
+    except Exception:
+        events = {}
     from datetime import datetime as _dt
     _set_setting(_PRICEDROP_STATE_KEY, json.dumps({
         "running": False, "status": "done", "checked": checked,
         "total": len(rows), "drops": result.get("drops") or [],
         "last_run": _dt.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-        "error": error}))
+        "error": error, "events": events or {},
+        "trending": trending or []}))
     _beat("pricedrop", ok=not error, err=error)
+
+
+def _sales_event_summary():
+    """Current hot-sale leverage summary (live/incoming event) for kits/emails.
+    Never raises — an empty dict just means no leverage."""
+    try:
+        return sales_events.upcoming_summary()
+    except Exception:
+        return {}
 
 
 def _pricedrop_auto_hours():
@@ -1954,14 +1984,15 @@ def _content_run(now=None, limit=None):
                             break
                         tkits = social.topic_post_kits(
                             ts, n["keyword"], n["products"], seo.BASE_URL,
-                            parent_slug=slug)
+                            parent_slug=slug, event=_sales_event_summary())
                         q = _content_queue_kits(slug, n["keyword"],
                                                 tkits[:kits_left], cfg["hours"])
                         kits_left -= q
                         summary["kits_queued"] += q
                     if kits_left > 0:
                         kits = social.post_kits(n["keyword"], n["products"],
-                                                seo.BASE_URL, slug=slug)
+                                                seo.BASE_URL, slug=slug,
+                                                event=_sales_event_summary())
                         q = _content_queue_kits(slug, n["keyword"],
                                                 kits[:kits_left], cfg["hours"])
                         kits_left -= q
@@ -2269,7 +2300,8 @@ def _schedule_drip_pin(c, at):
     image (variant .v<N> palette). Idempotent per utm_content. Returns True when
     a row was scheduled."""
     slug = c["slug"]
-    kits = social.post_kits(c["keyword"], c["items"], seo.BASE_URL, slug=slug)
+    kits = social.post_kits(c["keyword"], c["items"], seo.BASE_URL, slug=slug,
+                            event=_sales_event_summary())
     pk = next((k for k in kits if (k.get("platform") or "") == "Pinterest"), None)
     if pk is None:
         return False
@@ -4755,6 +4787,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._pricedrop_api()
             if path == "/api/pricedrop/state":
                 return self._pricedrop_state_api()
+            if path == "/api/pricedrop/events":
+                return self._pricedrop_events_api()
             if path == "/admin/apikeys":
                 return self._admin_apikeys(q)
             if path == "/admin/opportunities":
@@ -5039,6 +5073,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._pricedrop_config()
             if parsed.path == "/api/pricedrop/state":
                 return self._pricedrop_state_api()
+            if parsed.path == "/api/pricedrop/events":
+                return self._pricedrop_events_api()
             if parsed.path == "/api/segments/reengage":
                 return self._send(200, self._reengage_cold())
             if parsed.path == "/api/subjects/save":
@@ -7464,7 +7500,8 @@ if (inp) inp.addEventListener("keydown", e => {{ if (e.key === "Enter" && saveBt
             "landing_url": landing_url,
             "ebook_url": ebook_url,
             "ebook_ready": keyword in _EBOOKS,
-            "social_kit": social.post_kits(keyword, items, base_url=seo.BASE_URL),
+            "social_kit": social.post_kits(keyword, items, base_url=seo.BASE_URL,
+                                   event=_sales_event_summary()),
             "stats": {"subscribers_active": subs["active"],
                       "subscribers_ready": subs["ready"],
                       "clicks": clicks,
@@ -8306,7 +8343,8 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
             return []
         slug = seo._slugify(n["keyword"])
         kits = social.post_kits(n["keyword"], n["products"] or [],
-                                base_url=seo.BASE_URL, slug=slug)
+                                base_url=seo.BASE_URL, slug=slug,
+                                event=_sales_event_summary())
         if not kits:
             return kits
         with _lock:
@@ -9031,7 +9069,7 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
                 tterm = topic["term"]
                 tkits = social.topic_post_kits(
                     tterm, kw, products, seo.BASE_URL, parent_slug=parent_slug,
-                    slug=seo._slugify(topic["slug"]))
+                    slug=seo._slugify(topic["slug"]), event=_sales_event_summary())
                 kits_built += len(tkits)
                 if do_schedule:
                     scheduled += self._queue_topic_kits(parent_slug, kw, tterm, tkits, hours)
@@ -12893,7 +12931,9 @@ database — no log parsing. If a card stays STALE, the worker has stopped beati
                  "total": int(data.get("total", 0)),
                  "drops": data.get("drops") or [],
                  "last_run": data.get("last_run"),
-                 "error": data.get("error", "")}
+                 "error": data.get("error", ""),
+                 "events": data.get("events") or {},
+                 "trending": data.get("trending") or []}
         if not state["running"] and state["status"] != "idle":
             state["status"] = "done"
         return state
@@ -12963,6 +13003,44 @@ database — no log parsing. If a card stays STALE, the worker has stopped beati
             "state": pd,
         })
 
+    def _pricedrop_events_api(self):
+        """GET /api/pricedrop/events — recurring + custom + upcoming.
+        POST — add or delete a custom event.
+        Body: {"action":"add","id":"...","name":"...","emoji":"🔥",
+               "start":"2026-07-14","end":"2026-07-16","hashtags":"..."}
+          or  {"action":"delete","id":"..."}."""
+        try:
+            custom = json.loads(_get_setting("sales.custom_events", "[]")) or []
+        except Exception:
+            custom = []
+        if self.command == "POST":
+            body = self._body() or {}
+            action = str(body.get("action") or "").strip().lower()
+            if action == "delete":
+                eid = str(body.get("id") or "").strip()
+                if eid:
+                    custom = [c for c in custom
+                              if str(c.get("id") or c.get("name") or "") != eid]
+                    _set_setting("sales.custom_events", json.dumps(custom))
+                    return self._send(200, {"ok": True, "deleted": True,
+                                            "count": len(custom)})
+                return self._send(200, {"ok": False, "error": "missing id"})
+            if action == "add":
+                name = str(body.get("name") or "").strip()
+                if not name:
+                    return self._send(200, {"ok": False, "error": "missing name"})
+                custom.append({"id": body.get("id") or name.lower().replace(" ", "-"),
+                               "name": name, "emoji": str(body.get("emoji") or "🔥")[:2],
+                               "start": body.get("start") or None,
+                               "end": body.get("end") or None,
+                               "hashtags": str(body.get("hashtags") or "")})
+                _set_setting("sales.custom_events", json.dumps(custom))
+                return self._send(200, {"ok": True, "count": len(custom)})
+            return self._send(200, {"ok": False, "error": "unknown action"})
+        return self._send(200, {"ok": True, "custom": custom,
+                                "events": sales_events.window_status(custom=custom),
+                                "upcoming": sales_events.upcoming_summary(custom=custom)})
+
     def _admin_pricedrop(self, q):
         js = (
             "async function runCheck(){const m=document.querySelector('#msg');const out=document.querySelector('#out');\n"
@@ -12990,6 +13068,15 @@ database — no log parsing. If a card stays STALE, the worker has stopped beati
             "try{r=await fetch('/api/pricedrop/send',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});d=await r.json();}"
             "catch(e){m.textContent='\u2717 Could not reach the server.';return;}\n"
             "m.textContent=(r.ok?'\u2713 Emailed '+(d.sent||0)+' hot/converted leads':'')+' (already sent '+(d.already_sent||0)+')';}\n"
+            "async function addEvent(){const m=document.querySelector('#ev-msg');m.textContent='Saving\u2026';\n"
+            "const body=JSON.stringify({action:'add',name:document.querySelector('#ev-name').value,emoji:document.querySelector('#ev-emoji').value,start:document.querySelector('#ev-start').value,end:document.querySelector('#ev-end').value,hashtags:document.querySelector('#ev-tags').value});\n"
+            "let r,d;try{r=await fetch('/api/pricedrop/events',{method:'POST',headers:{'Content-Type':'application/json'},body});d=await r.json();}\n"
+            "catch(e){m.textContent='\u2717 Could not reach the server.';return;}\n"
+            "m.textContent=(r.ok&&d.ok)?'\u2713 Event added \u2014 refresh to see it live':'\u2717 '+((d&&d.error)||'failed')+'';}\n"
+            "async function delEvent(id){const m=document.querySelector('#ev-msg');if(!confirm('Delete this event?'))return;m.textContent='Deleting\u2026';\n"
+            "let r,d;try{r=await fetch('/api/pricedrop/events',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'delete',id})});d=await r.json();}\n"
+            "catch(e){m.textContent='\u2717 Could not reach the server.';return;}\n"
+            "m.textContent=(r.ok&&d.ok)?'\u2713 Deleted \u2014 refresh to confirm':'\u2717 '+((d&&d.error)||'failed');}\n"
             "async function loadCfg(){const c=document.querySelector('#cfg');if(!c)return;\n"
             "let d;try{const r=await fetch('/api/pricedrop/state');d=await r.json();}catch(e){return;}\n"
             "document.querySelector('#auto-on').checked=!!d.auto;\n"
@@ -13009,6 +13096,61 @@ database — no log parsing. If a card stays STALE, the worker has stopped beati
             % (seo._clean(a), pricedrop._fmt(v.get("price")) if v.get("price") is not None else "—")
             for a, v in allb.items()) or (
             '<tr><td colspan="2" class="hint">No prices watched yet — run a check to seed baselines.</td></tr>')
+        try:
+            custom_events = json.loads(_get_setting("sales.custom_events", "[]")) or []
+        except Exception:
+            custom_events = []
+        events = sales_events.window_status(custom=custom_events)
+        leverage = sales_events.upcoming_summary(custom=custom_events)
+        trend = (self._price_run_state().get("trending") or [])
+        ev_pills = "".join(
+            '<span class="ev %s">%s %s</span>' % (
+                e["status"],
+                e["status"] if e["status"] == "off" else
+                ("LIVE \u2014 %dd" % e["ends_in"] if e["status"] == "active"
+                 else "in %dd" % e["days_until"]),
+                seo._clean(e["tagline"]) if e["status"] == "off" else "")
+            for e in events[:8])
+        if not events:
+            ev_pills = '<p class="hint">No events on the calendar.</p>'
+        trend_rows = "".join(
+            '<div class="tk%d"><b>%s</b> <span class="flag %s">%s</span>'
+            '<small>+%d reviews \u00b7 %.1f%%/day \u00b7 %d total</small>%s</div>'
+            % (1 if x["viral"] else (2 if x["trending"] else 3),
+               seo._clean(x.get("title") or x["asin"]),
+               "viral" if x["viral"] else ("trending" if x["trending"] else "quiet"),
+               "VIRAL" if x["viral"] else ("TRENDING" if x["trending"] else "watching"),
+               int(x.get("added") or 0), float(x.get("rate") or 0),
+               int(x.get("reviews") or 0),
+               "" if not x.get("viral") else " \u26a0\ufe0f")
+            for x in trend)
+        if not trend_rows:
+            trend_rows = ('<p class="hint">No momentum data yet — snapshots build '
+                          'each price-drop scan, then trending/viral appears here.</p>')
+        lev = lever = ""
+        if leverage:
+            lev = leverage.get("line") or ""
+        hotfinder = (f'<section class="card"><h2>\U0001f525 Hot Sale Finder</h2>'
+                     f'<p class="hint">Seasonal radar + momentum screen. Active/incoming '
+                     f'sales events give every price drop a leverage frame, and '
+                     f'review-velocity screens surface trending &amp; viral products '
+                     f'before their price even moves.</p>'
+                     f'<div class="ev-row">{ev_pills}</div>'
+                     f'<div class="lev" id="ev-name-hook">{"&nbsp;" if not lev else seo._clean(lev)}</div>'
+                     f'<div class="trend-list">{trend_rows}</div>'
+                     f'<details class="ev-add"><summary>＋ Add your own event (launch, one-off deal \u2026)</summary>'
+                     f'<div class="actions">'
+                     f'<input id="ev-name" placeholder="Event name" value="">'
+                     f'<input id="ev-emoji" placeholder="🔥" value="🔥" style="width:52px">'
+                     f'<input id="ev-start" type="date" aria-label="start">'
+                     f'<input id="ev-end" type="date" aria-label="end">'
+                     f'<input id="ev-tags" placeholder="#Hashtag" value="">'
+                     f'<button class="warm" onclick="addEvent()">＋ Add event</button></div>'
+                     f'<p id="ev-msg" class="msg"></p></details>'
+                     f'<p class="hint" style="margin-top:8px"><b>Leverage at work:</b> when a scan '
+                     f'finds a real drop while an event is live or inbound, the drop email '
+                     f'subject + Telegram digest lead with the event (e.g. \u201c\u2b07\ufe0f Black '
+                     f'Friday is LIVE \u2014 this just dropped 30%\u201d).</p></section>')
         body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Price-drop engine — pstore</title><link rel="stylesheet" href="/style.css">
@@ -13020,6 +13162,19 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
 #out ul{{list-style:none;padding:0;margin:0;display:grid;gap:8px}}
 #out li{{background:var(--bg,#f4f7fb);border:1px solid var(--border,#e6e8ee);border-radius:12px;padding:10px 14px;font-size:13px}}
 #out li .p-new{{color:#b12704;font-weight:800}}
+.ev-row{{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}}
+.ev{{font-size:12px;padding:6px 12px;border-radius:999px;border:1px solid var(--border,#e6e8ee);background:var(--bg,#f4f7fb);white-space:pre-wrap}}
+.ev.active{{background:#fff4e0;border-color:#f0a41a;color:#7a4a06;font-weight:700}}
+.ev.upcoming{{background:#eef3ff;border-color:#9db4ff;color:#233a8a}}
+.lev{{margin:12px 0 4px;font-size:15px;font-weight:700;color:#191b26}}
+.trend-list{{display:grid;gap:8px;margin-top:12px}}
+.tk1,.tk2,.tk3{{border:1px solid var(--border,#e6e8ee);border-radius:12px;padding:9px 12px;font-size:13px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}}
+.tk1{{background:#fdeeee;border-color:#f0a0a0}}.tk2{{background:#f1fbf1;border-color:#a0d8a0}}
+.flag{{font-size:11px;font-weight:800;padding:2px 8px;border-radius:999px;letter-spacing:.4px}}
+.flag.viral{{background:#c0392b;color:#fff}}.flag.trending{{background:#16802a;color:#fff}}
+.flag.quiet{{background:#e8eaf0;color:#5c6b7a}}
+.tk1 small,.tk2 small,.tk3 small{{color:#5c6b7a;margin-left:auto}}
+.ev-add{{margin-top:10px;font-size:13px}}.ev-add summary{{cursor:pointer;color:#233a8a;font-weight:600}}
 </style></head><body>
 <header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
 <div class="hero"><h1>Price-drop <span>deal engine.</span></h1>
@@ -13045,6 +13200,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
 <button class="ghost" onclick="sendDrops()">📨 Email hot + converted leads</button>
 </div>
 <p id="msg" class="msg"></p></section>
+{hotfinder}
 <section class="card" id="out"><h2>✨ Deals right now</h2><p class="hint">Nothing yet — run a check to see drops.</p></section>
 <script>
 {js}
@@ -13316,15 +13472,28 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             return {"ok": True, "drops": [], "candidates": 0, "sent": 0,
                     "already_sent": 0, "keyword": kw_filter or None}
         fresh = {}
+        _reviews = {}
         for row in rows:
             try:
                 items, _src = amazon.search(row["asin"], top=1)
                 if items:
                     fresh[row["asin"]] = items[0].get("price")
+                    rv = items[0].get("reviews")
+                    if rv is not None:
+                        _reviews[row["asin"]] = rv
+            except Exception:
+                continue
+        for _a, _p in fresh.items():
+            try:
+                store.record(_a, price=_p, reviews=_reviews.get(_a))
             except Exception:
                 continue
         result = pricedrop.check(rows, fresh, store=store, min_drop_pct=min_pct)
         drops = result["drops"]
+        try:
+            events_summary = sales_events.upcoming_summary()
+        except Exception:
+            events_summary = {}
         if not drops:
             return {"ok": True, "drops": [], "candidates": 0, "sent": 0,
                     "already_sent": 0, "keyword": kw_filter or None}
@@ -13353,7 +13522,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                 continue
             pick_asin = next((d["asin"] for d in niche_drops), "")
             mail = pricedrop.drop_email(niche_drops, base_url=os.environ.get("PSTORE_URL", ""),
-                                        email=sub["email"])
+                                        email=sub["email"], events=events_summary)
             if not mail["subject"]:
                 continue
             candidates += 1
@@ -13389,7 +13558,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                  "drop_pct": next((x["drop_pct"] for x in drops if x["asin"] == asin), 0)}
             mail = pricedrop.drop_email([d], base_url=os.environ.get("PSTORE_URL", ""),
                                         pick_links={asin: amazon.affiliate_url(asin)},
-                                        email=sub["email"])
+                                        email=sub["email"], events=events_summary)
             if not mail["subject"]:
                 continue
             watcher_emails += 1
@@ -13454,6 +13623,18 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             lines.append("%s\n  %s \u2192 %s%s" % (title, fmt(d.get("old")),
                                                   fmt(d.get("new")), pct_s))
         text = "\U0001f4c9 pstore price drops\n\n" + "\n".join(lines)
+        try:
+            raw = _get_setting(_PRICEDROP_STATE_KEY, "{}") or "{}"
+            state = json.loads(raw) if isinstance(raw, str) and raw else {}
+        except Exception:
+            state = {}
+        ev = (state or {}).get("events") or {}
+        if isinstance(ev, dict) and ev.get("line"):
+            text = ("%s\n\n%s" % (ev["line"], text))
+            if ev.get("event") and isinstance(ev["event"], dict) and \
+                    ev["event"].get("status") == "active":
+                text = text.replace("\U0001f4c9 pstore price drops",
+                                    "\U0001f4c9 pstore \U0001f525 hot-sale drops")
         link = (mailer.site_base() or os.environ.get("PSTORE_URL", "")).rstrip("/")
         if link:
             text += "\n\n\U0001f310 Full picks: %s" % link

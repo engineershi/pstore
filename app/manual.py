@@ -338,7 +338,13 @@ def _chapters():
             "the referrer in the subscribers table. The scanner is resilient: every "
             "product fetch runs under a per-ASIN timeout (35s), so a single "
             "black-holed Amazon request is skipped and reported instead of freezing "
-            "the whole scan.")
+            "the whole scan. A Hot Sale Finder on the price-drop page keeps a "
+            "seasonal radar — Black Friday, Prime Day, December holiday deals and "
+            "every sale window, plus your own one-off events ('my launch Jul 14-16') "
+            "— and screens every watched product's review velocity into TRENDING / "
+            "VIRAL. When a real drop lands while a sale is live or incoming, the "
+            "drop email, Telegram digest and social kits lead with the event as "
+            "leverage ('\u2b07\ufe0f Black Friday is LIVE — this just dropped 30%').")
         doc.paragraph(
             "Marketing boosts on the Workbench (/tool) mint a real, UTM-tracked "
             "campaign per promo angle: Run persists it, folds in the SEM long-tail "
@@ -803,6 +809,7 @@ def render_admin_manual(nav_html, totop_html):
 <h3 id="s4">7 · Step 4 — Send the 5-part buyer sequence</h3>
 <p>Every subscriber enters a 5-email sequence from the top pick: hook → social proof → objections → soft urgency → follow-up + review. Each carries your tagged Amazon link. Every mail is a clean brand-styled HTML email with a plain-text twin: bold headline, organised sub-headings, and an Amazon-style product card (share-card image, ⭐ rating, orange price, buy CTA) so it reads as beautifully as the review pages.</p>
 <p>Review cards add a <b>“Track price”</b> button: a click turns a visitor into a subscriber <i>and</i> a price-watcher. The <a class="tooltag" href="/admin/pricedrop">🛒 Price-drop engine</a> then flags real drops against stored baselines — and it runs <b>automatic</b> too: flip <i>Automatic price-drop scans</i> to <b>ON</b> on that page (default, every 6 hours; set your own interval) and the watcher re-scrapes and emails the daily email pass's watchers a personal “price just dropped” alert with a tracked check-price link the moment their product actually goes on sale — a transactional capture that sells at the same time. Keep the manual <b>Run check</b> / <b>Email hot + converted leads</b> buttons whenever you want an instant push. Every capture also shows a <b>referral link</b> (“share the guide, you both win”), and the referrer is credited once in the subscribers table.</p>
+<p>The price-drop page is also a <b>Hot Sale Finder</b>: a seasonal radar tracks every Amazon/retail sale window (Black Friday, Prime Day, December holiday deals, …) plus your own one-off events, and a review-velocity screen flags each watched product as <b>TRENDING</b>/<b>VIRAL</b>. When a scan finds a real drop while a sale is live or incoming, the drop email subject, Telegram digest and social post kits all lead with that event as the leverage hook — so “price dropped” becomes “<b>Black Friday is LIVE — this just dropped 30%</b>”.</p>
 <p><a class="tooltag" href="/admin/emails">📨 Email Studio</a> is the one place to compose and send mail: pick any niche, segment (hot/warm/cold/converted/inactive) or a typed address list, choose a sequence step, converted follow-up, re-engage or a fully custom subject + body, then deliver <b>now</b> or <b>schedule a UTC slot</b>. A live preview shows exactly what lands in the inbox.</p>
 <ul class="step-list">
 <li>Pick recipients with the checkboxes, or type any address(es) — one per line; the count updates live.</li>

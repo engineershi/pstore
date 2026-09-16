@@ -210,10 +210,43 @@ _COMPOSERS = {
     "Pinterest": _pinterest, "Threads": _threads, "Telegram": _telegram,
 }
 
+# hard character limits per platform: below these a full hook fits; above we
+# only append the event hashtag so the post never gets truncated by the network
+_PLATFORM_CAPS = {"Twitter / X": 280, "TikTok": 180, "Threads": 500}
 
-def post_kits(keyword, items, base_url, slug=None):
+
+def with_event(kit, event=None, cap=None):
+    """Frame a ready kit body with the live/incoming sale event (a
+    sales_events.upcoming_summary() dict or a plain tagline string): a 🔥 hook
+    line on top when the platform has room, always the event hashtag. Returns
+    the kit unchanged when no event is supplied."""
+    if not event:
+        return kit
+    hook = (event.get("line") if isinstance(event, dict) else str(event)) or ""
+    hook = re.sub(r"\s+", " ", hook).strip()
+    if hook and len(hook) <= 300:
+        body = str(kit.get("body") or "")
+        if hook not in body:
+            combined = "🔥 %s\n\n%s" % (hook, body)
+            if cap is None or len(combined) <= cap:
+                kit["body"] = combined
+    tags = str(kit.get("hashtags") or "")
+    extra = event.get("hashtags") if isinstance(event, dict) else None
+    if extra:
+        add = []
+        for group in extra:
+            for h in str(group).split():
+                if h and h.startswith("#") and h not in tags:
+                    add.append(h)
+        if add:
+            kit["hashtags"] = (tags.rstrip() + " " + " ".join(add)).strip()
+    return kit
+
+
+def post_kits(keyword, items, base_url, slug=None, event=None):
     """Return one ready-to-post kit (dict) per platform, UTM-tagged. Empty when
-    the niche has no top pick."""
+    the niche has no top pick. Pass an optional sales-events `event` summary to
+    frame every kit with the live/incoming sale (hook + hashtag)."""
     pick = market_engine.pick_for_buyers(items)
     if not (pick or {}).get("asin"):
         return []
@@ -226,6 +259,7 @@ def post_kits(keyword, items, base_url, slug=None):
         content = short_code()
         link = track_link(base_url, slug, platform, content)
         kit = _COMPOSERS[platform](keyword, title, proof, price, link, slug)
+        with_event(kit, event, cap=_PLATFORM_CAPS.get(platform))
         kit["slug"] = slug
         kit["keyword"] = keyword
         kit["utm_content"] = content
@@ -238,10 +272,12 @@ def post_kits(keyword, items, base_url, slug=None):
     return kits
 
 
-def topic_post_kits(term, parent_keyword, items, base_url, parent_slug=None, slug=None):
+def topic_post_kits(term, parent_keyword, items, base_url, parent_slug=None, slug=None,
+                    event=None):
     """Long-tail topic recycling: same one pick, but the copy names the specific
     long-tail angle (/n/<parent>/<term>) so every indexed topic page earns social
-    traffic too. Uses its own tracked link with content tagged for the topic."""
+    traffic too. Uses its own tracked link with content tagged for the topic.
+    An optional sales-events `event` summary frames every kit (hook + hashtag)."""
     pick = market_engine.pick_for_buyers(items)
     if not (pick or {}).get("asin"):
         return []
@@ -265,6 +301,7 @@ def topic_post_kits(term, parent_keyword, items, base_url, parent_slug=None, slu
             if term else track_link(base_url, parent_slug, platform, content)
         kit = _COMPOSERS[platform]("%s %s" % (parent_keyword, term), title, proof,
                                    price, link, term_slug)
+        with_event(kit, event, cap=_PLATFORM_CAPS.get(platform))
         kit["slug"] = term_slug
         kit["keyword"] = parent_keyword
         kit["utm_content"] = content
