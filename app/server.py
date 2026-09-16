@@ -13019,17 +13019,21 @@ database — no log parsing. If a card stays STALE, the worker has stopped beati
             if action == "delete":
                 eid = str(body.get("id") or "").strip()
                 if eid:
-                    custom = [c for c in custom
-                              if str(c.get("id") or c.get("name") or "") != eid]
+                    norm = lambda s: re.sub(r"[^a-z0-9]+", "-", str(s or "").strip().lower()).strip("-")
+                    before = len(custom)
+                    custom = [c for c in custom if not (
+                        norm(c.get("id")) == norm(eid) or norm(c.get("name")) == norm(eid))]
+                    removed = before - len(custom)
                     _set_setting("sales.custom_events", json.dumps(custom))
-                    return self._send(200, {"ok": True, "deleted": True,
-                                            "count": len(custom)})
+                    return self._send(200, {"ok": True, "deleted": bool(removed),
+                                            "removed": removed, "count": len(custom)})
                 return self._send(200, {"ok": False, "error": "missing id"})
             if action == "add":
                 name = str(body.get("name") or "").strip()
                 if not name:
                     return self._send(200, {"ok": False, "error": "missing name"})
-                custom.append({"id": body.get("id") or name.lower().replace(" ", "-"),
+                custom.append({"id": body.get("id") or
+                               re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-"),
                                "name": name, "emoji": str(body.get("emoji") or "🔥")[:2],
                                "start": body.get("start") or None,
                                "end": body.get("end") or None,
