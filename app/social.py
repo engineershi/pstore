@@ -379,15 +379,26 @@ _CANVAS = (1200, 630)
 
 
 def _png_encode(width, height, rgb_rows):
-    """Encode truecolor 8-bit RGB rows into PNG bytes (stdlib zlib/struct)."""
+    """Encode truecolor 8-bit RGB rows into PNG bytes (stdlib zlib/struct).
+    `rgb_rows` is an iterable of per-row bytes (each width*3 long)."""
     import struct, zlib
     sig = b"\x89PNG\r\n\x1a\n"
     def chunk(tag, data):
         return (struct.pack(">I", len(data)) + tag + data
                 + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
     ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
-    scanlines = b"".join(b"\x00" + bytes(rgb) for rgb in rgb_rows)
-    return (sig + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(scanlines, 2))
+    # Build the scanline buffer with C-speed bytearray copies (a Python
+    # genexpr like `b"".join(b"\x00" + bytes(rgb) for rgb in rows)` costs one
+    # tiny object per element — and 6.2M elements for a 1080x1920 Shorts
+    # frame when passed a flat bytearray — ~40s on a weak box. Same bytes
+    # here, ~50ms.
+    buf = bytearray(width * height * 3 + height)
+    row = width * 3
+    for y, r in enumerate(rgb_rows):
+        off = y * (row + 1)
+        buf[off] = 0
+        buf[off + 1:off + 1 + row] = r
+    return (sig + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(bytes(buf), 2))
             + chunk(b"IEND", b""))
 
 

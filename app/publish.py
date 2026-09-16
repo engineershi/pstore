@@ -22,6 +22,12 @@ Supported native backends today (each posts ``{body, link}``):
   * Pinterest       — OAuth 2.0 board app token via api.pinterest.com/v5/pins (POST)
   * Facebook        — Graph API feed POST with a Page access token
   * LinkedIn        — UGC post with an organization access token
+  * Instagram       — Graph API photo publish (image_url + caption) with a
+                      Business account token + ``social.key.instagram.ig_user_id``
+  * YouTube         — renders the kit as a 9:16 Shorts frame (shortslib),
+                      encodes a ~6s MP4 with ffmpeg when present, and uploads
+                      via Data API v3 ``videos.insert`` (multipart) with an
+                      OAuth access token (``social.key.youtube``)
 Threads falls back to the webhook (its API needs the same image-video media
 endpoints used for the visual caption; kept behind the webhook for now).
 """
@@ -35,6 +41,7 @@ import time
 import urllib.parse
 import urllib.request
 
+import shorts
 import social
 
 _NET_LOCK = threading.Lock()
@@ -74,6 +81,33 @@ def _read_json(resp):
         return json.loads(raw.decode("utf-8", "replace"))
     except Exception:
         return {}
+
+
+def _multipart(url, json_section, file_bytes, file_type, headers, timeout=90):
+    """POST a JSON metadata part + one binary file part (YouTube
+    videos.insert / MediaLibraryService). Test seam like :func:`_post`; never
+    raises. Returns (http_status, json_dict)."""
+    boundary = "----pstore" + secrets.token_hex(6)
+    parts = [
+        ("--%s\r\nContent-Type: application/json\r\n\r\n"
+         % boundary).encode("ascii"),
+        json.dumps(json_section, ensure_ascii=False).encode("utf-8"),
+        b"\r\n--%s\r\nContent-Type: %s\r\n\r\n"
+        % (boundary.encode("ascii"), file_type.encode("ascii")),
+        file_bytes,
+        b"\r\n--%s--\r\n" % boundary.encode("ascii"),
+    ]
+    body = b"".join(parts)
+    headers = dict(headers, **{
+        "Content-Type": "multipart/form-data; boundary=" + boundary})
+    try:
+        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, _read_json(resp)
+    except urllib.error.HTTPError as e:
+        return e.code, _read_json(e)
+    except Exception:
+        return 0, {}
 
 
 def _oauth_nonce():
@@ -169,7 +203,8 @@ def post_to(platform, kit, key_getter):
     profile = {
         "Twitter / X": _post_twitter, "Pinterest": _post_pinterest,
         "Facebook": _post_facebook, "LinkedIn": _post_linkedin,
-        "Telegram": _post_telegram,
+        "Telegram": _post_telegram, "Instagram": _post_instagram,
+        "YouTube": _post_youtube,
     }.get(platform)
     if profile is None:
         return {"ok": False, "platform": platform, "via": "skipped",
@@ -199,6 +234,153 @@ def _post_twitter(b, kv):
         cid = None
     return {"ok": 200 <= st < 300, "platform": "Twitter / X", "via": "native",
             "message": ("posted id=" + str(cid)) if cid else json.dumps(data or st)}
+
+
+_IG_GRAPH = "https://graph.facebook.com/v21.0"
+
+
+def _post_instagram(b, kv):
+    """Instagram Graph API photo publish. Creates an image container from the
+    kit's share-card PNG URL (publicly reachable on the site), then publishes
+    it. Needs ``social.key.instagram`` (long-lived IG Business user token) and
+    ``social.key.instagram.ig_user_id`` (the Business account id)."""
+    token = kv("instagram", "access_token") or kv("instagram", "token")
+    uid = kv("instagram", "ig_user_id")
+    if not token:
+        return {"ok": False, "platform": "Instagram", "via": "skipped",
+                "message": "No Instagram Graph token configured."}
+    if not uid:
+        return {"ok": False, "platform": "Instagram", "via": "skipped",
+                "message": ("Instagram needs the Business account id "
+                            "(social.key.instagram.ig_user_id).")}
+    image = b["image_png"] or b["pin_image"] or b["image"]
+    if not image:
+        return {"ok": False, "platform": "Instagram", "via": "skipped",
+                "message": "Instagram needs an image URL in the kit."}
+    cap = (b["body"] or "")[:2200]
+    st, data = _post("%s/%s/media" % (_IG_GRAPH, uid),
+                     {"image_url": image, "caption": cap, "access_token": token},
+                     {})
+    cid = (data or {}).get("id") if isinstance(data, dict) else None
+    if not cid:
+        return {"ok": False, "platform": "Instagram", "via": "native",
+                "message": "Instagram container failed: %s"
+                           % json.dumps(data or st)[:300]}
+    pst, pdata = _post("%s/%s/media_publish" % (_IG_GRAPH, uid),
+                       {"creation_id": cid, "access_token": token}, {})
+    pid = (pdata or {}).get("id") if isinstance(pdata, dict) else None
+    return {"ok": 200 <= pst < 300, "platform": "Instagram", "via": "native",
+            "message": ("posted id=" + str(pid)) if pid
+            else json.dumps(pdata or pst)[:300]}
+
+
+def _post_youtube(b, kv):
+    """YouTube Data API v3 upload. Render the kit as a 9:16 Shorts frame,
+    encode a ~6s MP4 with ffmpeg (skipped when ffmpeg is absent, so the
+    Zapier/webhook path still fires), then multipart-upload as a *private*
+    video. Needs ``social.key.youtube`` (OAuth access token with
+    youtube.upload scope)."""
+    token = kv("youtube", "access_token") or kv("youtube", "token")
+    if not token:
+        return {"ok": False, "platform": "YouTube", "via": "skipped",
+                "message": "No YouTube Data API token configured."}
+    frame = _shorts_frame(b)
+    if not frame:
+        return {"ok": False, "platform": "YouTube", "via": "skipped",
+                "message": "Could not render the Shorts frame — webhook applies."}
+    mp4 = _shorts_mp4(frame)
+    if not mp4:
+        return {"ok": False, "platform": "YouTube", "via": "skipped",
+                "message": "ffmpeg unavailable — Shorts upload skipped, webhook applies."}
+    title = (b["name"] or _shorts_title(b) or "Best picks, ranked")[:100]
+    desc = (b["body"] or "")[:5000]
+    if b["link"] and b["link"] not in desc:
+        desc = (desc + "\n\n" + b["link"])[:5000]
+    tags = _youtube_tags(b)
+    snippet = {"title": title, "description": desc, "categoryId": "22",
+               "tags": tags, "selfDeclaredMadeForKids": False}
+    status = {"privacyStatus": "private"}
+    url = ("https://www.googleapis.com/upload/youtube/v3/videos"
+           "?uploadType=multipart&part=snippet,status")
+    st, data = _multipart(url, {"snippet": snippet, "status": status}, mp4,
+                          "video/mp4", {"Authorization": "Bearer " + token})
+    vid = (data or {}).get("id") if isinstance(data, dict) else None
+    return {"ok": 200 <= st < 300, "platform": "YouTube", "via": "native",
+            "message": ("uploaded videoId=" + str(vid)) if vid
+            else json.dumps(data or st)[:300]}
+
+
+def _shorts_title(b):
+    from shorts import _title_from
+    return _title_from(b["body"] or "")
+
+
+def _youtube_tags(b):
+    used, tags = set(), []
+    raw = "%s %s" % ((b["hashtags"] or ""), (b["keyword"] or ""))
+    chars = 0
+    for w in re.findall(r"#([\w]+)", raw):
+        w = w[:30]
+        if w.lower() in used:
+            continue
+        used.add(w.lower())
+        if chars + len(w) + 1 > 500:
+            break
+        tags.append(w)
+        chars += len(w) + 1
+        if len(tags) >= 24:
+            break
+    return tags
+
+
+def _shorts_frame(b):
+    try:
+        return shorts.frame_png(b.get("keyword") or "", b.get("body") or "",
+                                b.get("hashtags") or "")
+    except Exception:
+        return None
+
+
+def _shorts_mp4(frame_bytes, seconds=6, fps=25):
+    """Encode the single Shorts frame into a ~``seconds`` MP4 (Ken Burns zoom,
+    libx264, yuv420p, faststart) when ffmpeg is on PATH; None otherwise."""
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+    if not frame_bytes:
+        return None
+    if not shutil.which("ffmpeg"):
+        return None
+    tmpdir = None
+    try:
+        tmpdir = tempfile.mkdtemp(prefix="pstore_shorts_")
+        png = os.path.join(tmpdir, "frame.png")
+        out = os.path.join(tmpdir, "out.mp4")
+        with open(png, "wb") as f:
+            f.write(frame_bytes)
+        dur = max(3, min(int(seconds or 6), 15))
+        n = dur * fps
+        vf = ("scale=1080:1920:force_original_aspect_ratio=increase,"
+              "crop=1080:1920,"
+              "zoompan=z='min(zoom+0.0006,1.10)':d=%d:s=1080x1920:fps=%d" % (n, fps))
+        cmd = ["ffmpeg", "-y", "-loop", "1", "-t", str(dur), "-i", png,
+               "-vf", vf, "-c:v", "libx264", "-preset", "medium",
+               "-tune", "stillimage", "-pix_fmt", "yuv420p",
+               "-movflags", "+faststart", "-an", out]
+        r = subprocess.run(cmd, capture_output=True, timeout=240)
+        if r.returncode != 0:
+            return None
+        with open(out, "rb") as f:
+            return f.read()
+    except Exception:
+        return None
+    finally:
+        if tmpdir:
+            try:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+            except Exception:
+                pass
 
 
 _PINT_BOARD_CACHE = {}

@@ -23,6 +23,8 @@ class Base(unittest.TestCase):
         self._orig_post = publish._post
         self._orig_get = publish._get
         self._orig_img = publish.og_image
+        self._orig_multipart = publish._multipart
+        self._orig_shorts_mp4 = publish._shorts_mp4
         publish._PINT_BOARD_CACHE.clear()
         publish._PINT_BOARDS_CACHE.clear()
         publish.og_image = lambda url: "https://example.com/og.png"
@@ -33,6 +35,8 @@ class Base(unittest.TestCase):
         publish._post = self._orig_post
         publish._get = self._orig_get
         publish.og_image = self._orig_img
+        publish._multipart = self._orig_multipart
+        publish._shorts_mp4 = self._orig_shorts_mp4
 
     def _ok(self, payload=None, boards=None):
         boards = boards if boards is not None else [{"id": "board-1", "name": "Default"}]
@@ -305,3 +309,157 @@ class TestServerNativeWiring(unittest.TestCase):
         self.assertEqual(res[0]["via"], "native")
         self.assertEqual(hits[0][0], "https://api.twitter.com/2/tweets")
         self.assertTrue(publish._post is fake)
+
+class TestInstagramNative(Base):
+    def test_skipped_without_token(self):
+        res = publish.post_to("Instagram", self._kit("Instagram"),
+                              self._keys())
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["via"], "skipped")
+        self.assertIn("token", res["message"])
+
+    def test_skipped_without_business_id(self):
+        res = publish.post_to("Instagram", self._kit("Instagram"),
+                              self._keys({("instagram", "token"): "IG"}))
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["via"], "skipped")
+        self.assertIn("Business account id", res["message"])
+
+    def test_skipped_without_image(self):
+        kit = self._kit("Instagram")
+        kit["image_png"] = ""
+        kit["pin_image"] = ""
+        kit["image"] = ""
+        res = publish.post_to("Instagram", kit,
+                              self._keys({("instagram", "token"): "IG",
+                                          ("instagram", "ig_user_id"): "999"}))
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["via"], "skipped")
+        self.assertIn("image", res["message"])
+
+    def test_posts_via_graph_container_then_publish(self):
+        kit = self._kit("Instagram")
+        kit["image_png"] = "https://example.com/og.png"
+        calls = []
+        def fake(url, payload_, headers, timeout=15):
+            calls.append((url, payload_))
+            if url.endswith("/media"):
+                return 200, {"id": "container-1"}
+            return 200, {"id": "pub-99"}
+        publish._post = fake
+        res = publish.post_to("Instagram", kit,
+                              self._keys({("instagram", "token"): "IG",
+                                          ("instagram", "ig_user_id"): "999"}))
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["via"], "native")
+        self.assertIn("posted id=pub-99", res["message"])
+        self.assertEqual(len(calls), 2)
+        self.assertIn("graph.facebook.com/v21.0/999/media", calls[0][0])
+        self.assertIn("graph.facebook.com/v21.0/999/media_publish", calls[1][0])
+        self.assertEqual(calls[0][1]["image_url"], "https://example.com/og.png")
+        self.assertEqual(calls[1][1]["creation_id"], "container-1")
+        self.assertEqual(calls[0][1]["access_token"], "IG")
+
+    def test_container_failure_reports_error(self):
+        kit = self._kit("Instagram")
+        kit["image_png"] = "https://example.com/og.png"
+        def fake(url, payload_, headers, timeout=15):
+            return 400, {"error": {"message": "bad"}}
+        publish._post = fake
+        res = publish.post_to("Instagram", kit,
+                              self._keys({("instagram", "token"): "IG",
+                                          ("instagram", "ig_user_id"): "999"}))
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["via"], "native")
+        self.assertIn("Instagram container failed", res["message"])
+
+
+class TestYouTubeNative(Base):
+    def _mp4_keys(self):
+        return self._keys({("youtube", "token"): "YT"})
+
+    def test_skipped_without_token(self):
+        res = publish.post_to("YouTube", self._kit("YouTube"),
+                              self._keys())
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["via"], "skipped")
+        self.assertIn("token", res["message"])
+
+    def test_skipped_when_ffmpeg_unavailable(self):
+        publish._shorts_mp4 = lambda fb, seconds=6, fps=25: None
+        res = publish.post_to("YouTube", self._kit("YouTube"), self._mp4_keys())
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["via"], "skipped")
+        self.assertIn("ffmpeg", res["message"])
+
+    def test_uploads_multipart_short_when_render_and_mp4_ok(self):
+        seen = {}
+        publish._shorts_mp4 = lambda fb, seconds=6, fps=25: b"fake-mp4"
+        def fake_multi(url, json_section, file_bytes, file_type, headers):
+            seen.update({"url": url, "json": json_section, "file": file_bytes,
+                         "type": file_type, "headers": headers})
+            return 200, {"id": "vid-7"}
+        publish._multipart = fake_multi
+        kit = self._kit("YouTube",
+                        body="Taste-testing 3 keto snacks ranked by 4,200 reviews",
+                        keyword="keto snacks")
+        kit["hashtags"] = "#KetoSnacks #BestPicks"
+        kit["name"] = "Keto snacks for busy moms"
+        res = publish.post_to("YouTube", kit, self._mp4_keys())
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["via"], "native")
+        self.assertIn("uploaded videoId=vid-7", res["message"])
+        self.assertIn("upload/youtube/v3/videos", seen["url"])
+        self.assertIn("uploadType=multipart", seen["url"])
+        self.assertEqual(seen["file"], b"fake-mp4")
+        self.assertEqual(seen["type"], "video/mp4")
+        self.assertEqual(seen["headers"]["Authorization"], "Bearer YT")
+        sn = seen["json"]["snippet"]
+        self.assertEqual(sn["title"], "Keto snacks for busy moms")
+        self.assertIn("Taste-testing 3 keto snacks", sn["description"])
+        self.assertEqual(seen["json"]["status"]["privacyStatus"], "private")
+        self.assertIn("KetoSnacks", sn["tags"])
+
+    def test_failed_upload_reports_error(self):
+        publish._shorts_mp4 = lambda fb, seconds=6, fps=25: b"fake-mp4"
+        publish._multipart = lambda url, j, fb, ft, hdrs: (401, {"error": {}})
+        res = publish.post_to("YouTube", self._kit("YouTube"), self._mp4_keys())
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["via"], "native")
+
+    def test_youtube_tags_respect_caps(self):
+        tags = publish._youtube_tags(
+            {"body": "", "hashtags": "#A " * 400, "keyword": "keto"})
+        self.assertLessEqual(len(tags), 24)
+        self.assertLessEqual(sum(len(t) for t in tags) + len(tags), 500)
+
+
+class TestShortsFrame(Base):
+    def setUp(self):
+        super().setUp()
+        self._orig_glow = social._glow
+        self._orig_vignette = social._vignette
+        social._glow = lambda img, W, H, cx, cy, R, rgb, amp, step=2: None
+        social._vignette = lambda img, W, H, strength=0.13: None
+
+    def tearDown(self):
+        social._glow = self._orig_glow
+        social._vignette = self._orig_vignette
+        super().tearDown()
+    def test_frame_is_1080x1920_png(self):
+        import struct
+        png = publish._shorts_frame(
+            {"keyword": "keto snacks", "body": "Best keto snacks ranked",
+             "hashtags": "#Keto #BestPicks"})
+        self.assertTrue(png and png.startswith(b"\x89PNG\r\n\x1a\n"))
+        w, h = struct.unpack(">II", png[16:24])
+        self.assertEqual((w, h), (1080, 1920))
+
+    def test_frame_renders_long_body_without_error(self):
+        png = publish._shorts_frame(
+            {"keyword": "a", "body": "word " * 150, "hashtags": "#X"})
+        self.assertTrue(png)
+
+    def test_frame_handles_empty_kit(self):
+        self.assertTrue(publish._shorts_frame({"keyword": "", "body": "",
+                                               "hashtags": ""}))

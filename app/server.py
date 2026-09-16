@@ -5251,6 +5251,13 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             for f in ("board", "auto_board", "max_boards"):
                 if f in pint:
                     _set_setting("social.key.pinterest.%s" % f, pint.get(f) or "")
+            # Instagram/YouTube native posting needs the account ids in
+            # addition to the platform token (the token itself is one of the
+            # plain `social.key.<platform>` rows above).
+            for ns, f in (("instagram", "ig_user_id"), ("youtube", "channel_id")):
+                val = (s.get("keys") or {}).get(ns + "." + f)
+                if val:
+                    _set_setting("social.key.%s.%s" % (ns, f), val)
         # Optional AI provider keys (the /admin/apikeys 'AI writing' section):
         # persist to DB so they survive restart/redeploy and apply immediately
         # by reconfiguring the runtime module (env vars still win at read time).
@@ -10782,6 +10789,8 @@ fresh();
                ph)
             for f, lbl, ph in tw_meta)
         webhook_val = seo._clean(_get_setting("social.webhook"))
+        ig_uid = seo._clean(_get_setting("social.key.instagram.ig_user_id"))
+        yt_cid = seo._clean(_get_setting("social.key.youtube.channel_id"))
         pa_ready = "✅ ready" if pa["ready"] else "⚠️ incomplete — add the three PA-API values"
         _ai_active = ai.active_provider()
         if _ai_active:
@@ -10859,6 +10868,11 @@ fresh();
 {key_rows}
    <h3>Twitter / X (optional, 4 fields)</h3>
   <div class="row">{tw_rows}</div>
+  <div class="row">
+    <label>Instagram Business id <input type="text" name="key_instagram.ig_user_id" value="{ig_uid}" inputmode="numeric" pattern="[0-9]*" placeholder="long-lived IG Business account id (the number)" autocomplete="off" data-masked="1"></label>
+    <label>YouTube channel id <input type="text" name="key_youtube.channel_id" value="{yt_cid}" placeholder="UC… channel id (optional)" autocomplete="off" data-masked="1"></label>
+  </div>
+  <p class="hint">📸 <b>Instagram</b> posts natively as a photo (your share card) on the Business account whose <code>ig_user_id</code> is above — paste a long-lived Graph token in the <code>Instagram</code> row. ▶️ <b>YouTube</b> renders each kit into a 9:16 Short and uploads it <i>private</i> when an OAuth access token (scope <code>youtube.upload</code>) is in the <code>YouTube</code> row and ffmpeg is present; otherwise both fall back to the webhook.</p>
   <div class="row"><button class="btn">Save social keys</button><span id="socout" class="msg"></span></div>
 </form>
 </section>
