@@ -181,6 +181,43 @@ class TestSemSeoSite(unittest.TestCase):
         self.assertIn("Bing", html)
         self.assertIn("active subscribers", html)
 
+    def test_admin_golive_page(self):
+        st, _, ct, body = self._raw("GET", "/admin/golive", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        html = body.decode("utf-8", "replace")
+        self.assertIn("Go-live", html)
+        self.assertIn("Social router", html)
+        self.assertIn("Search-engine consoles", html)
+        self.assertIn("Custom domain", html)
+        self.assertIn("Amazon Associates", html)
+        self.assertIn("PSTORE_GSC_CLIENT_ID", html)
+        self.assertIn("PSTORE_BING_API_KEY", html)
+        self.assertIn("PSTORE_YANDEX_CLIENT_ID", html)
+        self.assertIn("SOCIAL_WEBHOOK", html)
+        self.assertIn("PSTORE_URL", html)
+        self.assertIn("PSTORE_TAG", html)
+        self.assertIn('href="/admin/seoengines"', html)
+        self.assertIn('href="/admin/social"', html)
+        self.assertIn("noindex,nofollow", html)
+        self.assertIn('class="totop"', html)
+
+    def test_admin_golive_requires_auth(self):
+        st, loc, _, _ = self._raw("GET", "/admin/golive", cookie=None)
+        self.assertIn(st, (301, 302, 303))
+        self.assertIn("/admin/login", loc or "")
+
+    def test_admin_golive_lists_repo_n8n_flows(self):
+        st, _, _, body = self._raw("GET", "/admin/golive", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        html = body.decode("utf-8", "replace")
+        for f in ("pstore-social-router.json", "pstore-fanout-social.json"):
+            self.assertIn(f, html)
+
+    def test_admin_golive_chip_in_operate_hub(self):
+        st, _, _, body = self._raw("GET", "/admin", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        self.assertIn("Go-live checklist", body.decode("utf-8", "replace"))
+
     def test_admin_sem_page(self):
         kw = self._pick_niche()
         st, _, ct, body = self._raw("GET", "/admin/sem?keyword=%s" %

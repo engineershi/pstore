@@ -40,6 +40,7 @@ import ebook as ebook_mod
 import editorial
 import earnings
 import indexnow
+import linkauthority
 import mailer
 import manual
 import market_engine
@@ -364,9 +365,10 @@ FUNCTION_PATHS = {
     "email": ("/admin/emails", "/api/mail", "/api/sequence/", "/api/subscribers"),
     "social": ("/admin/social", "/api/social"),
     "telegram": ("/admin/telegram", "/api/telegram/hook", "/api/telegram/state", "/api/telegram/config", "/api/telegram/broadcast", "/api/telegram/feed"),
-    "seo": ("/admin/seo", "/admin/seoengines", "/admin/rss", "/admin/sem",
-            "/seo/snippet/", "/api/sem", "/api/seo-audit", "/api/seo/topics",
-            "/api/seoengines", "/api/indexnow", "/api/topics/generate"),
+"seo": ("/admin/seo", "/admin/seoengines", "/admin/rss", "/admin/sem",
+            "/admin/linkauthority", "/seo/snippet/", "/api/sem", "/api/seo-audit",
+            "/api/seoengines", "/api/indexnow",
+            "/api/linkauthority", "/api/topics/generate"),
     "content": ("/admin/cms", "/admin/ebooks", "/admin/refresh",
                 "/api/cms", "/api/suggest", "/api/refresh", "/api/settings",
                 "/api/ai/"),
@@ -378,14 +380,15 @@ FUNCTION_PATHS = {
     "analytics": ("/admin/analytics", "/admin/backup", "/admin/manual",
                   "/api/analytics", "/api/pin-health"),
     "keys": ("/keys", "/keys/", "/admin/apikeys", "/api/keys"),
-    "system": ("/admin/system", "/api/system"),
+    "system": ("/admin/system", "/admin/golive", "/api/system"),
 }
 
 # Hub/nav chip key -> owning function (for filtering what a user sees).
 NAV_FN = {
     "dashboard": "dashboard", "tool": "dashboard", "opportunities": "dashboard",
     "priority": "dashboard", "sem": "seo", "seo": "seo", "seoengines": "seo",
-    "rss": "seo", "cms": "content", "ebooks": "content", "refresh": "content",
+    "rss": "seo", "linkauth": "seo", "golive": "system", "cms": "content", "ebooks": "content",
+    "refresh": "content",
     "funnel": "marketing", "marketing": "marketing", "emails": "email",
     "social": "social", "variants": "marketing", "segments": "marketing",
     "telegram": "telegram", "variants": "marketing", "segments": "marketing",
@@ -2795,6 +2798,8 @@ def _ensure_db_schema(conn):
         UNIQUE(slug, platform, variant)
     )""")
     cms_mod.ensure_tables(conn)
+    conn.execute(linkauthority.SCHEMA)
+    conn.execute(linkauthority.SCHEMA_INDEX)
     return conn
 
 
@@ -4364,6 +4369,7 @@ for (const id of ["me-name","me-pw","me-pw2"])
 [("/admin/seo", "🔍 SEO", "seo"),
                ("/admin/seoengines", "🔎 Engines", "seoengines"),
                ("/admin/rss", "📡 RSS", "rss"),
+               ("/admin/linkauthority", "🔗 Link authority", "linkauth"),
                ("/admin/cms", "🧩 Lead pages", "cms"),
               ("/admin/ebooks", "📕 Ebooks", "ebooks"),
               ("/admin/refresh", "📡 Refresh", "refresh")]),
@@ -4384,7 +4390,8 @@ for (const id of ["me-name","me-pw","me-pw2"])
               ("/admin/backup", "💾 Backup", "backup")]),
             ("Monitor",
              [("/admin/system", "🖥 System console", "system", True),
-              ("/admin/manual", "📖 Manual", "manual")]),
+              ("/admin/manual", "📖 Manual", "manual"),
+              ("/admin/golive", "✅ Go-live", "golive")]),
             ("Operate",
              [("/admin/users", "👥 Users & roles", "users"),
               ("/admin", "🗺 All pages", "admin", True),
@@ -4442,6 +4449,7 @@ for (const id of ["me-name","me-pw","me-pw2"])
         build_section = section("🛠 Build — content & pages", [
             ("/admin/seo", "🔍 SEO audit", "indexability + schema"),
             ("/admin/seoengines", "🔎 Search-engine consoles", "GSC · Bing · Yandex"),
+            ("/admin/linkauthority", "🔗 Link authority", "guest posts · HARO · PR"),
             ("/admin/cms", "🧩 Lead page CMS", "edit sections &amp; style"),
             ("/admin/ebooks", "📕 AI ebook generator", "PDF lead magnet"),
             ("/admin/refresh", "📡 Data refresh", "manual + auto re-mine")])
@@ -4466,6 +4474,7 @@ for (const id of ["me-name","me-pw","me-pw2"])
         operate_section = section("🧰 Operate — run the site", [
             ("/admin/system", "🖥 System console", "automation health + live APIs"),
             ("/admin/manual", "📖 User manual", "visual + PDF guide"),
+            ("/admin/golive", "✅ Go-live checklist", "env · webhook · consoles · tag"),
             ("/admin/users", "👥 Users &amp; roles", "team + permissions"),
             ("/admin/pending", "🔎 My access", "functions &amp; roles"),
             ("/admin/logout", "⎋ Log out", "session")])
@@ -4809,8 +4818,12 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._admin_seo()
             if path == "/admin/seoengines":
                 return self._admin_seoengines(q)
+            if path == "/admin/golive":
+                return self._admin_golive(q)
             if path == "/admin/rss":
                 return self._admin_rss(q)
+            if path == "/admin/linkauthority":
+                return self._admin_linkauthority(q)
             if path == "/admin/manual":
                 return self._admin_manual()
             if path == "/admin/manual.pdf":
@@ -5001,6 +5014,14 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._settings_test()
             if parsed.path == "/api/indexnow":
                 return self._indexnow_post()
+            if parsed.path == "/api/linkauthority/generate":
+                return self._linkauthority_generate()
+            if parsed.path == "/api/linkauthority/update":
+                return self._linkauthority_update()
+            if parsed.path == "/api/linkauthority/delete":
+                return self._linkauthority_delete()
+            if parsed.path == "/api/linkauthority/list":
+                return self._linkauthority_list()
             if parsed.path == "/api/seoengines":
                 return self._seoengines_post()
             if parsed.path == "/api/users":
@@ -5937,6 +5958,283 @@ document.addEventListener("click", function (e) {{
 </body></html>"""
         return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
 
+    def _linkauthority_keywords(self, body):
+        """Requested keywords, else the newest stocked niches (same set we
+        already publish pages for, so every target points at real content)."""
+        raw = body.get("keywords")
+        if isinstance(raw, str):
+            raw = re.split(r"[\n,]+", raw)
+        out = []
+        for k in (raw or []):
+            k = str(k or "").strip()
+            if k:
+                out.append(k)
+        if out:
+            return out
+        with _lock:
+            conn = _db()
+            rows = conn.execute(
+                "SELECT keyword, products FROM niches ORDER BY created_at DESC "
+                "LIMIT 60").fetchall()
+            conn.close()
+        keys = []
+        for r in rows:
+            prods = (r["products"] or "").strip()
+            if prods and prods not in ("[]", "{}"):
+                keys.append(r["keyword"])
+        return keys
+
+    def _linkauthority_generate(self):
+        body = self._body()
+        try:
+            limit = int(body.get("limit") or 60)
+        except (TypeError, ValueError):
+            limit = 60
+        limit = max(1, min(limit, 400))
+        keywords = self._linkauthority_keywords(body)
+        if not keywords:
+            return self._send(400, {"error": "no niches yet — mine some first"})
+        dlp = seo.BASE_URL.rstrip("/")
+        with _lock:
+            conn = _db()
+            try:
+                res = linkauthority.generate(conn, keywords,
+                                             limit=limit, dlp_url=dlp)
+            finally:
+                conn.close()
+        return self._send(200, {"ok": True, "keywords": len(keywords), **res})
+
+    def _linkauthority_update(self):
+        body = self._body()
+        try:
+            row_id = int(body.get("id") or 0)
+        except (TypeError, ValueError):
+            row_id = 0
+        if not row_id:
+            return self._send(400, {"error": "id required"})
+        status = body.get("status")
+        if status is not None and status not in linkauthority.STATUSES:
+            return self._send(400, {"error": "bad status"})
+        def _field(name):
+            return body[name] if name in body else None
+        with _lock:
+            conn = _db()
+            try:
+                row = linkauthority.update(
+                    conn, row_id, status=status,
+                    source_url=_field("source_url"),
+                    target_url=_field("target_url"),
+                    note=_field("note"))
+            finally:
+                conn.close()
+        if not row:
+            return self._send(404, {"error": "not found"})
+        return self._send(200, {"ok": True, "row": row})
+
+    def _linkauthority_delete(self):
+        body = self._body()
+        try:
+            row_id = int(body.get("id") or 0)
+        except (TypeError, ValueError):
+            row_id = 0
+        if not row_id:
+            return self._send(400, {"error": "id required"})
+        with _lock:
+            conn = _db()
+            try:
+                n = linkauthority.delete(conn, row_id)
+            finally:
+                conn.close()
+        return self._send(200, {"ok": True, "removed": n})
+
+    def _linkauthority_list(self):
+        body = self._body()
+        with _lock:
+            conn = _db()
+            try:
+                rows = linkauthority.list_rows(
+                    conn, status=body.get("status") or None,
+                    tactic=body.get("tactic") or None,
+                    keyword=body.get("keyword") or None)
+                st = linkauthority.stats(conn)
+            finally:
+                conn.close()
+        return self._send(200, {"ok": True, "stats": st, "rows": rows})
+
+    def _admin_linkauthority(self, q):
+        """Link-authority engine: generate + track the off-page outreach that
+        earns the backlinks on-page SEO can't buy."""
+        status = (q.get("status") or [""])[0].strip()
+        tactic = (q.get("tactic") or [""])[0].strip()
+        keyword = (q.get("keyword") or [""])[0].strip()
+        with _lock:
+            conn = _db()
+            try:
+                st = linkauthority.stats(conn)
+                rows = linkauthority.list_rows(
+                    conn, status=status or None, tactic=tactic or None,
+                    keyword=keyword or None, limit=200)
+            finally:
+                conn.close()
+
+        def _opt(value, label, cur):
+            sel = " selected" if value == cur else ""
+            return '<option value="%s"%s>%s</option>' % (
+                seo._clean(value), sel, seo._clean(label))
+
+        status_opts = _opt("", "All statuses", status) + "".join(
+            _opt(s, s.capitalize(), status) for s in linkauthority.STATUSES)
+        tactic_opts = _opt("", "All tactics", tactic) + "".join(
+            _opt(t, linkauthority.TACTICS[t]["label"], tactic)
+            for t in linkauthority.TACTICS)
+
+        row_html = []
+        for r in rows:
+            t = linkauthority.TACTICS.get(r["tactic"], {})
+            # primary query's three engines
+            q0 = linkauthority.suggest_queries(r["tactic"], r["keyword"])[0]
+            urls = linkauthority.search_urls(q0)
+            search_links = " · ".join(
+                '<a target="_blank" rel="noopener" href="%s">%s</a>'
+                % (seo._clean(urls[eng]), eng)
+                for eng in ("google", "bing", "duckduckgo"))
+            row_status = "".join(_opt(s, s.capitalize(), r["status"])
+                                 for s in linkauthority.STATUSES)
+            row_html.append(
+                '<tr data-id="%d">'
+                '<td>%s <b>%s</b><div class="hint">%s</div></td>'
+                '<td><select class="la-status" data-id="%d">%s</select></td>'
+                '<td><input class="la-src" data-id="%d" value="%s" placeholder="page you found it on"></td>'
+                '<td><input class="la-tgt" data-id="%d" value="%s" placeholder="page carrying the link"></td>'
+                '<td><input class="la-note" data-id="%d" value="%s" placeholder="note"></td>'
+                '<td style="white-space:nowrap">%s<br><button class="btnline la-copy" data-pitch="%s">Copy pitch</button></td>'
+                '<td><button class="btnline la-del" data-id="%d">✕</button></td>'
+                '</tr>' % (
+                    r["id"], t.get("icon", "•"), seo._clean(r["keyword"]),
+                    seo._clean(r["angle"] or ""),
+                    r["id"], row_status,
+                    r["id"], seo._clean(r["source_url"] or ""),
+                    r["id"], seo._clean(r["target_url"] or ""),
+                    r["id"], seo._clean(r["note"] or ""),
+                    search_links, seo._clean(r["pitch"] or ""), r["id"]))
+        rows_html = "".join(row_html) or (
+            "<tr><td colspan='7' class='hint'>No targets yet — click "
+            "<b>Generate targets</b> to build the list from your newest niches.</td></tr>")
+
+        tactic_cards = "".join(
+            '<div class="feature"><h3>%s %s</h3><p class="hint">%s</p>'
+            '<p class="hint" style="opacity:.8">%s</p></div>'
+            % (t["icon"], seo._clean(t["label"]), seo._clean(t["goal"]),
+               seo._clean(t["platforms"]))
+            for t in linkauthority.TACTICS.values())
+
+        body = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Link authority — pstore</title><link rel="stylesheet" href="/style.css">
+<meta name="robots" content="noindex,nofollow">
+</head><body>
+<header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
+<div class="hero"><h1>Link <span>authority.</span></h1>
+<p class="tagline">The off-page votes: guest posts, HARO quotes, broken-link fixes, PR and resource listings — the backlinks on-page SEO can't buy.</p></div>
+{self._admin_nav('linkauth')}
+</header>
+<main>
+<section class="card"><h2>📊 Outreach pipeline</h2>
+<div class="row" style="align-items:stretch">
+  <div class="feature"><h3>{st['total']}</h3><p class="hint">targets tracked</p></div>
+  <div class="feature"><h3>{st['discovered']}</h3><p class="hint">to research</p></div>
+  <div class="feature"><h3>{st['pitched']}</h3><p class="hint">pitched</p></div>
+  <div class="feature"><h3>{st['published']}</h3><p class="hint">published</p></div>
+  <div class="feature"><h3>{st['live']}</h3><p class="hint">live backlinks ✓</p></div>
+  <div class="feature"><h3>{st['dead']}</h3><p class="hint">dead / dropped</p></div>
+</div>
+<div class="row" style="margin-top:12px">
+  <button class="btn" id="la-gen">🔗 Generate targets</button>
+  <label class="hint">limit <input id="la-limit" type="number" min="1" max="400" value="60" style="width:80px"></label>
+  <span class="hint" id="la-msg"></span>
+</div>
+<p class="hint">Generation is deterministic and de-duplicates: one target per niche × tactic. It picks your newest stocked niches; paste keywords below to target specific ones.</p>
+<input id="la-kw" placeholder="optional: comma-separated keywords" style="width:100%">
+</section>
+<section class="card"><h2>🎯 The five tactics</h2><div class="page-grid">{tactic_cards}</div></section>
+<section class="card"><h2>🗂 Targets</h2>
+<form class="row" method="get" action="/admin/linkauthority">
+  <select name="status">{status_opts}</select>
+  <select name="tactic">{tactic_opts}</select>
+  <input name="keyword" value="{seo._clean(keyword)}" placeholder="filter keyword">
+  <button class="btnline" type="submit">Filter</button>
+  <a class="btnline" href="/admin/linkauthority">Reset</a>
+</form>
+<div class="table-wrap"><table class="plain"><thead><tr>
+<th>Niche / angle</th><th>Status</th><th>Found at</th><th>Link on page</th><th>Note</th><th>Search · pitch</th><th></th>
+</tr></thead><tbody>
+{rows_html}
+</tbody></table></div>
+<p class="hint">Mark a target <b>live</b> once the backlink is published — that is the only status that adds authority. Use <b>found at</b> for the page you're contacting and <b>link on page</b> for where your URL will appear.</p>
+</section>
+</main>
+<footer><p>Tip: run the <b>news-jack</b> targets first — PR windows close within days; guest posts and resource listings are evergreen.</p></footer>
+{_TOTOP}
+<script>
+function laMsg(t, ok) {{
+  var el = document.getElementById("la-msg");
+  if (el) {{ el.textContent = t; el.style.color = ok ? "#2f855a" : "#c53030"; }}
+}}
+function laPost(url, data) {{
+  return fetch(url, {{method: "POST", headers: {{"Content-Type": "application/json"}},
+    body: JSON.stringify(data)}}).then(function (r) {{ return r.json(); }});
+}}
+var gen = document.getElementById("la-gen");
+if (gen) gen.addEventListener("click", function () {{
+  laMsg("Generating…", true);
+  var kw = document.getElementById("la-kw").value;
+  laPost("/api/linkauthority/generate", {{limit: document.getElementById("la-limit").value, keywords: kw}})
+    .then(function (d) {{
+      if (!d.ok) {{ laMsg(d.error || "failed", false); return; }}
+      laMsg("+" + d.added + " targets (" + d.total + " total) — reloading…", true);
+      setTimeout(function () {{ location.reload(); }}, 400);
+    }}).catch(function (e) {{ laMsg("failed: " + e, false); }});
+}});
+document.addEventListener("change", function (e) {{
+  var el = e.target;
+  if (el.classList && el.classList.contains("la-status"))
+    laPost("/api/linkauthority/update", {{id: el.getAttribute("data-id"), status: el.value}});
+}});
+document.addEventListener("blur", function (e) {{
+  var el = e.target;
+  if (!el.classList) return;
+  var map = {{"la-src": "source_url", "la-tgt": "target_url", "la-note": "note"}};
+  for (var cls in map) {{
+    if (el.classList.contains(cls) && el.getAttribute("data-dirty") === "1") {{
+      el.setAttribute("data-dirty", "0");
+      laPost("/api/linkauthority/update", {{id: el.getAttribute("data-id"), [map[cls]]: el.value}});
+    }}
+  }}
+}}, true);
+document.addEventListener("input", function (e) {{
+  if (e.target.classList && /^la-(src|tgt|note)$/.test(e.target.className))
+    e.target.setAttribute("data-dirty", "1");
+}});
+document.addEventListener("click", function (e) {{
+  var b = e.target.closest ? e.target.closest(".la-copy, .la-del") : null;
+  if (!b) return;
+  if (b.classList.contains("la-del")) {{
+    if (!confirm("Remove this target?")) return;
+    laPost("/api/linkauthority/delete", {{id: b.getAttribute("data-id")}})
+      .then(function () {{ location.reload(); }});
+  }} else {{
+    var ta = document.createElement("textarea");
+    ta.value = b.getAttribute("data-pitch") || "";
+    document.body.appendChild(ta); ta.select();
+    try {{ document.execCommand("copy"); b.textContent = "Copied ✓"; }}
+    catch (err) {{ b.textContent = "Select + copy"; }}
+    document.body.removeChild(ta);
+  }}
+}});
+</script>
+</body></html>"""
+        return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
+
     def _landing(self):
         return seo.render_landing(self._all_niches())
 
@@ -6765,6 +7063,157 @@ document.addEventListener("click", function (e) {{
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         return None
+
+    def _admin_golive(self, q):
+        """Owner go-live checklist — the four knobs that turn the default demo
+        box into a real traffic engine. Read-only; every item links to the page
+        that actually changes it:
+          1. SOCIAL_WEBHOOK → a real n8n host importing ops/n8n/*.json flows.
+          2. GSC / Bing / Yandex console tokens → engine_traffic real impressions.
+          3. Custom domain + PSTORE_URL → canonical origin + OAuth redirect base.
+          4. Approved Amazon Associates tag → paid affiliate crediting.
+        """
+        nav = self._admin_nav('golive')
+        clean = seo._clean
+
+        # ---- 1 · social router webhook ----
+        webhook_env = os.environ.get("SOCIAL_WEBHOOK", "").strip()
+        webhook_db = _get_setting("social.webhook") or ""
+        webhook = webhook_env or webhook_db
+        webhook_ok = bool(webhook.startswith("http"))
+        wh_state = ('<span class="yes">configured</span>' if webhook_ok else
+                    '<span class="no">not set</span>  <i>(webhook posts fall back '
+                    'to nothing — native platform keys only)</i>')
+        flows = self._n8n_flows()
+        flow_list = ("".join('<li><code>%s</code></li>' % clean(f)
+                             for f in flows)
+                     or '<li class="hint">no ops/n8n flows found in this build</li>')
+        webhook_target = ""
+        if webhook_ok:
+            hi = webhook[:48] + ("…" if len(webhook) > 48 else "")
+            webhook_target = ('<p class="hint" style="margin-top:8px">Currently '
+                              '<b>%s</b>%s — every published kit already fires a '
+                              'POST to it with the exact payload the router flow '
+                              'expects.</p>'
+                              % (clean(hi),
+                                 " (env override)" if webhook_env else " (stored setting)"))
+        # ---- 2 · search-engine consoles ----
+        gsc_creds = bool(webmasters.GSC_CLIENT_ID and webmasters.GSC_CLIENT_SECRET)
+        gsc_tok = bool(_get_setting(webmasters.TOKEN_SETTINGS["gsc"]))
+        bing_key = bool(webmasters.BING_API_KEY or
+                        _get_setting("seoeng.bing.apikey") or
+                        _get_setting("seoeng.bing.token"))
+        ya_creds = bool(webmasters.YANDEX_CLIENT_ID and webmasters.YANDEX_CLIENT_SECRET)
+        ya_tok = bool(_get_setting(webmasters.TOKEN_SETTINGS["yandex"]))
+        tok_rows = (
+            '<tr><td>Google Search Console</td>'
+            '<td class="%s">%s</td></tr>'
+            '<tr><td>Bing Webmaster</td><td class="%s">%s</td></tr>'
+            '<tr><td>Yandex Webmaster</td><td class="%s">%s</td></tr>'
+            % ("yes" if gsc_creds and gsc_tok else "no",
+               ("connected — real impressions ✅" if gsc_creds and gsc_tok
+                else (("OAuth client set, connect it" if gsc_creds
+                       else "missing PSTORE_GSC_CLIENT_ID / _SECRET") + 
+                      ("" if gsc_tok else " · not connected"))),
+               "yes" if bing_key else "no",
+               ("key set — real impressions ✅" if bing_key
+                else "missing PSTORE_BING_API_KEY (or save it on Engines)"),
+               "yes" if ya_creds and ya_tok else "no",
+               ("connected — real impressions ✅" if ya_creds and ya_tok
+                else (("OAuth client set, connect it" if ya_creds
+                       else "missing PSTORE_YANDEX_CLIENT_ID / _SECRET") +
+                      ("" if ya_tok else " · not connected")))))
+        # ---- 3 · custom domain + PSTORE_URL ----
+        pstore_url = os.environ.get("PSTORE_URL", "").strip().rstrip("/")
+        base = seo.BASE_URL.rstrip("/")
+        default_base = "https://pstore-gxbv.onrender.com"
+        domain_ok = bool(pstore_url) and "onrender.com" not in pstore_url
+        domain_state = ('<span class="yes">custom domain live</span>' if domain_ok else
+                        ('<span class="no">using the demo box</span>'
+                         if not pstore_url else
+                         '<span class="no">still on onrender.com</span>'))
+        # ---- 4 · amazon tag ----
+        tag = amazon.AFFILIATE_TAG or ""
+        paid_tag = _get_setting("paid.tag", os.environ.get("PSTORE_PAID_TAG", ""))
+        tag_ok = bool(tag or paid_tag)
+        tag_state = ('<span class="yes">tag set</span>' if tag_ok else
+                     '<span class="no">no affiliate tag</span>  — links carry no '
+                     'commission crediting')
+        done = sum([webhook_ok, (gsc_creds and gsc_tok) or bing_key or (ya_creds and ya_tok),
+                    domain_ok, tag_ok])
+        total = 4
+        trail = "".join(
+            '<span class="dot %s">%d</span>' % ("on" if c else "off", i)
+            for i, c in enumerate([webhook_ok, (gsc_creds and gsc_tok), domain_ok, tag_ok], start=1))
+        body = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Go-live checklist — pstore</title><link rel="stylesheet" href="/style.css">
+<meta name="robots" content="noindex,nofollow">
+<style>
+.gl-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;min-width:0}}
+.gl-grid>.card{{min-width:0;margin:0}}
+.gl-grid h3{{margin:2px 0 6px}}
+.gl-grid table{{width:100%;border-collapse:collapse;margin-top:6px}}
+.gl-grid td{{padding:7px 4px;border-bottom:1px solid var(--line,#eee);vertical-align:top;font-size:13.5px}}
+.gl-grid td:first-child{{white-space:nowrap;color:var(--muted,#677);padding-right:10px}}
+span.yes{{color:#2e8b57;font-weight:600}} span.no{{color:#c00;font-weight:600}}
+.trail{{display:flex;gap:8px;align-items:center;margin:6px 0 2px}}
+.trail .dot{{width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+font-weight:700;color:#fff}}
+.trail .dot.on{{background:#2e8b57}} .trail .dot.off{{background:#b8bcc8}}
+</style>
+</head><body>
+<header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
+<div class="hero"><h1>Launch checklist, <span>traffic-ready.</span></h1>
+<p class="tagline">Four knobs separate the demo box from a live traffic engine. Green = done. Each card links to the page that flips it.</p></div>
+{nav}
+</header>
+<main>
+<div class="trail">{trail}
+<span class="hint" style="margin-left:8px"><b>{done}/{total} done</b> — {done}/{total} items ready</span></div>
+
+<section class="card"><h2>1 · 🔀 Social router — n8n webhook</h2>
+<p>{wh_state}</p>
+{webhook_target}
+<p class="hint" style="margin-top:8px">When a kit publishes, this box also POSTs the default payload to <code>SOCIAL_WEBHOOK</code>. Point it at a real <b>n8n</b> host and import the router flow this repo ships so every cast fans out to the platforms with no native backend here (Instagram reels via Webhooks, Threads, Telegram, Reddit…).</p>
+<ul style="margin:8px 0 4px 16px">{flow_list}</ul>
+<p class="hint">Set <code>SOCIAL_WEBHOOK=https://&lt;your-n8n&gt;/webhook/pstore-social</code> as an env var (or save it under Social). Import one of those <i>.json</i> files, publish a test kit from <a href="/admin/social">Social publishing</a>, then watch the flow fire.</p>
+<a class="btnline" href="/admin/social">Open Social publishing</a></section>
+
+<section class="card"><h2>2 · 🔎 Search-engine consoles — real impressions</h2>
+<p>Fetching console stats on the <a href="/admin/seoengines">Engines</a> page turns the <i>engine_traffic</i> rows from referral-attributed estimates into Google/Bing/Yandex click + impression truth.</p>
+<table><tbody>{tok_rows}</tbody></table>
+<p class="hint" style="margin-top:8px">GSC and Yandex need an OAuth app (set the <code>PSTORE_GSC_CLIENT_ID/_SECRET</code> and <code>PSTORE_YANDEX_CLIENT_ID/_SECRET</code> envs, then <b>Connect</b>). Bing is a key: <code>PSTORE_BING_API_KEY</code> or paste it on the Engines page. Register your site, submit the sitemap — done.</p>
+<a class="btnline" href="/admin/seoengines">Open Search engines</a></section>
+
+<section class="card"><h2>3 · 🌐 Custom domain + PSTORE_URL</h2>
+<p>{domain_state} — canonical base is <b>{clean(base)}</b>{', from PSTORE_URL' if pstore_url else ''}.</p>
+<p class="hint" style="margin-top:8px">Add your domain in the host dashboard (set the CNAME / A record), then set <code>PSTORE_URL=https://your.domain</code> and restart. It fixes every canonical, sitemap <a href="/sitemap.xml">sitemap.xml</a>, hreflang and OAuth redirect at once — and it is required for Google/Facebook sign-in to work.</p>
+<p class="hint">Verification token for this origin: <code>{clean(webmasters.host_of())}</code>.</p></section>
+
+<section class="card"><h2>4 · 💰 Amazon Associates tag</h2>
+<p>{tag_state}</p>
+<ul style="margin:8px 0 4px 16px">
+<li>Base tag: <b>{clean(tag) or '(none)'}</b> {clean('— set via PSTORE_TAG env') if tag else '— set <code>PSTORE_TAG</code> on the host'}</li>
+<li>Paid-tier tag: <b>{clean(paid_tag) or '(none)'}</b> {clean('— super-credits paid campaigns') if paid_tag else '— manage on the funnel/paid tracker'}</li>
+</ul>
+<p class="hint" style="margin-top:8px">Every direct link carries <code>?tag=&lt;tag&gt;</code>. Approving that tag inside your Amazon Associates dashboard (and meeting the program's 180-day / sales bar) is the only step that happens off this box.</p>
+<a class="btnline" href="/keys">Manage affiliate tag</a></section>
+</main>
+<footer><p>Go-live checklist — never indexed. <a href="/admin/logout">Log out</a> when done.</p></footer>
+{_TOTOP}
+</body></html>"""
+        return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
+
+    def _n8n_flows(self):
+        """Flow files shipped under ops/n8n in this build (best-effort)."""
+        import glob
+        try:
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            return sorted(os.path.basename(p)
+                          for p in glob.glob(os.path.join(root, "ops", "n8n", "*.json")))
+        except Exception:
+            return []
 
     def _admin_seoengines(self, q):
         """Search-engine consoles hub: connect each engine's console, submit the

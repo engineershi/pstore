@@ -24,10 +24,11 @@ Supported native backends today (each posts ``{body, link}``):
   * LinkedIn        — UGC post with an organization access token
   * Instagram       — Graph API photo publish (image_url + caption) with a
                       Business account token + ``social.key.instagram.ig_user_id``
-  * YouTube         — renders the kit as a 9:16 Shorts frame (shortslib),
-                      encodes a ~6s MP4 with ffmpeg when present, and uploads
-                      via Data API v3 ``videos.insert`` (multipart) with an
-                      OAuth access token (``social.key.youtube``)
+  * YouTube         — renders the kit as a 9:16 Shorts MP4 with ffmpeg when
+                      present (4 spliced scenes: hook → picks → proof → CTA)
+                      and uploads via Data API v3 ``videos.insert`` (multipart)
+                      with an OAuth access token (``social.key.youtube``);
+                      without ffmpeg it falls back to the single-frame ~6s short
 Threads falls back to the webhook (its API needs the same image-video media
 endpoints used for the visual caption; kept behind the webhook for now).
 """
@@ -45,6 +46,11 @@ import shorts
 import social
 
 _NET_LOCK = threading.Lock()
+
+# Multi-scene Shorts splicing is on by default (PSTORE_SHORTS_MULTI=0 turns it
+# off for the single-frame path). Keeps tests hermetic regardless of whether an
+# ffmpeg binary is present on the host.
+_SHORTS_MULTI = os.environ.get("PSTORE_SHORTS_MULTI", "1") not in ("0", "", "false")
 
 
 def _post(url, payload, headers, timeout=15):
@@ -284,11 +290,15 @@ def _post_youtube(b, kv):
     if not token:
         return {"ok": False, "platform": "YouTube", "via": "skipped",
                 "message": "No YouTube Data API token configured."}
-    frame = _shorts_frame(b)
-    if not frame:
-        return {"ok": False, "platform": "YouTube", "via": "skipped",
-                "message": "Could not render the Shorts frame — webhook applies."}
-    mp4 = _shorts_mp4(frame)
+    mp4 = None
+    if _SHORTS_MULTI:
+        mp4 = _shorts_video(b, seconds=6, fps=25)
+    if not mp4:
+        frame = _shorts_frame(b)
+        if not frame:
+            return {"ok": False, "platform": "YouTube", "via": "skipped",
+                    "message": "Could not render the Shorts frame — webhook applies."}
+        mp4 = _shorts_mp4(frame)
     if not mp4:
         return {"ok": False, "platform": "YouTube", "via": "skipped",
                 "message": "ffmpeg unavailable — Shorts upload skipped, webhook applies."}
@@ -369,6 +379,83 @@ def _shorts_mp4(frame_bytes, seconds=6, fps=25):
                "-tune", "stillimage", "-pix_fmt", "yuv420p",
                "-movflags", "+faststart", "-an", out]
         r = subprocess.run(cmd, capture_output=True, timeout=240)
+        if r.returncode != 0:
+            return None
+        with open(out, "rb") as f:
+            return f.read()
+    except Exception:
+        return None
+    finally:
+        if tmpdir:
+            try:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+            except Exception:
+                pass
+
+
+def _shorts_video(b, seconds=6, fps=25):
+    """Multi-scene Shorts: render the four scenes (hook → picks → proof → CTA)
+    and splice them into ONE ~``seconds`` MP4 with xfade transitions (libx264,
+    yuv420p, faststart). None when ffmpeg is absent, rendering fails, or there
+    are fewer than two scenes — the caller then falls back to the single-frame
+    path. No network, stdlib-only."""
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+    if not b:
+        return None
+    if not shutil.which("ffmpeg"):
+        return None
+    scenes = shorts.render_scenes(b.get("keyword") or "", b.get("body") or "",
+                                  b.get("hashtags") or "",
+                                  link=b.get("link") or "")
+    if len(scenes) < 2:
+        return None
+    n = len(scenes)
+    transition = 0.4
+    secs = max(2.0, float(seconds or 6))
+    per = (secs - (n - 1) * transition) / n
+    if per < transition + 0.4:
+        per = transition + 0.4
+    plan = shorts.concat_plan(n, seconds=per, transition=transition, fps=fps)
+    tmpdir = None
+    try:
+        tmpdir = tempfile.mkdtemp(prefix="pstore_scenes_")
+        clips = []
+        for i, png in enumerate(scenes):
+            p = os.path.join(tmpdir, "s%d.png" % i)
+            c = os.path.join(tmpdir, "c%d.mp4" % i)
+            with open(p, "wb") as f:
+                f.write(png)
+            zoom = ("min(zoom+0.0015,1.12)" if i % 2 == 0
+                    else "max(zoom-0.0015,1.0)")
+            frames = max(2, int(round(plan["seconds"] * plan["fps"])))
+            vf = ("scale=1080:1920:force_original_aspect_ratio=increase,"
+                  "crop=1080:1920,"
+                  "zoompan=z='%s':d=%d:s=1080x1920:fps=%d"
+                  % (zoom, frames, plan["fps"]))
+            cmd = ["ffmpeg", "-y", "-loop", "1", "-t", str(plan["seconds"]),
+                   "-i", p, "-vf", vf, "-r", str(plan["fps"]),
+                   "-c:v", "libx264", "-preset", "medium", "-pix_fmt",
+                   "yuv420p", "-an", c]
+            r = subprocess.run(cmd, capture_output=True, timeout=120)
+            if r.returncode != 0:
+                return None
+            clips.append(c)
+        out = os.path.join(tmpdir, "out.mp4")
+        if len(clips) == 1:
+            cmd = ["ffmpeg", "-y", "-i", clips[0], "-c:v", "copy",
+                   "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an", out]
+        else:
+            cmd = ["ffmpeg", "-y"]
+            for c in clips:
+                cmd += ["-i", c]
+            cmd += ["-filter_complex", plan["filter"], "-map",
+                    "[%s]" % plan["last"], "-c:v", "libx264", "-pix_fmt",
+                    "yuv420p", "-r", str(plan["fps"]), "-movflags",
+                    "+faststart", "-an", out]
+        r = subprocess.run(cmd, capture_output=True, timeout=180)
         if r.returncode != 0:
             return None
         with open(out, "rb") as f:

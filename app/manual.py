@@ -106,6 +106,14 @@ def _chapters():
             "page to IndexNow for near-instant Bing and Google discovery. Confirm the "
             "key is live on the Keys page (/keys).")
         doc.paragraph(
+            "Off-page authority is the other half: links from other sites. The Link "
+            "Authority page (/admin/linkauthority) generates and tracks outreach for "
+            "five tactics - guest posts, HARO/expert quotes, broken-link fixes, "
+            "news-jacking and resource-listings - one target per niche with a "
+            "prewritten pitch and one-click search links. Advance each to 'live' as "
+            "the backlink publishes; rising domain authority lifts every existing "
+            "niche page in the rankings.")
+        doc.paragraph(
             "To reach Google, Bing and Yandex at full speed, open the Search "
             "Engines hub (/admin/seoengines): connect Google Search Console and "
             "Yandex via OAuth, paste your Bing API key, then Fetch stats pulls real "
@@ -306,9 +314,10 @@ def _chapters():
             "app + access keys), Facebook (page token), LinkedIn (user token), "
             "Instagram (a long-lived Business Graph token plus the Business account "
             "id — posts your share card as a native photo) and YouTube (an OAuth "
-            "access token with the youtube.upload scope — each kit is rendered into a "
-            "9:16 Shorts frame and uploaded as a private video, which you publish "
-            "with one click; needs ffmpeg on the box) — " 
+            "access token with the youtube.upload scope — each kit is rendered into "
+            "a 4-scene 9:16 Short (hook → picks → proof → call-to-action, spliced "
+            "with xfade transitions) and uploaded as a private video, which you "
+            "publish with one click; needs ffmpeg on the box) — " 
             "no n8n, Zapier or paid glue. Platforms without keys (and YouTube without "
             "ffmpeg) fall back to "
             "pstore's own webhook outlet at POST /api/social/webhook: it accepts any "
@@ -392,7 +401,9 @@ def _chapters():
             ("Social /admin/social", "tracked kits, 6 platforms"),
             ("SEM /admin/sem", "long-tails + briefs"),
             ("SEO audit /admin/seo", "indexability strip"),
+            ("Link authority /admin/linkauthority", "guest posts, HARO, PR"),
             ("Search engines /admin/seoengines", "GSC, Yandex, Bing"),
+            ("Go-live checklist /admin/golive", "env · webhook · consoles · tag"),
             ("A/B headlines /admin/variants", "auto-enrolled tests"),
             ("Refresh /admin/refresh", "auto + manual re-mine"),
             ("System console /admin/system", "automation health + live APIs"),
@@ -566,6 +577,14 @@ def _chapters():
         ])
         doc.pullquote("If a card stays STALE, the worker has stopped beating; "
                       "fix the root cause and the system recovers itself.")
+        doc.paragraph(
+            "Before launch, run the Go-live checklist (/admin/golive): it shows "
+            "whether the SOCIAL_WEBHOOK points at a real n8n host (import the "
+            "ops/n8n router flows this repo ships), whether GSC/Bing/Yandex "
+            "console tokens are connected so engine traffic shows real "
+            "impressions, whether a custom domain sets PSTORE_URL, and whether "
+            "the Amazon tag is set and approved. Four checks, one page - green "
+            "means the box is no longer a demo.")
         doc.page_break()
 
     return [
@@ -642,6 +661,8 @@ def render_admin_manual(nav_html, totop_html):
         a("/admin/social", "📣 Social", "tracked posts"),
         a("/admin/sem", "🎯 SEM", "keywords + funnel"),
         a("/admin/seo", "🔍 SEO audit", "indexability"),
+        a("/admin/linkauthority", "🔗 Link authority", "off-page votes"),
+        a("/admin/golive", "✅ Go-live", "launch checklist"),
         a("/admin/opportunities", "🪴 Grow", "daily content engine"),
         a("/admin/refresh", "📡 Refresh", "auto + manual"),
         a("/admin/system", "🖥 System console", "health + live APIs"),
@@ -753,6 +774,8 @@ def render_admin_manual(nav_html, totop_html):
   <a href="#look">17 · Look &amp; feel</a>
   <a href="#founder">18 · About the founder</a>
   <a href="#console">19 · System console</a>
+  <a href="#linkauth">20 · Link authority</a>
+  <a href="#golive">21 · Go-live checklist</a>
 </nav>
 
 <h3 id="what">1 · What pstore is</h3>
@@ -929,6 +952,9 @@ def render_admin_manual(nav_html, totop_html):
 <li>Every feature exists because it earns its keep in the money loop: opt-in-only email, honest attribution, disclosed affiliate links, and fresh pricing. Run the loop well and the software quietly prints the smallest, tidiest commissions a machine can make.</li>
 </ul>
 
+</ul>
+</section>
+
 <h3 id="console">19 · System console — every automation, every live API</h3>
 <p>The <a class="tooltag" href="/admin/system">🖥 System console</a> is the machine's cockpit: every background worker's heartbeat, its schedule and its queue counts, drawn from the live process — no log parsing.</p>
 <ul class="step-list">
@@ -938,6 +964,27 @@ def render_admin_manual(nav_html, totop_html):
 <li><b>Social webhook health</b> — the config panel shows whether your <code>SOCIAL_WEBHOOK</code> endpoint is genuinely working or silently dead. If the last POST failed (a free trial that ended, a vanished URL), the console raises an issue and <a class="tooltag" href="/admin/social">📣 Social</a> says <i>Configured but NOT responding</i> instead of pretending everything is live.</li>
 </ul>
 </section>
+
+<h3 id="linkauth">20 · Link authority — the off-page backlinks SEO can't buy</h3>
+<p>The <a class="tooltag" href="/admin/linkauthority">🔗 Link authority</a> page builds and tracks the external "votes of confidence" Google and Bing trust: backlinks from other sites. On-page SEO (schema, titles, internal linking) wins relevance; <b>external links win authority</b> — and this is the missing pillar. Press <b>Generate targets</b> and pstore creates one outreach target per niche × tactic from your newest stocked niches (paste comma-separated keywords to target specific ones). Generation is deterministic and de-duplicated, so you can re-run it safely.</p>
+<ul class="step-list">
+<li><b>Guest post</b> — get an authored post on a niche blog that accepts contributions ("write for us" sites). Search links are one click, and a ready pitch is on every row (<b>Copy pitch</b>).</li>
+<li><b>HARO / expert source</b> — answer journalist source requests (HARO, Featured, JournoRequests, SourceBottle). One good quote = a link from a major news site.</li>
+<li><b>Broken-link building</b> — find a dead outbound link on an authority "best &lt;niche&gt; resources" roundup and offer your live page as the replacement.</li>
+<li><b>News-jack / PR</b> — a timely angle (the same seasonal engine as the <a class="tooltag" href="/admin/pricedrop">🏷 Price drops</a> / Hot-Sale Finder) that reporters quote on deadline. Run these first — PR windows close in days.</li>
+<li><b>Resource list</b> — get listed on a curated "&lt;niche&gt; resources" page for a permanent, high-context link.</li>
+<li><b>Track it through</b> — set <b>found at</b> (the page you're contacting) and <b>link on page</b> (where your URL will appear), advance the status <i>discovered → researched → pitched → published → live</i>, and log a note. Only <b>live</b> counts toward authority; the pipeline tiles show the funnel at a glance.</li>
+</ul>
+<p class="hint">Every target is a search strategy + a prewritten pitch, so you run the day's list without any paid SEO tool. The links pointing back at pstore raise the authority of your whole domain — every existing niche page ranks higher as a result.</p>
+
+<h3 id="golive">21 · Go-live checklist — turn the demo box into a traffic engine</h3>
+<p>The <a class="tooltag" href="/admin/golive">✅ Go-live</a> page is the owner's pre-launch cockpit: four read-only checks that separate the default box from a live traffic engine, each linking to the page that flips it.</p>
+<ul class="step-list">
+<li><b>1 · Social router (n8n)</b> — set the <code>SOCIAL_WEBHOOK</code> env var to a real n8n host and import the router flow the repo ships in <code>ops/n8n/*.json</code>, so every kit fans out to the platforms with no native backend here. Until then, only platforms whose keys are pasted on <a class="tooltag" href="/keys">🔑 Keys</a> receive posts.</li>
+<li><b>2 · Search-engine consoles</b> — connect GSC and Yandex via OAuth (<code>PSTORE_GSC_CLIENT_ID/_SECRET</code>, <code>PSTORE_YANDEX_CLIENT_ID/_SECRET</code>) and paste your Bing API key (<code>PSTORE_BING_API_KEY</code>) on <a class="tooltag" href="/admin/seoengines">🔎 Engines</a>. Until then the traffic panel shows referral-attributed numbers, not real 28-day impressions and clicks.</li>
+<li><b>3 · Custom domain + PSTORE_URL</b> — add your domain on the host, set <code>PSTORE_URL=https://your.domain</code> and restart. It fixes every canonical, the sitemap and all OAuth redirects at once — and Google/Facebook sign-in requires it.</li>
+<li><b>4 · Amazon Associates tag</b> — set <code>PSTORE_TAG</code> (base tag) and approve it inside the Associates dashboard; the pay-tier tag on the funnel is the optional second layer. No tag means no crediting on any of the three channels above.</li>
+</ul>
 </div>
 </main>
 <footer><p>User manual — owner section, never indexed. <a href="/admin">All pages</a> · <a href="/admin/logout">Log out</a>.</p></footer>

@@ -130,6 +130,8 @@ Every tool is one click from the admin nav bar:
 | 📣 Social | `/admin/social` | One-click social posts + auto-amplify winners |
 | 🎯 SEM | `/admin/sem` | Keyword & search-funnel intel + "Build this page" |
 | 🔍 SEO | `/admin/seo` | Fix pages so Google can index them |
+| 🔗 Link authority | `/admin/linkauthority` | Off-page backlinks: guest posts, HARO, PR |
+| ✅ Go-live | `/admin/golive` | **Owner checklist** — webhook · consoles · domain · tag (4 dots) |
 | 📡 Refresh | `/admin/refresh` | Keep product data fresh (auto + manual) |
 | 🗺 All pages | `/admin` | Map of everything + every niche page |
 | ⚙️ Funnel | `/admin/funnel` | **Real, data-backed sales funnel** (5 stages + per-niche breakdown) |
@@ -188,7 +190,11 @@ By default pstore already generates SEO-ready pages with schema markup. Your job
 
 6. **Rich results:** every niche, topic and landing page emits **schema.org Product JSON-LD** (price and star ratings only when the scraped data genuinely has them, so nothing fake), making star-rich snippets eligible on Google. The Schema column in `/admin/seo` turns green when the emitted markup is valid.
 
-7. **Go long-tail.** On `/admin/opportunities`, click **"Build long-tail pages"** for a proven niche. pstore reads live Amazon autosuggest and mints nested `/n/<niche>/<term>` pages (e.g. `/n/air-fryer/basket-air-fryers`) — each a real, distinct URL with its own ranked ItemList schema, breadcrumbs, links back to the hub, sitemap entry and IndexNow ping. These catch the "long-tail" searches you'd never rank for on their own.
+> Before launch, walk the owner's **✅ Go-live checklist** on `/admin/golive` — four read-only checks that separate the default demo box from a live traffic engine: the **social router webhook** (`SOCIAL_WEBHOOK` → your n8n host), the **search-engine consoles** (GSC + Bing + Yandex keys/Tokens), the **custom domain** (`PSTORE_URL`), and the **approved Amazon Associates tag** (`PSTORE_TAG`).
+
+7. **Earn off-page authority** on `/admin/linkauthority` (**🔗 Link authority**). Press **Generate targets** and pstore builds one outreach target per niche × tactic from your newest stocked niches: **guest posts** ("write for us" blogs), **HARO/expert source** quotes (HARO, Featured, JournoRequests, SourceBottle), **broken-link fixes** (offer your live page as a replacement for dead links on authority roundups), **news-jack/PR** angles (run these first — windows close in days), and **resource-listings**. Every target carries a ready pitch, one-click search links, and a status pipeline you advance to **live** when the backlink publishes — rising domain authority lifts every niche page in the rankings.
+
+8. **Go long-tail.** On `/admin/opportunities`, click **"Build long-tail pages"** for a proven niche. pstore reads live Amazon autosuggest and mints nested `/n/<niche>/<term>` pages (e.g. `/n/air-fryer/basket-air-fryers`) — each a real, distinct URL with its own ranked ItemList schema, breadcrumbs, links back to the hub, sitemap entry and IndexNow ping. These catch the "long-tail" searches you'd never rank for on their own.
 
 > Every `/n/` verdict page already ships conversion machinery: **reciprocal internal links** (`related`), a **live-price urgency line**, and a **sticky bottom CTA** ("see it on Amazon") that appears on scroll or exit-intent — pointing straight at your #1 pick. The heavier `/lp/` sales pages still carry the promo countdown + opt-in funnel.
 

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import json
+import os
 import unittest
 
 import publish
@@ -25,6 +26,9 @@ class Base(unittest.TestCase):
         self._orig_img = publish.og_image
         self._orig_multipart = publish._multipart
         self._orig_shorts_mp4 = publish._shorts_mp4
+        self._orig_shorts_video = publish._shorts_video
+        self._orig_multi = publish._SHORTS_MULTI
+        publish._SHORTS_MULTI = False
         publish._PINT_BOARD_CACHE.clear()
         publish._PINT_BOARDS_CACHE.clear()
         publish.og_image = lambda url: "https://example.com/og.png"
@@ -37,6 +41,8 @@ class Base(unittest.TestCase):
         publish.og_image = self._orig_img
         publish._multipart = self._orig_multipart
         publish._shorts_mp4 = self._orig_shorts_mp4
+        publish._shorts_video = self._orig_shorts_video
+        publish._SHORTS_MULTI = self._orig_multi
 
     def _ok(self, payload=None, boards=None):
         boards = boards if boards is not None else [{"id": "board-1", "name": "Default"}]
@@ -426,6 +432,31 @@ class TestYouTubeNative(Base):
         res = publish.post_to("YouTube", self._kit("YouTube"), self._mp4_keys())
         self.assertFalse(res["ok"])
         self.assertEqual(res["via"], "native")
+
+    def test_prefers_multiscene_video_when_available(self):
+        seen = {}
+        publish._SHORTS_MULTI = True
+        publish._shorts_video = lambda b, seconds=6, fps=25: b"multi-mp4"
+        def fake_multi(url, j, fb, ft, hdrs):
+            seen["file"] = fb
+            return 200, {"id": "vid-9"}
+        publish._multipart = fake_multi
+        res = publish.post_to("YouTube", self._kit("YouTube"), self._mp4_keys())
+        self.assertTrue(res["ok"])
+        self.assertEqual(seen["file"], b"multi-mp4")
+
+    def test_falls_back_to_single_frame_when_multiscene_none(self):
+        seen = {}
+        publish._SHORTS_MULTI = True
+        publish._shorts_video = lambda b, seconds=6, fps=25: None
+        publish._shorts_mp4 = lambda fb, seconds=6, fps=25: b"legacy-mp4"
+        def fake_multi(url, j, fb, ft, hdrs):
+            seen["file"] = fb
+            return 200, {"id": "vid-8"}
+        publish._multipart = fake_multi
+        res = publish.post_to("YouTube", self._kit("YouTube"), self._mp4_keys())
+        self.assertTrue(res["ok"])
+        self.assertEqual(seen["file"], b"legacy-mp4")
 
     def test_youtube_tags_respect_caps(self):
         tags = publish._youtube_tags(
