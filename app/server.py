@@ -60,6 +60,7 @@ import telegram_admin
 import suggest
 import template
 import webmasters
+import weeklydigest
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(ROOT, "static")
@@ -374,6 +375,8 @@ FUNCTION_PATHS = {
                 "/api/ai/"),
     "marketing": ("/admin/funnel", "/admin/marketing", "/admin/variants",
                   "/admin/segments", "/admin/pricedrop", "/admin/template",
+                  "/admin/weeklydigest", "/api/weeklydigest", "/api/weeklydigest/run",
+                  "/api/weeklydigest/unprune",
                   "/api/funnel", "/api/marketing", "/api/boosts", "/api/variants",
                   "/api/segments", "/api/pricedrop", "/api/tools", "/api/template",
                   "/api/earnings", "/api/subjects"),
@@ -393,6 +396,7 @@ NAV_FN = {
     "social": "social", "variants": "marketing", "segments": "marketing",
     "telegram": "telegram", "variants": "marketing", "segments": "marketing",
     "pricedrop": "marketing", "template": "marketing", "keys": "keys", "apikeys": "keys",
+    "weeklydigest": "marketing",
     "analytics": "analytics", "backup": "analytics", "manual": "analytics",
     "system": "system",
 }
@@ -715,6 +719,62 @@ _PRICEDROP_STATE_KEY = "pricedrop.state"  # json progress for the background scr
 _PRICEDROP_ASIN_TIMEOUT = 35.0  # per-ASIN fetch budget; a stuck Amazon
 # call is skipped so one bad ASIN can never stall the whole scan
 SOCIAL_PEAK_SLOTS = (8, 12, 19)  # high-engagement schedule hours (morning/lunch/evening)
+_WEEKLYDIGEST_STATE_KEY = "weeklydigest.state"  # json: {status,sent,last_run,week,errors}
+_WEEKLYDIGEST_GATE_KEY = "weeklydigest.last_week"  # json: {keyword: "YYYY-Wxx"} — one digest/week/niche
+_WEEKLYDIGEST_DAY = 1  # ISO weekday the weekly money email goes out (1=Monday)
+_WEEKLYDIGEST_HOUR = 9  # UTC hour of day it fires
+_WEEKLYDIGEST_AUTOPRUNE_KEY = "weeklydigest.autoprune"  # "0" to disable auto-pause
+_WEEKLYDIGEST_PRUNED_KEY = "weeklydigest.pruned"       # JSON {keyword_lower: iso_date}
+
+
+def _weeklydigest_cfg():
+    """Effective weekly-digest config: settings overrides, env-compatible."""
+    raw_e = (_get_setting("weeklydigest.enabled") or "").strip()
+    raw_day = (_get_setting("weeklydigest.day") or "").strip()
+    raw_hour = (_get_setting("weeklydigest.hour") or "").strip()
+    enabled = (raw_e != "0") if raw_e else True
+    try:
+        day = int(raw_day) if raw_day else _WEEKLYDIGEST_DAY
+    except Exception:
+        day = _WEEKLYDIGEST_DAY
+    try:
+        hour = int(raw_hour) if raw_hour else _WEEKLYDIGEST_HOUR
+    except Exception:
+        hour = _WEEKLYDIGEST_HOUR
+    if day < 1 or day > 7:
+        day = _WEEKLYDIGEST_DAY
+    if hour < 0 or hour > 23:
+        hour = _WEEKLYDIGEST_HOUR
+    return {"enabled": bool(enabled), "day": day, "hour": hour,
+            "min_drop_pct": weeklydigest.DEFAULT_MIN_DROP_PCT}
+
+
+def _wd_gate_state():
+    """{keyword: last sent ISO week} read from the settings gate key."""
+    try:
+        data = json.loads(_get_setting(_WEEKLYDIGEST_GATE_KEY, "{}") or "{}") or {}
+    except Exception:
+        data = {}
+    return {str(k).strip().lower(): str(v or "") for k, v in data.items()}
+
+
+def _wd_gate_save(keyword, week):
+    gate = _wd_gate_state()
+    gate[keyword.strip().lower()] = week
+    _set_setting(_WEEKLYDIGEST_GATE_KEY, json.dumps(gate))
+
+
+def _wd_pruned_state():
+    """{keyword_lower: iso_date} — niches auto-paused by the quiet-zone prune."""
+    try:
+        data = json.loads(_get_setting(_WEEKLYDIGEST_PRUNED_KEY) or "{}") or {}
+    except Exception:
+        data = {}
+    return {str(k).strip().lower(): str(v) for k, v in data.items()}
+
+
+def _wd_pruned_save(pruned_map):
+    _set_setting(_WEEKLYDIGEST_PRUNED_KEY, json.dumps(pruned_map))
 
 
 def _autosend_cfg():
@@ -1500,6 +1560,125 @@ def _niches_rows():
     return [{"keyword": r["keyword"],
              "products": json.loads(r["products"] or "[]"),
              "created_at": r["created_at"] or ""} for r in rows]
+
+
+# ------------------------------------------------------ weekly money digest rows
+def _wd_winner_rows():
+    """Best-clicked money picks for the weekly digest. Rows group the click
+    beacon by niche SLUG (long-tail topic slugs fold into their parent niche,
+    so a topic page's wins credit the money niche). Returns:
+    {keyword, slug, clicks} — ranked high-to-low by the DB query."""
+    parent_for = {}
+    with _lock:
+        conn = _db()
+        topic_rows = conn.execute(
+            "SELECT parent_slug, slug FROM topics").fetchall()
+        conn.close()
+    for tr in topic_rows:
+        parent_for[tr["slug"]] = tr["parent_slug"]
+    with _lock:
+        conn = _db()
+        rowss = conn.execute(
+            "SELECT slug, COUNT(*) AS clicks FROM clicks "
+            "WHERE asin != '' AND slug != '' "
+            "GROUP BY slug ORDER BY clicks DESC").fetchall()
+        conn.close()
+    kw_for = {}
+    for n in _niches_rows():
+        kw_for[seo._slugify(n["keyword"])] = n["keyword"]
+    out, seen = [], set()
+    for r in rowss:
+        slug = r["slug"]
+        parent = parent_for.get(slug, slug)
+        kw = kw_for.get(parent)
+        if not kw:
+            continue
+        pair = (kw, parent)
+        if pair in seen:
+            continue
+        seen.add(pair)
+        out.append({"keyword": kw, "slug": parent,
+                    "clicks": int(r["clicks"])})
+    return out
+
+
+def _wd_deal_rows():
+    """Real price drops from the pricedrop store, joined to niche keyword +
+    product title/ASIN so pick_deals can rank them. Rows:
+    {keyword, slug, title, asin, old, new, drop_pct} where old is the stored
+    baseline and new is the latest snapshot price."""
+    store = _pricedrop_store()
+    asin_kw, asin_title = {}, {}
+    for n in _niches_rows():
+        kw = n["keyword"]
+        for item in (n.get("products") or []):
+            a = str(item.get("asin") or "").strip().upper()
+            if a:
+                asin_kw.setdefault(a, kw)
+                asin_title.setdefault(a, item.get("title") or "")
+    out = []
+    for a, v in store.all().items():
+        baseline = v.get("price") if isinstance(v, dict) else None
+        snaps = [s for s in (v.get("snapshots") or [])
+                 if isinstance(s, dict) and s.get("price") is not None]
+        if baseline is None or not snaps:
+            continue
+        cur = snaps[-1].get("price")
+        old, new = _wd_num(baseline), _wd_num(cur)
+        if old <= 0 or new <= 0 or new >= old:
+            continue
+        drop_pct = round((old - new) * 100.0 / old, 1)
+        kw = asin_kw.get(a) or ""
+        out.append({"keyword": kw, "slug": seo._slugify(kw) if kw else a,
+                    "title": asin_title.get(a) or a, "asin": a,
+                    "old": old, "new": new, "drop_pct": drop_pct})
+    return out
+
+
+def _wd_referrer_rows():
+    """Subscriber referrers owed a re-enroll round: {email, first_name,
+    keyword, referrals} for everyone with referrals > 0 who hasn't unsubscribed."""
+    with _lock:
+        conn = _db()
+        rowss = conn.execute(
+            "SELECT email, first_name, keyword, referrals FROM subscribers "
+            "WHERE referrals > 0 AND unsubscribed = 0 "
+            "ORDER BY referrals DESC, id ASC").fetchall()
+        conn.close()
+    return [{"email": r["email"], "first_name": r["first_name"] or "",
+             "keyword": r["keyword"] or "",
+             "referrals": int(r["referrals"] or 0)} for r in rowss]
+
+
+def _wd_prune_rows():
+    """Niche quiet-zone rows for pick_prune: {keyword, slug, clicks,
+    last_click_at} from the daily click beacon per niche slug."""
+    with _lock:
+        conn = _db()
+        rowss = conn.execute(
+            "SELECT slug, COUNT(*) AS c, MAX(created_at) AS last FROM clicks "
+            "WHERE asin != '' AND slug != '' "
+            "GROUP BY slug").fetchall()
+        conn.close()
+    kw_for = {}
+    for n in _niches_rows():
+        kw_for[seo._slugify(n["keyword"])] = n["keyword"]
+    out = []
+    for r in rowss:
+        kw = kw_for.get(r["slug"])
+        if not kw:
+            continue
+        out.append({"keyword": kw, "slug": r["slug"],
+                    "clicks": int(r["c"] or 0),
+                    "last_click_at": r["last"] or ""})
+    return out
+
+
+def _wd_num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _all_topic_pairs():
@@ -4381,8 +4560,9 @@ for (const id of ["me-name","me-pw","me-pw2"])
               ("/admin/telegram", "✈️ Telegram", "telegram"),
               ("/admin/variants", "⚗️ A/B", "variants"),
               ("/admin/segments", "🎚 Lead segments", "segments"),
-              ("/admin/pricedrop", "🏷 Price drops", "pricedrop"),
-              ("/admin/template", "🎨 Template & style", "template"),
+("/admin/pricedrop", "🏷 Price drops", "pricedrop"),
+               ("/admin/weeklydigest", "💵 Weekly money", "weeklydigest"),
+               ("/admin/template", "🎨 Template & style", "template"),
               ("/keys", "🔑 Keys", "keys"),
               ("/admin/apikeys", "🔌 API Keys", "apikeys")]),
             ("Analyze",
@@ -4463,6 +4643,7 @@ for (const id of ["me-name","me-pw","me-pw2"])
             ("/admin/variants", "⚗️ A/B headline tests", "per-niche split test"),
             ("/admin/segments", "🎚 Lead lifecycle segments", "hot / warm / cold"),
             ("/admin/pricedrop", "🏷 Price-drop deal engine", "scarcity pushes"),
+            ("/admin/weeklydigest", "💵 Weekly money digest", "winners · deals · re-enroll"),
             ("/admin/template", "🎨 Template & style", "onepager look + banner"),
             ("/tool", "🛠 One-click marketing suite", "launch everything"),
             ("/keys", "🔑 Keys &amp; endpoints", "admin"),
@@ -4798,6 +4979,10 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._pricedrop_state_api()
             if path == "/api/pricedrop/events":
                 return self._pricedrop_events_api()
+            if path == "/admin/weeklydigest":
+                return self._admin_weeklydigest(q)
+            if path == "/api/weeklydigest":
+                return self._weeklydigest_api()
             if path == "/admin/apikeys":
                 return self._admin_apikeys(q)
             if path == "/admin/opportunities":
@@ -5096,6 +5281,12 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._pricedrop_state_api()
             if parsed.path == "/api/pricedrop/events":
                 return self._pricedrop_events_api()
+            if parsed.path == "/api/weeklydigest/run":
+                return self._weeklydigest_run()
+            if parsed.path == "/api/weeklydigest/unprune":
+                return self._weeklydigest_unprune()
+            if parsed.path == "/api/weeklydigest/autoprune":
+                return self._weeklydigest_autoprune_toggle()
             if parsed.path == "/api/segments/reengage":
                 return self._send(200, self._reengage_cold())
             if parsed.path == "/api/subjects/save":
@@ -13375,6 +13566,180 @@ database — no log parsing. If a card stays STALE, the worker has stopped beati
         module-level _watched_products_rows, shared with the auto loop)."""
         return _watched_products_rows()
 
+    # -------------------------------------------------------- weekly money digest
+    def _weeklydigest_state(self):
+        try:
+            return json.loads(_get_setting(_WEEKLYDIGEST_STATE_KEY, "{}") or "{}") or {}
+        except Exception:
+            return {}
+
+    def _weeklydigest_api(self):
+        state = self._weeklydigest_state()
+        gate = _wd_gate_state()
+        cfg = _weeklydigest_cfg()
+        return self._send(200, {"ok": True, "config": cfg, "state": state,
+                                "gate": gate,
+                                "pruned": _wd_pruned_state(),
+                                "autoprune": (_get_setting(_WEEKLYDIGEST_AUTOPRUNE_KEY, "1")
+                                              or "1").strip() != "0",
+                                "week": weeklydigest._iso_week(),
+                                "winners": weeklydigest.pick_winners(
+                                    _wd_winner_rows()),
+                                "deals": weeklydigest.pick_deals(
+                                    _wd_deal_rows(), min_drop_pct=cfg["min_drop_pct"]),
+                                "referrers": weeklydigest.pick_referrers(
+                                    _wd_referrer_rows()),
+                                "prune": weeklydigest.pick_prune(
+                                    _wd_prune_rows())})
+
+    def _weeklydigest_run(self):
+        body = self._body()
+        kw = body.get("keyword") or ""
+        force = body.get("force") or body.get("now") or False
+        dry = body.get("dry") or False
+        res = Handler._weeklydigest_send(self, keyword=kw or None,
+                                         force=bool(force), dry=bool(dry))
+        return self._send(200, res or {"ok": False, "error": "no result"})
+
+    def _weeklydigest_unprune(self):
+        """Resume an auto-paused niche: drop it from the pruned map and clear
+        its digest gate so the next cycle re-emails it."""
+        body = self._body()
+        kw = (body.get("keyword") or "").strip().lower()
+        pruned = _wd_pruned_state()
+        if kw and kw in pruned:
+            del pruned[kw]
+            _wd_pruned_save(pruned)
+            gate = _wd_gate_state()
+            gate.pop(kw, None)
+            _set_setting(_WEEKLYDIGEST_GATE_KEY, json.dumps(gate))
+            return self._send(200, {"ok": True, "resumed": kw,
+                                    "pruned": pruned})
+        return self._send(200, {"ok": False, "error": "not pruned",
+                                "pruned": pruned})
+
+    def _weeklydigest_autoprune_toggle(self):
+        """Flip the weeklydigest.autoprune setting (auto-pause quiet niches)."""
+        body = self._body()
+        on = bool(body.get("enabled"))
+        _set_setting(_WEEKLYDIGEST_AUTOPRUNE_KEY, "1" if on else "0")
+        return self._send(200, {"ok": True, "enabled": on,
+                                "autoprune": on})
+
+    def _admin_weeklydigest(self, q):
+        state = self._weeklydigest_state()
+        gate = _wd_gate_state()
+        cfg = _weeklydigest_cfg()
+        week = weeklydigest._iso_week()
+        winners = weeklydigest.pick_winners(_wd_winner_rows())
+        deals = weeklydigest.pick_deals(_wd_deal_rows(), min_drop_pct=cfg["min_drop_pct"])
+        referrers = weeklydigest.pick_referrers(_wd_referrer_rows())
+        prune = weeklydigest.pick_prune(_wd_prune_rows())
+        pruned = _wd_pruned_state()
+        autoprune_on = (_get_setting(_WEEKLYDIGEST_AUTOPRUNE_KEY, "1") or "1").strip() != "0"
+        winners_html = "".join(
+            "<li><b>%s</b> · %s — %d clicks</li>"
+            % (seo._clean(w["keyword"]), seo._clean(w["slug"]), w["clicks"])
+            for w in winners) or '<li class="hint">No clicks this week — no winners yet.</li>'
+        deals_html = "".join(
+            "<li><b>%s</b> — $%.2f → $%.2f (%.1f%% off)</li>"
+            % (seo._clean(d["title"]), d["old"], d["new"], d["drop_pct"])
+            for d in deals) or '<li class="hint">No qualifying price drops this week.</li>'
+        ref_rows = "".join(
+            "<tr><td>%s</td><td>%d</td></tr>"
+            % (seo._clean(r["email"]), r["referrals"])
+            for r in referrers) or '<tr><td colspan="2" class="hint">No referrers yet.</td></tr>'
+        prune_html = "".join(
+            "<li>%s — %d clicks, %d days quiet</li>"
+            % (seo._clean(p["keyword"]), p["clicks"], p["quiet_days"])
+            for p in prune) or '<li class="hint">No quiet niches to prune this week.</li>'
+        pruned_html = "".join(
+            "<tr><td>%s</td><td>%s</td>"
+            '<td><button class="warm" onclick="resume(\'%s\')">Resume</button></td></tr>'
+            % (seo._clean(k), v, seo._clean(k).replace("'", "\\'"))
+            for k, v in sorted(pruned.items())) or \
+            '<tr><td colspan="3" class="hint">No pruned niches — auto-pause is idle.</td></tr>'
+        autoprune_btn = ('<button id="apbtn" class="on" onclick="toggleAp()">'
+                         'Auto-pause quiet niches: ON</button>' if autoprune_on else
+                         '<button id="apbtn" onclick="toggleAp()">'
+                         'Auto-pause quiet niches: OFF</button>')
+        gate_html = "".join(
+            "<tr><td>%s</td><td>%s</td></tr>"
+            % (seo._clean(k), v) for k, v in gate.items()
+        ) or '<tr><td colspan="2" class="hint">Nothing sent yet.</td></tr>'
+        status_badge = state.get("status") or "idle"
+        body = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Weekly money digest — pstore</title><link rel="stylesheet" href="/style.css">
+<meta name="robots" content="noindex,nofollow">
+<style>table{{width:100%;border-collapse:collapse;margin-top:8px}}td,th{{text-align:left;padding:6px 8px;
+border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
+.actions{{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:10px}}
+#msg{{display:block;margin-top:10px;min-height:18px}}
+#out ul{{list-style:none;padding:0;margin:0;display:grid;gap:8px}}
+#out li{{background:var(--bg,#f4f7fb);border:1px solid var(--border,#e6e8ee);border-radius:12px;padding:10px 14px;font-size:13px}}
+.st{{display:inline-block;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:700}}
+.st.sent{{background:#eef7ee;color:#16802a}}.st.idle{{background:#f4f7fb;color:#6b7280}}
+.st.error{{background:#fde8e8;color:#b12704}}.st.disabled{{background:#f4f7fb;color:#9aa0ad}}
+</style>
+</head><body>
+<header id="top"><a class="logo" href="/"><span class="mark">P</span><pstore</a>
+<h1>Weekly money digest <span style="font-size:14px;color:#9aa0ad">Week {seo._clean(week)}</span></h1>
+<p class="tagline">One money email per niche per week — winners, deals, re-enroll and quiet-zone prune.</p>
+{_TOTOP}
+</header>
+<main>
+<section class="card"><h2>Status</h2>
+<div class="actions">
+<span class="st {seo._clean(status_badge)}">{seo._clean(status_badge.title())}</span>
+<span>Last run: <b>{seo._clean(state.get("last_run") or "never")}</b> · Week: <b>{seo._clean(state.get("week") or week)}</b></span>
+</div>
+<p style="font-size:13px;color:#6b7280;margin-top:10px">Sends on ISO weekday {cfg["day"]} ({"Mon","Tue","Wed","Thu","Fri","Sat","Sun"[cfg["day"]-1]}) at {cfg["hour"]}:00 UTC.</p>
+<p class="hint">Gated so each niche gets exactly one digest per ISO week. Manual "Send now" force-overrides the gate.</p>
+</section>
+<section class="card"><h2>Winners (best-clicked this week)</h2>
+<ul>{winners_html}</ul></section>
+<section class="card"><h2>Deals (real price drops)</h2>
+<ul>{deals_html}</ul></section>
+<section class="card"><h2>Referrers (re-enrollment)</h2>
+<table><tr><th>Email</th><th>Referrals</th></tr>{ref_rows}</table></section>
+<section class="card"><h2>Quiet niches to prune</h2>
+<ul>{prune_html}</ul>
+<p class="hint">pick_prune reports niches with &lt;{weeklydigest.DEFAULT_PRUNE_MIN_CLICKS} clicks and ≥{weeklydigest.DEFAULT_PRUNE_QUIET_DAYS} days quiet. With auto-pause ON they are silently dropped from the money set; Resume brings a niche back.</p></section>
+<section class="card"><h2>Pruned (paused) niches</h2>
+<table><tr><th>Niche</th><th>Paused since</th><th></th></tr>{pruned_html}</table>
+<p class="hint">{autoprune_btn}</p></section>
+<section class="card"><h2>Gate (sent weeks)</h2>
+<table><tr><th>Niche</th><th>Last sent week</th></tr>{gate_html}</table></section>
+<section class="card"><h2>Actions</h2>
+<div class="actions">
+<button class="warm" onclick="sendNow()">Send now (this week)</button>
+<button onclick="sendDry()">Dry run</button>
+</div>
+<p id="msg" class="msg"></p>
+<div id="out"></div></section>
+</main>
+<footer>Weekly money digest — never indexed. <a href="/admin/logout">Log out</a> when done.</footer>
+</body></html>"""
+        js = """async function sendNow(){const m=document.querySelector('#msg');
+m.textContent='Sending…';let r,d;
+try{r=await fetch('/api/weeklydigest/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:true})});d=await r.json();}catch(e){m.textContent='✗ Server unreachable.';return;}
+m.textContent=(r.ok?'+ Sent '+d.sent+' (already '+d.already_sent+')':'✗ '+((d&&d.error)||'fail'));}
+async function sendDry(){const m=document.querySelector('#msg');
+m.textContent='Dry run…';let r,d;
+try{r=await fetch('/api/weeklydigest/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:true,dry:true})});d=await r.json();}catch(e){m.textContent='✗ Server unreachable.';return;}
+m.textContent=(r.ok?'+ Dry: '+d.due_niches+' niches due ('+d.winners+' winners, '+d.deals+' deals)':'✗ '+((d&&d.error)||'fail'));}
+async function resume(kw){const m=document.querySelector('#msg');
+m.textContent='Resuming…';let r,d;
+try{r=await fetch('/api/weeklydigest/unprune',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keyword:kw})});d=await r.json();}catch(e){m.textContent='✗ Server unreachable.';return;}
+m.textContent=(d.ok?'+ Resumed — next cycle re-emails it':'✗ '+((d&&d.error)||'fail'));setTimeout(()=>location.reload(),600);}
+async function toggleAp(){const m=document.querySelector('#msg');const b=document.querySelector('#apbtn');
+const on=!b.classList.contains('on');m.textContent='Saving…';let r,d;
+try{r=await fetch('/api/weeklydigest/autoprune',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:on})});d=await r.json();}catch(e){m.textContent='✗ Server unreachable.';return;}
+m.textContent=(d.ok?'+ Auto-pause '+(on?'ON':'OFF'):'✗ '+((d&&d.error)||'fail'));setTimeout(()=>location.reload(),600);}"""
+        return self._send(200, (body + "<script>%s</script>" % js).encode("utf-8"),
+                          "text/html; charset=utf-8")
+
     def _pricedrop_api(self):
         store = self._price_store()
         watched = [{"asin": a, "baseline": store.baseline(a)}
@@ -14038,6 +14403,120 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
         return {"ok": True, "drops": drops, "candidates": candidates,
                 "sent": sent, "already_sent": already, "errors": errors,
                 "keyword": kw_filter or None, "watcher_emails": watcher_emails}
+
+    def _weeklydigest_send(self, keyword=None, force=False, dry=False):
+        """Send this ISO week's capstone money query — ONE weekly digest email per
+        hot/converted subscriber of every niche that had a best-clicked winner or
+        a real price drop this week — plus a per-referrer re-enroll line and a
+        quiet-niche prune recommendation.
+
+        THE MONEY SEAM: digest_email() emits exactly one `{{tracked_link}}`
+        placeholder across text+html; this caller fills it with the real
+        merchant hop for the hero pick (top ASIN of the niche, tracked to the
+        subscriber), then dispatches through mailer.send with the same pixel +
+        reply-to pipeline as every other email. Gated to one digest per ISO week
+        per niche via the weeklydigest gate. Never raises."""
+        import datetime as _dt
+        now = _dt.datetime.utcnow()
+        week = weeklydigest._iso_week(now)
+        kw_filter = (keyword or "").strip().lower()
+        gate = _wd_gate_state()
+        cfg = _weeklydigest_cfg()
+        winners = weeklydigest.pick_winners(_wd_winner_rows())
+        deals = weeklydigest.pick_deals(_wd_deal_rows(),
+                                        min_drop_pct=cfg.get("min_drop_pct"))
+        referrers = weeklydigest.pick_referrers(_wd_referrer_rows())
+        prune = weeklydigest.pick_prune(_wd_prune_rows(), day=now.date())
+        niches = sorted({w["keyword"] for w in winners}
+                        | {d["keyword"] for d in deals if d["keyword"]})
+        if kw_filter:
+            niches = [k for k in niches if k == kw_filter]
+        # QUIET-ZONE PRUNE → niche management: a niche with too few clicks for
+        # too long is auto-paused (persisted in the pruned map + dropped from
+        # today's set), so the digest never burns a tracked-link email on a dead
+        # niche. Resume anytime via /api/weeklydigest/unprune.
+        pruned = _wd_pruned_state()
+        pruned_list = []
+        autoprune_on = (_get_setting(_WEEKLYDIGEST_AUTOPRUNE_KEY, "1") or "1").strip() != "0"
+        if autoprune_on:
+            for p in prune:
+                kw = p["keyword"].lower()
+                if kw not in pruned:
+                    pruned[kw] = now.strftime("%Y-%m-%d")
+                    pruned_list.append(p)
+            if pruned_list:
+                _wd_pruned_save(pruned)
+        niches = [n for n in niches if n.lower() not in pruned]
+        sent = already = errors = 0
+        due = 0
+        for niche in niches:
+            nw = [w for w in winners if w["keyword"] == niche]
+            nd = [d for d in deals if d["keyword"] == niche]
+            if weeklydigest.weekly_gate(niche, last_week=gate.get(niche),
+                                        week=week)["due"] or force:
+                due += 1
+            else:
+                continue
+            members = self._segment_members(keyword=niche,
+                                            segments_names=("hot", "converted"),
+                                            limit=5000)
+            # the hero money hop: top product of the niche (or the lead deal)
+            hero_asin = ""
+            try:
+                pick = market_engine.pick_for_buyers(self._niche_items(niche))
+                hero_asin = (pick or {}).get("asin") or ""
+            except Exception:
+                hero_asin = ""
+            if not hero_asin and nd and nd[0].get("asin"):
+                hero_asin = nd[0]["asin"]
+            for sub in members:
+                if self._already_sent("weeklydigest:" + week, sub["id"]):
+                    already += 1
+                    continue
+                name = (sub.get("first_name") or "").strip() or "there"
+                mref = [r for r in referrers if r["email"] == sub["email"]]
+                mail = weeklydigest.digest_email(
+                    niche, nw, nd, referrers=mref, week=week,
+                    base_url=os.environ.get("PSTORE_URL", ""))
+                unsub = mailer.unsubscribe_url(sub["email"])
+                link = mailer.tracked_url(niche, hero_asin, sub["id"], 99) \
+                    if hero_asin else ""
+                text = mail["text"].replace("{{first_name}}", name) \
+                    .replace("{{unsubscribe_url}}", unsub) \
+                    .replace("{{tracked_link}}", link)
+                html_body = mail["html"].replace("{{first_name}}", name) \
+                    .replace("{{unsubscribe_url}}", unsub) \
+                    .replace("{{tracked_link}}", link)
+                if dry:
+                    sent += 1
+                    continue
+                pixel = mailer.open_pixel_url(niche, hero_asin, sub["id"], 99) \
+                    if hero_asin else ""
+                reply_to = mailer.thread_reply_to(str(sub["id"]))
+                ok = mailer.send(mail["subject"], text, sub["email"],
+                                 pixel_url=pixel, reply_to=reply_to,
+                                 html=html_body or "")
+                if ok:
+                    self._log_email_send("weeklydigest:" + week, sub["id"], niche, "")
+                    sent += 1
+                else:
+                    errors += 1
+        for niche in niches:
+            if weeklydigest.weekly_gate(niche, last_week=gate.get(niche),
+                                        week=week)["due"] or force:
+                _wd_gate_save(niche, week)
+        _set_setting(_WEEKLYDIGEST_STATE_KEY, json.dumps({
+            "status": "sent" if sent or already else "idle", "sent": sent,
+            "already_sent": already, "errors": errors, "week": week,
+            "niches": niches, "winners": len(winners), "deals": len(deals),
+            "referrers": len(referrers), "prune": [p["keyword"] for p in prune],
+            "pruned": list(pruned), "autopruned": len(pruned_list),
+            "last_run": now.strftime("%Y-%m-%d %H:%M:%S")}))
+        return {"ok": True, "week": week, "sent": sent, "already_sent": already,
+                "errors": errors, "due_niches": due, "niches": niches,
+                "winners": winners, "deals": deals,
+                "referrers": len(referrers), "prune": prune,
+                "pruned": pruned, "autopruned": pruned_list}
 
     def _telegram_feed(self, drops=None, dry=False, cap=20):
         """Automatic Telegram digest to every bot subscriber, fired inside each
@@ -16206,6 +16685,9 @@ class _AutosendStub:
     def _subscriber_by_email(self, email):
         return Handler._subscriber_by_email(self, email)
 
+    def _niche_items(self, keyword):
+        return Handler._niche_items(self, keyword)
+
 
 def _ingest_inbound(messages, mailbox="inbox"):
     """Store fetched inbound messages into mailbox_messages, deduped by
@@ -16348,6 +16830,42 @@ def _autosend_loop():
         time.sleep(1800)  # check twice hourly so transient misses still catch the slot
 
 
+def _weeklydigest_tick():
+    """Fire this week's money digest IF (a) enabled and (b) the current ISO
+    weekday is the digest day and (c) the current UTC hour is the digest slot
+    and (d) that (week, day-hour) marker hasn't already run once. Gated per
+    niche inside _weeklydigest_send to one email per week per subscriber."""
+    import datetime as _dt
+    cfg = _weeklydigest_cfg()
+    if not cfg["enabled"]:
+        _set_setting(_WEEKLYDIGEST_STATE_KEY, json.dumps({
+            "status": "disabled", "day": cfg["day"], "hour": cfg["hour"]}))
+        return "idle"
+    now = _dt.datetime.utcnow()
+    if now.isoweekday() != cfg["day"] or now.hour != cfg["hour"]:
+        return "idle"
+    marker = "%s-%02d" % (weeklydigest._iso_week(now), now.hour)
+    if _get_setting(_WEEKLYDIGEST_STATE_KEY + ".last") == marker:
+        return "done"
+    stub = _AutosendStub()
+    res = Handler._weeklydigest_send(stub)
+    if res and isinstance(res, dict) and res.get("ok"):
+        _set_setting(_WEEKLYDIGEST_STATE_KEY + ".last", marker)
+        return "sent"
+    return "error: %s" % (res or "no result")
+
+
+def _weeklydigest_loop():
+    while True:
+        try:
+            res = _weeklydigest_tick()
+            _beat("weeklydigest", ok=not str(res).startswith("error"),
+                  err=str(res) if str(res).startswith("error") else "")
+        except Exception as exc:
+            _beat("weeklydigest", False, str(exc))
+        time.sleep(900)  # check quarter-hourly so a transient miss still fires the slot
+
+
 def _fire_outbox_rows():
     """Send any outbox rows whose scheduled_at is in the past."""
     import datetime as _dt
@@ -16486,6 +17004,11 @@ def main():
         threading.Thread(target=_autosend_loop, daemon=True).start()
         print("sequence autosend: daily at %s UTC, cap %d/run"
               % (",".join(map(str, _AUTOSEND_HOURS)), _AUTOSEND_LIMIT))
+    _wdcfg = _weeklydigest_cfg()
+    threading.Thread(target=_weeklydigest_loop, daemon=True).start()
+    print("weekly money digest: %s, iso-weekday %d at %d:00 UTC"
+          % ("ON" if _wdcfg["enabled"] else "OFF (weeklydigest.enabled=0)",
+             _wdcfg["day"], _wdcfg["hour"]))
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print("pstore running on http://localhost:%d" % PORT)
     try:
