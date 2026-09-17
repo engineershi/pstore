@@ -413,6 +413,7 @@ On `/admin/analytics`:
 - **Most-clicked ASIN** → promote it harder (feature it in emails, boost posts).
 - **By source** → put more posts on the platform that converts.
 - **Top pages** → add more related sub-niches to capture that demand.
+- **Money-engine cards** → the weekly money digest (champions, real price drops, referral re-enrolls, quiet-zone prune, auto-pause), the money-step A/B winner per niche, native channel delivery (Telegram + published-per-platform) and the price-drop watch count are pulled right into Analytics, so the whole money machine's ROI lives on one screen.
 
 ### 5.6 Set the refresh schedule to your reality
 | Goal | Setting |

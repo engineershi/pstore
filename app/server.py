@@ -12926,6 +12926,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             "refresh": ("Niche auto-refresh", max(_REFRESH_INTERVAL_SEC or 0, 300)),
             "autosend": ("Sequence autosend check", 1800),
             "pricedrop-auto": ("Price-drop watcher (auto scan)", int(pd_hours * 3600)),
+            "weeklydigest": ("Weekly money digest (winners + deals)", 900),
         }
         # pricedrop has two lives: a manual button (run state) and the auto loop
         # (pricedrop-auto heartbeat). Both are folded into healths/schedule below.
@@ -13076,6 +13077,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                    "social": health("social"), "outbox": health("outbox"),
                    "inbox": health("inbox"), "refresh": health("refresh"),
                    "autosend": health("autosend"),
+                   "weeklydigest": health("weeklydigest"),
                    "pricedrop-auto": health("pricedrop-auto"),
                    "pricedrop": {"name": "pricedrop", "label": "Price-drop run",
                                  "status": "disabled" if pd["status"] == "idle" and not pd["running"]
@@ -13092,6 +13094,18 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
         if autosend_state.get("status") == "error":
             healths["autosend"]["status"] = "error"
             healths["autosend"]["detail"] = autosend_state.get("error") or healths["autosend"]["detail"]
+
+        # weekly digest state override (disabled config vs scheduler alive)
+        try:
+            _wd_cfg_enabled = bool(_weeklydigest_cfg().get("enabled"))
+        except Exception:
+            _wd_cfg_enabled = True
+        if not _wd_cfg_enabled:
+            healths["weeklydigest"].update({"status": "disabled",
+                                            "detail": "weekly digest disabled "
+                                                      "(enabled=0 on /admin/weeklydigest)"})
+        elif healths["weeklydigest"]["status"] in ("disabled",):
+            healths["weeklydigest"]["status"] = "ok"
 
         # schedule table (next-run estimates from last heartbeat + cadence)
         schedule = []
@@ -13564,8 +13578,9 @@ td.yes{{color:#2e8b57}} td.no{{color:#c00;font-weight:600}}
  </button>
  <div class="secfab-menu" id="secnav-menu" role="menu">
   <a role="menuitem" href="#sec-health">❤️ Health</a>
-  <a role="menuitem" href="#sec-issues">🌀 Issues</a>
-  <a role="menuitem" href="#sec-schedule">🕐 Schedule</a>
+   <a role="menuitem" href="#sec-issues">🌀 Issues</a>
+   <a role="menuitem" href="#sec-doctor">🩺 Doctor</a>
+   <a role="menuitem" href="#sec-schedule">🕐 Schedule</a>
   <a role="menuitem" href="#sec-queues">🗃 Queues</a>
   <a role="menuitem" href="#sec-api">🛡 API</a>
   <a role="menuitem" href="#sec-indexing">🧭 Indexing</a>
@@ -13584,6 +13599,11 @@ cycles turns <b style="color:#e67e22">STALE</b>, a failing tick flips the card
 stay <b>IDLE</b>. Redrawn automatically every 4s.</p>
 <div class="stat-tiles" id="health">{cards}</div></section>
 <section class="card" id="sec-issues"><h2>🌀 Issues to look at</h2><ul class="issues" id="issues">{issues_html}</ul></section>
+<section class="card" id="sec-doctor"><h2>🩺 End-to-end doctor</h2>
+<p class="hint">Runs a live crawl of the public site + every connected engine (GSC, Bing, IndexNow) +
+social queue and lists failures first, so you know exactly which fix to ship next. Runs on demand.</p>
+<div class="actions"><a class="btn" href="/admin/seoengines#doctor">Run traffic doctor</a>
+<a class="btn" href="/admin/seoengines">Search-engine hub</a></div></section>
 <section class="card" id="sec-schedule"><h2>🕐 Scheduled automation</h2>
 <div class="table-wrap"><table><thead><tr><th>Task</th><th>State</th><th>Cycle</th>
 <th class="ct">Next run</th><th class="ct">Last beat</th></tr></thead>
@@ -14049,13 +14069,29 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
 .st.error{{background:#fde8e8;color:#b12704}}.st.disabled{{background:#f4f7fb;color:#9aa0ad}}
 </style>
 </head><body>
-<header id="top"><a class="logo" href="/"><span class="mark">P</span><pstore</a>
-<h1>Weekly money digest <span style="font-size:14px;color:#9aa0ad">Week {seo._clean(week)}</span></h1>
-<p class="tagline">One money email per niche per week — winners, deals, re-enroll and quiet-zone prune.</p>
-{_TOTOP}
+<header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
+<div class="hero"><h1>Weekly money <span>digest.</span></h1>
+<p class="tagline">One money email per niche per week — winners, deals, re-enroll and quiet-zone prune. <span style="font-size:13px;color:#9aa0ad">Week {seo._clean(week)}</span></p></div>
+{self._admin_nav('weeklydigest')}
 </header>
+<nav class="secfab" id="secnav" aria-label="Jump to a section">
+ <button type="button" class="secfab-btn" aria-expanded="false" aria-controls="secnav-menu" aria-label="Page sections" title="Page sections">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+ </button>
+ <div class="secfab-menu" id="secnav-menu" role="menu">
+  <a role="menuitem" href="#sec-status">🩺 Status</a>
+  <a role="menuitem" href="#sec-winners">🏆 Winners</a>
+  <a role="menuitem" href="#sec-deals">🏷 Deals</a>
+  <a role="menuitem" href="#sec-referrers">🎁 Referrers</a>
+  <a role="menuitem" href="#sec-prune">🧹 Prune</a>
+  <a role="menuitem" href="#sec-pruned">⏸ Pruned</a>
+  <a role="menuitem" href="#sec-gate">📅 Gate</a>
+  <a role="menuitem" href="#sec-money">⚗️ Money A/B</a>
+  <a role="menuitem" href="#sec-actions">🚀 Actions</a>
+ </div>
+</nav>
 <main>
-<section class="card"><h2>Status</h2>
+<section class="card" id="sec-status"><h2>🩺 Status</h2>
 <div class="actions">
 <span class="st {seo._clean(status_badge)}">{seo._clean(status_badge.title())}</span>
 <span>Last run: <b>{seo._clean(state.get("last_run") or "never")}</b> · Week: <b>{seo._clean(state.get("week") or week)}</b></span>
@@ -14063,25 +14099,25 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
 <p style="font-size:13px;color:#6b7280;margin-top:10px">Sends on ISO weekday {cfg["day"]} ({"Mon","Tue","Wed","Thu","Fri","Sat","Sun"[cfg["day"]-1]}) at {cfg["hour"]}:00 UTC.</p>
 <p class="hint">Gated so each niche gets exactly one digest per ISO week. Manual "Send now" force-overrides the gate.</p>
 </section>
-<section class="card"><h2>Winners (best-clicked this week)</h2>
+<section class="card" id="sec-winners"><h2>🏆 Winners (best-clicked this week)</h2>
 <ul>{winners_html}</ul></section>
-<section class="card"><h2>Deals (real price drops)</h2>
+<section class="card" id="sec-deals"><h2>🏷 Deals (real price drops)</h2>
 <ul>{deals_html}</ul></section>
-<section class="card"><h2>Referrers (re-enrollment)</h2>
-<table><tr><th>Email</th><th>Referrals</th></tr>{ref_rows}</table></section>
-<section class="card"><h2>Quiet niches to prune</h2>
+<section class="card" id="sec-referrers"><h2>🎁 Referrers (re-enrollment)</h2>
+<div class="table-wrap"><table><tr><th>Email</th><th>Referrals</th></tr>{ref_rows}</table></div></section>
+<section class="card" id="sec-prune"><h2>🧹 Quiet niches to prune</h2>
 <ul>{prune_html}</ul>
 <p class="hint">pick_prune reports niches with &lt;{weeklydigest.DEFAULT_PRUNE_MIN_CLICKS} clicks and ≥{weeklydigest.DEFAULT_PRUNE_QUIET_DAYS} days quiet. With auto-pause ON they are silently dropped from the money set; Resume brings a niche back.</p></section>
-<section class="card"><h2>Pruned (paused) niches</h2>
-<table><tr><th>Niche</th><th>Paused since</th><th></th></tr>{pruned_html}</table>
+<section class="card" id="sec-pruned"><h2>⏸ Pruned (paused) niches</h2>
+<div class="table-wrap"><table><tr><th>Niche</th><th>Paused since</th><th></th></tr>{pruned_html}</table></div>
 <p class="hint">{autoprune_btn}</p></section>
-<section class="card"><h2>Gate (sent weeks)</h2>
-<table><tr><th>Niche</th><th>Last sent week</th></tr>{gate_html}</table></section>
-<section class="card"><h2>Money-step A/B (permanent matchup)</h2>
+<section class="card" id="sec-gate"><h2>📅 Gate (sent weeks)</h2>
+<div class="table-wrap"><table><tr><th>Niche</th><th>Last sent week</th></tr>{gate_html}</table></div></section>
+<section class="card" id="sec-money"><h2>⚗️ Money-step A/B (permanent matchup)</h2>
 <div id="mvtop" style="font-size:13px;color:#6b7280;margin-bottom:8px">Loading…</div>
 <div id="mvwrap"></div>
 <p class="hint">Daily-school the ONE tracked hop: each subscriber is pinned to a subject + hero-CTA variant forever (cohort split on first send), and the opens/clicks below crown the money winner. Run the matchup on your highest-earning niche.</p></section>
-<section class="card"><h2>Actions</h2>
+<section class="card" id="sec-actions"><h2>🚀 Actions</h2>
 <div class="actions">
 <button class="warm" onclick="sendNow()">Send now (this week)</button>
 <button onclick="sendDry()">Dry run</button>
@@ -14090,6 +14126,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
 <div id="out"></div></section>
 </main>
 <footer>Weekly money digest — never indexed. <a href="/admin/logout">Log out</a> when done.</footer>
+{_TOTOP}
 </body></html>"""
         js = """async function sendNow(){const m=document.querySelector('#msg');
 m.textContent='Sending…';let r,d;
@@ -14134,7 +14171,8 @@ function mvBind(kw, rows, st){
     del.onclick=()=>mvDel(kw, r.variant);btd.appendChild(del);tr.appendChild(btd);
     table.appendChild(tr);
   }
-  wrap.appendChild(table);
+  const tc=document.createElement('div');tc.className='table-wrap';tc.appendChild(table);
+  wrap.appendChild(tc);
   const bar=document.createElement('div');bar.className='actions';
   const add=document.createElement('button');add.textContent='+ variant';add.onclick=()=>mvAdd(kw, table);bar.appendChild(add);
   const save=document.createElement('button');save.className='warm';save.textContent='Save '+kw;save.onclick=()=>mvSave(kw, table, save);bar.appendChild(save);
@@ -14177,7 +14215,10 @@ async function mvDel(kw, v){const m=document.querySelector('#msg');let r,d;
  try{r=await fetch('/api/weeklydigest/money/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keyword:kw,variant:v})});d=await r.json();}catch(e){m.textContent='✗ Server unreachable.';return;}
  m.textContent=(d.ok?'+ Deleted #'+v+' of '+kw:'✗ '+((d&&d.error)||'fail'));mvLoad();}
 mvLoad();"""
-        return self._send(200, (body + "<script>%s</script>" % js).encode("utf-8"),
+        return self._send(200, (body
+                                + "<script src='/section-nav.js' defer></script>"
+                                + "<script src='/table-flow.js' defer></script>"
+                                + "<script>%s</script>" % js).encode("utf-8"),
                           "text/html; charset=utf-8")
 
     def _pricedrop_api(self):
@@ -14465,7 +14506,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
 <p id="cfg-status" class="msg"></p></section>
 <section class="card"><h2>🏷 Watched prices</h2>
 <p class="hint">Baselines are stored on first sight. A drop of &ge; {pricedrop.DEFAULT_MIN_DROP_PCT}% and &ge; ${pricedrop.DEFAULT_MIN_DROP_ABS} counts as a real deal.</p>
-<table><thead><tr><th>ASIN</th><th class="ct">Baseline</th></tr></thead><tbody>{rows}</tbody></table>
+<div class="table-wrap"><table><thead><tr><th>ASIN</th><th class="ct">Baseline</th></tr></thead><tbody>{rows}</tbody></table></div>
 <p class="hint" style="margin-top:12px"><b>Run a check</b> to re-scrape current prices and flag who just dropped:</p>
 <div class="actions" role="group" aria-label="Price-drop actions">
 <button class="warm" onclick="runCheck()">🔄 Run price-drop check</button>
@@ -16354,8 +16395,50 @@ AI status: {"<b>configured</b> (%s · %s)" % (seo._clean(_active), seo._clean(ai
             pin_clicks = conn.execute(
                 "SELECT COUNT(*) c FROM clicks WHERE source IN ('pinterest','pin')"
             ).fetchone()["c"]
+            pricewatch_count = conn.execute(
+                "SELECT COUNT(*) c FROM pricewatch").fetchone()["c"]
+            paid_tag_clicks = conn.execute(
+                "SELECT COUNT(*) c FROM clicks WHERE tag != '' "
+                "AND tag != COALESCE((SELECT value FROM settings "
+                "WHERE key='paid.tag'), '') AND source='paid' AND tag LIKE '%-20'").fetchone()["c"]
+            social_per_platform = [dict(r) for r in conn.execute(
+                "SELECT COALESCE(NULLIF(platform,''),'unknown') platform, "
+                "COUNT(*) c, "
+                "SUM(CASE WHEN created_at >= datetime('now','-7 days') THEN 1 ELSE 0 END) c7 "
+                "FROM social_posts WHERE status='published' "
+                "GROUP BY platform ORDER BY c DESC")]
             conn.close()
         feed_stats = self._feed_stats()
+        # Money-engine integrations: weekly digest picks, money-step A/B, native
+        # telegram + referral loop, price-drop watch — so the money moves are all
+        # visible in the one review screen, not scattered across five hubs.
+        wd_picks = {}
+        try:
+            wd_picks = {
+                "winners": weeklydigest.pick_winners(_wd_winner_rows()),
+                "deals": weeklydigest.pick_deals(
+                    _wd_deal_rows(),
+                    min_drop_pct=_weeklydigest_cfg().get("min_drop_pct", 12.0)),
+                "referrers": weeklydigest.pick_referrers(_wd_referrer_rows()),
+                "prune": weeklydigest.pick_prune(_wd_prune_rows()),
+                "state": self._weeklydigest_state(),
+                "pruned": _wd_pruned_state(),
+            }
+        except Exception:
+            wd_picks = {}
+        money_winners = []
+        try:
+            for mt in self._top_money_niches(limit=3):
+                st = self._money_step_stats(mt["keyword"])
+                if st and st.get("winner"):
+                    money_winners.append((mt["keyword"], st["winner"]))
+        except Exception:
+            money_winners = []
+            tg_count = 0
+        try:
+            tg_count = len(telegram_admin._tg_subs(self) or [])
+        except Exception:
+            tg_count = 0
         # Earnings estimate from the recorded click volume + config, plus the
         # real orders/earnings logged straight from the Associates dashboard.
         est = earnings.estimate(total, "")
@@ -16417,6 +16500,84 @@ AI status: {"<b>configured</b> (%s · %s)" % (seo._clean(_active), seo._clean(ai
             "<tr style='font-weight:700'><td>All engines</td><td class='ct'>%d</td>"
             "<td class='ct'>%d</td><td class='ct'></td><td class='ct'></td>"
             "<td class='hint'>last 28d</td></tr>" % (console_clicks, console_impressions))
+
+        # ---- money-engine integration cards (weekly digest + native channels) ----
+        _wk = (wd_picks or {}).get("state") or {}
+        _pr = (wd_picks or {}).get("pruned") or {}
+        _wd_win = (wd_picks or {}).get("winners") or []
+        _wd_deal = (wd_picks or {}).get("deals") or []
+        _wd_ref = (wd_picks or {}).get("referrers") or []
+        _wd_prn = (wd_picks or {}).get("prune") or []
+        _wdw_rows = (
+            "".join("<tr><td>%s</td><td class='ct'>%d</td></tr>"
+                    % (seo._clean(w.get("slug") or w.get("keyword") or "?"), w.get("clicks") or 0)
+                    for w in _wd_win[:8])
+            or "<tr><td colspan='2' class='hint'>No week champions yet — tap a money niche's “Send” on the weekly digest and winners appear here.</td></tr>")
+        _wdd_rows = (
+            "".join("<tr><td>%s</td><td>%s</td><td class='ct'>-%.0f%%</td>"
+                    "<td class='ct'>$%.2f → $%.2f</td></tr>"
+                    % (seo._clean(d.get("slug") or "?"), seo._clean(d.get("title") or ""),
+                       d.get("drop_pct") or 0, d.get("old") or 0, d.get("new") or 0)
+                    for d in _wd_deal[:6])
+            or "<tr><td colspan='4' class='hint'>No real drops this week (min %.0f%%).</td></tr>"
+                % pricedrop.DEFAULT_MIN_DROP_PCT)
+        _wdr_rows = (
+            "".join("<tr><td>%s</td><td class='ct'>%d</td></tr>"
+                    % (seo._clean(r.get("email") or "?"), r.get("referrals") or 0)
+                    for r in _wd_ref[:8])
+            or "<tr><td colspan='2' class='hint'>No referrers at threshold yet.</td></tr>")
+        _pchip = (
+            "".join("<a class='chip' href='/admin/weeklydigest#sec-prune'>%s</a>"
+                    % seo._clean(p.get("keyword") or "?") for p in _wd_prn[:6])
+            or "<span class='hint'>No quiet niches — the money set is healthy.</span>")
+        _pslip = (
+            "".join("<tr><td>%s</td><td class='ct'>%s</td><td class='ct'>%s</td></tr>"
+                    % (seo._clean(s.get("platform") or "?"), int(s.get("c7") or 0),
+                       int(s.get("c") or 0))
+                    for s in social_per_platform)
+            or "<tr><td colspan='3' class='hint'>No social posts published yet.</td></tr>")
+        _wic = _weeklydigest_cfg()
+        _wd_status = _wk.get("status") or "idle"
+        _wd_last = str(_wk.get("last_run") or "never")
+        _wd_sent = int(_wk.get("sent") or 0)
+        _mvwin = "".join(
+            "<tr><td>%s</td><td>#%s</td><td class='ct'>%.1f%%</td></tr>"
+            % (seo._clean(kw), str(v.get("variant")), v.get("ctr") or 0.0)
+            for kw, v in money_winners)
+        if not _mvwin:
+            _mvwin = "<tr><td colspan='3' class='hint'>No match-ups crowned yet — seed on /admin/weeklydigest.</td></tr>"
+        _pruned_on = _get_setting(_WEEKLYDIGEST_AUTOPRUNE_KEY, "1") or "1"
+        wd_money_html = f"""<section class="card" id="sec-weekly">
+<h2>💌 Weekly money digest <span style="font-size:13px;color:#9aa0ad">Week {seo._clean(_wk.get('week') or weeklydigest._iso_week())}</span></h2>
+<div class="row" style="align-items:stretch">
+  <div class="feature"><h3>{seo._clean(_wd_status)}</h3><p class="hint">last run: {seo._clean(_wd_last)}</p></div>
+  <div class="feature"><h3>{_wd_sent}</h3><p class="hint">emails sent this week</p></div>
+  <div class="feature"><h3>{len(_wd_win)}</h3><p class="hint">money winners picked</p></div>
+  <div class="feature"><h3>{len(_wd_deal)}</h3><p class="hint">real price drops</p></div>
+  <div class="feature"><h3>{len(_wd_ref)}</h3><p class="hint">referrers to re-enroll</p></div>
+</div>
+<div class="row" style="align-items:stretch">
+  <div class="feature"><h3>{len(_pr)}</h3><p class="hint">niches auto-paused (prune {'ON' if _pruned_on.strip()!='0' else 'OFF'})</p></div>
+  <div class="feature"><h3>Week {seo._clean(str(_wic.get('day') or '?'))}-{seo._clean(str(_wic.get('hour') or '?'))}</h3><p class="hint">next auto-send window (day-hour, UTC)</p></div>
+  <div class="feature"><h3>{tg_count}</h3><p class="hint">telegram subscribers (native)</p></div>
+  <div class="feature"><h3>{pricewatch_count}</h3><p class="hint">prices watched (price-drop)</p></div>
+</div>
+<div class="row" style="align-items:stretch">
+  <div class="feature"><h3>🏆 Champions</h3><div class="table-wrap"><table class="plain"><thead><tr><th>Niche</th><th>Clicks</th></tr></thead><tbody>{_wdw_rows}</tbody></table></div></div>
+  <div class="feature"><h3>🏷 Deals</h3><div class="table-wrap"><table class="plain"><thead><tr><th>Niche</th><th>Title</th><th>Drop</th><th>Price</th></tr></thead><tbody>{_wdd_rows}</tbody></table></div></div>
+  <div class="feature"><h3>🎁 Referral loop</h3><div class="table-wrap"><table class="plain"><thead><tr><th>Email</th><th>Referrals</th></tr></thead><tbody>{_wdr_rows}</tbody></table></div></div></div>
+<p class="hint" style="margin-top:8px">Quiet-zone prune candidates: {_pchip}</p>
+<div class="actions"><a class="btn" href="/admin/weeklydigest">Open weekly digest hub</a></div>
+</section>
+<section class="card" id="sec-mv"><h2>⚗️ Money-step A/B <span style="font-size:13px;color:#9aa0ad">permanent cohort match-ups</span></h2>
+<div class="table-wrap"><table class="plain"><thead><tr><th>Niche</th><th>Winning variant</th><th>CTR</th></tr></thead><tbody>{_mvwin}</tbody></table></div>
+<div class="actions"><a class="btn" href="/admin/weeklydigest#sec-money">Open A/B hub</a></div>
+</section>
+<section class="card" id="sec-social"><h2>📣 Native channel delivery <span style="font-size:13px;color:#9aa0ad">published per platform</span></h2>
+<div class="table-wrap"><table class="plain"><thead><tr><th>Platform</th><th>7d</th><th>All-time</th></tr></thead><tbody>{_pslip}</tbody></table></div>
+<div class="actions"><a class="btn" href="/admin/social">Open social hub</a></div>
+</section>
+"""
         body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Analytics — pstore</title><link rel="stylesheet" href="/style.css">
@@ -16444,6 +16605,7 @@ AI status: {"<b>configured</b> (%s · %s)" % (seo._clean(_active), seo._clean(ai
   <div class="feature"><h3>{pin_clicks}</h3><p class="hint">pinterest-source clicks</p></div>
   <div class="feature"><h3>{seo._clean(feed_stats['newest'] or 'never')}</h3><p class="hint">newest feed item</p></div>
 </div></section>
+{wd_money_html}
 <section class="card"><h2>🔎 Console impressions &amp; clicks</h2>
 <p class="hint">Real search-console totals from Google Search Console, Bing Webmaster and Yandex Webmaster (whichever you've connected and synced). Your own referrer-attributed clicks sit alongside for context.</p>
 <div class="row" style="align-items:stretch">
@@ -16495,6 +16657,7 @@ AI status: {"<b>configured</b> (%s · %s)" % (seo._clean(_active), seo._clean(ai
 <div class="table-wrap"><table class="plain"><thead><tr><th>Niche</th><th>Source</th><th>Referrer</th><th>When</th></tr></thead><tbody>{recent_rows}</tbody></table></div></section>
 </main>
 <footer><p>Views + interactions are captured privacy-first (IP hashes only) via /api/pageview; clicks via /api/track. Promo/countdown/sticky/gate elements are auto-tagged so you can see exactly which page behavior earns engagement and conversions.</p></footer>
+<script src="/section-nav.js" defer></script>
 <script src="/table-flow.js" defer></script>
 <script>
 const $=s=>document.getElementById(s);

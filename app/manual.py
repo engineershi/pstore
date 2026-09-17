@@ -522,6 +522,14 @@ def _chapters():
     def c14(doc, num, label, blurb):
         doc.chapter(num, label, blurb)
         doc.paragraph(
+            "Analytics is the money-review screen: alongside clicks, views, sources "
+            "and console totals it now pulls every money-facing integration into "
+            "its own card — the weekly money digest (winners, real price drops, "
+            "referrers to re-enroll, quiet-zone prune calls, auto-pause state), the "
+            "money-step A/B champion per niche, native channel delivery (telegram "
+            "subscribers, published-per-platform) and the price-drop watch count — so "
+            "you see the whole machine's ROI without hopping hubs.")
+        doc.paragraph(
             "pstore was conceived, architected and built from scratch by " + F + " - "
             "one software engineer, one codebase, and not a single third-party "
             "library. The whole machine you hold in your hands is hand-written "
@@ -563,6 +571,13 @@ def _chapters():
             "last-seen time and latency per route — so data fetch endpoints show "
             "honestly rather than going unmonitored — and a tweet of every tracked "
             "API's state redraws automatically every few seconds.")
+        doc.paragraph(
+            "The weekly money digest is a first-class citizen of the console: its "
+            "heartbeat card reports last-run status, the schedule row shows the "
+            "weekly send window, and an auto-paused/custom config surfaces as "
+            "'disabled' instead of a false alarm. The End-to-end doctor card jumps "
+            "straight to the live crawl of the site + connected engines on "
+            "/admin/seoengines, so a failing engine is never more than one click away.")
         doc.paragraph(
             "Wave B queues add sub-interests, A/B matchups, lead-gate subscribes, "
             "gate conversion rate and nudge impressions so the email + capture "
