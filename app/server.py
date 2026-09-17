@@ -376,7 +376,10 @@ FUNCTION_PATHS = {
     "marketing": ("/admin/funnel", "/admin/marketing", "/admin/variants",
                   "/admin/segments", "/admin/pricedrop", "/admin/template",
                   "/admin/weeklydigest", "/api/weeklydigest", "/api/weeklydigest/run",
-                  "/api/weeklydigest/unprune",
+                  "/api/weeklydigest/unprune", "/api/weeklydigest/autoprune",
+                  "/api/weeklydigest/money", "/api/weeklydigest/money/save",
+                  "/api/weeklydigest/money/autoconfig",
+                  "/api/weeklydigest/money/delete",
                   "/api/funnel", "/api/marketing", "/api/boosts", "/api/variants",
                   "/api/segments", "/api/pricedrop", "/api/tools", "/api/template",
                   "/api/earnings", "/api/subjects"),
@@ -725,6 +728,8 @@ _WEEKLYDIGEST_DAY = 1  # ISO weekday the weekly money email goes out (1=Monday)
 _WEEKLYDIGEST_HOUR = 9  # UTC hour of day it fires
 _WEEKLYDIGEST_AUTOPRUNE_KEY = "weeklydigest.autoprune"  # "0" to disable auto-pause
 _WEEKLYDIGEST_PRUNED_KEY = "weeklydigest.pruned"       # JSON {keyword_lower: iso_date}
+_WD_MV_PIN_KEY = "weeklydigest.mv.%s"       # JSON {sid: variant} — permanent A/B pin
+_WD_MV_OPEN_IDX = 99                        # digest open-pixel/clicks resolve to this idx
 
 
 def _weeklydigest_cfg():
@@ -775,6 +780,38 @@ def _wd_pruned_state():
 
 def _wd_pruned_save(pruned_map):
     _set_setting(_WEEKLYDIGEST_PRUNED_KEY, json.dumps(pruned_map))
+
+
+def _wd_money_rows(keyword=""):
+    """Configured money-step A/B variants (subject + hero CTA hook) for a niche.
+    Ordered by variant asc; empty hook/subject means 'keep the default copy'."""
+    with _lock:
+        conn = _db()
+        if keyword:
+            rowss = conn.execute(
+                "SELECT variant, subject, hook, enabled FROM money_variants "
+                "WHERE lower(keyword)=? ORDER BY variant ASC",
+                (keyword.strip().lower(),)).fetchall()
+        else:
+            rowss = conn.execute(
+                "SELECT keyword, variant, subject, hook, enabled FROM money_variants "
+                "ORDER BY keyword, variant").fetchall()
+        conn.close()
+    return [dict(r) for r in rowss]
+
+
+def _wd_money_pins(keyword):
+    """Permanent per-subscriber A/B assignment: {sid_str: variant_idx}."""
+    try:
+        data = json.loads(_get_setting(_WD_MV_PIN_KEY % keyword.strip().lower())
+                          or "{}") or {}
+    except Exception:
+        data = {}
+    return {str(k): int(v) for k, v in data.items()}
+
+
+def _wd_money_pins_save(keyword, pins):
+    _set_setting(_WD_MV_PIN_KEY % keyword.strip().lower(), json.dumps(pins))
 
 
 def _autosend_cfg():
@@ -2966,6 +3003,16 @@ def _ensure_db_schema(conn):
         created_at TEXT DEFAULT (datetime('now')),
         UNIQUE(keyword, email_index, variant)
     )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS money_variants (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        keyword TEXT NOT NULL,
+        variant INTEGER DEFAULT 1,
+        subject TEXT,
+        hook TEXT,
+        enabled INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(keyword, variant)
+    )""")
     conn.execute("""CREATE TABLE IF NOT EXISTS social_captions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         slug TEXT NOT NULL,
@@ -4983,6 +5030,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._admin_weeklydigest(q)
             if path == "/api/weeklydigest":
                 return self._weeklydigest_api()
+            if path == "/api/weeklydigest/money":
+                return self._weeklydigest_money_api()
             if path == "/admin/apikeys":
                 return self._admin_apikeys(q)
             if path == "/admin/opportunities":
@@ -5287,6 +5336,12 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._weeklydigest_unprune()
             if parsed.path == "/api/weeklydigest/autoprune":
                 return self._weeklydigest_autoprune_toggle()
+            if parsed.path == "/api/weeklydigest/money/save":
+                return self._weeklydigest_money_save()
+            if parsed.path == "/api/weeklydigest/money/autoconfig":
+                return self._weeklydigest_money_autoconfig()
+            if parsed.path == "/api/weeklydigest/money/delete":
+                return self._weeklydigest_money_delete()
             if parsed.path == "/api/segments/reengage":
                 return self._send(200, self._reengage_cold())
             if parsed.path == "/api/subjects/save":
@@ -13601,6 +13656,121 @@ database — no log parsing. If a card stays STALE, the worker has stopped beati
                                          force=bool(force), dry=bool(dry))
         return self._send(200, res or {"ok": False, "error": "no result"})
 
+    def _money_pick(self, rows, pins, sub_id):
+        """Pure money-step A/B pick for a subscriber from the enabled variant
+        rows: first assignment splits the cohort by id % n, then the pin map
+        freezes it forever so the matchup stays permanently matched. `pins` is
+        updated in place (the caller persists it after a real send)."""
+        if not rows:
+            return None, pins
+        sid = str(sub_id or 0)
+        n = len(rows)
+        idx = pins.get(sid)
+        if idx is None:
+            idx = (int(sid or 0) % n) if n else 0
+            pins[sid] = idx
+        elif idx >= n:
+            idx = n - 1
+            pins[sid] = idx
+        row = rows[idx]
+        return {"variant": row["variant"], "idx": idx,
+                "subject": (row.get("subject") or "").strip(),
+                "hook": (row.get("hook") or "").strip()}, pins
+
+    def _weeklydigest_money_api(self):
+        """Scoreboard + editor data for the money-step A/B (MME-10): the top
+        money niches (by tracked clicks), every configured variant, and the
+        per-variant sent/opened/clicked/CTR so the permanent matchup has truth."""
+        top = self._top_money_niches()
+        kws = sorted({r["keyword"] for r in _wd_money_rows()}
+                     | {t["keyword"] for t in top})
+        variants = {}
+        stats = {}
+        for kw in kws:
+            rows = _wd_money_rows(kw)
+            variants[kw] = rows
+            stats[kw] = self._money_step_stats(kw)
+        return self._send(200, {"ok": True, "top": top, "variants": variants,
+                                "stats": stats})
+
+    def _weeklydigest_money_save(self):
+        """Upsert money-step variants for a niche ({keyword, variants:[...]}).
+        Empty subject/hook mean 'keep the default copy'; enabled=0 parks a
+        variant for the archive without deleting its pinned cohort."""
+        body = self._body()
+        kw = (body.get("keyword") or "").strip().lower()
+        items = body.get("variants") or []
+        if not kw:
+            return self._send(200, {"ok": False, "error": "keyword required"})
+        with _lock:
+            conn = _db()
+            for it in items:
+                try:
+                    variant = int(it.get("variant") or 1)
+                except Exception:
+                    variant = 1
+                subject = str(it.get("subject") or "")[:200]
+                hook = str(it.get("hook") or "")[:200]
+                enabled = 1 if it.get("enabled", True) else 0
+                conn.execute(
+                    "INSERT INTO money_variants (keyword, variant, subject, hook, enabled) "
+                    "VALUES (?,?,?,?,?) "
+                    "ON CONFLICT(keyword, variant) DO UPDATE SET "
+                    "subject=excluded.subject, hook=excluded.hook, "
+                    "enabled=excluded.enabled",
+                    (kw, variant, subject, hook, enabled))
+            conn.commit()
+            conn.close()
+        return self._send(200, {"ok": True, "keyword": kw,
+                                "variants": _wd_money_rows(kw)})
+
+    def _weeklydigest_money_autoconfig(self):
+        """Seed the permanent matchup on a niche: two default money-step
+        variants (subject + hero CTA) unless the niche already has any."""
+        kw = (self._body().get("keyword") or "").strip().lower()
+        if not kw:
+            top = self._top_money_niches(1)
+            if not top:
+                return self._send(200, {"ok": False,
+                                        "error": "no niches to match on yet"})
+            kw = top[0]["keyword"]
+        if _wd_money_rows(kw):
+            return self._send(200, {"ok": True, "keyword": kw, "seeded": False,
+                                    "variants": _wd_money_rows(kw)})
+        with _lock:
+            conn = _db()
+            conn.execute(
+                "INSERT INTO money_variants (keyword, variant, subject, hook, enabled) "
+                "VALUES (?,1,'',?,1), (?,2,'',?,1)",
+                (kw, "best-clicked this week; open it in the email",
+                 kw, "grab today's best pick before it's gone"))
+            conn.commit()
+            conn.close()
+        return self._send(200, {"ok": True, "keyword": kw, "seeded": True,
+                                "variants": _wd_money_rows(kw)})
+
+    def _weeklydigest_money_delete(self):
+        """Remove a money-step variant for a niche (pinned cohorts keep their
+        variant assignment in the archive; deleting everything restores the
+        default copy for everyone)."""
+        body = self._body()
+        kw = (body.get("keyword") or "").strip().lower()
+        try:
+            variant = int(body.get("variant") or 0)
+        except Exception:
+            variant = 0
+        if not kw or not variant:
+            return self._send(200, {"ok": False, "error": "keyword+variant required"})
+        with _lock:
+            conn = _db()
+            conn.execute("DELETE FROM money_variants "
+                         "WHERE lower(keyword)=? AND variant=?",
+                         (kw, variant))
+            conn.commit()
+            conn.close()
+        return self._send(200, {"ok": True, "keyword": kw,
+                                "variants": _wd_money_rows(kw)})
+
     def _weeklydigest_unprune(self):
         """Resume an auto-paused niche: drop it from the pruned map and clear
         its digest gate so the next cycle re-emails it."""
@@ -13625,6 +13795,103 @@ database — no log parsing. If a card stays STALE, the worker has stopped beati
         _set_setting(_WEEKLYDIGEST_AUTOPRUNE_KEY, "1" if on else "0")
         return self._send(200, {"ok": True, "enabled": on,
                                 "autoprune": on})
+
+    def _money_step_stats(self, kw):
+        """Per-variant sent/opened/clicked/CTR for the weekly money digest on a
+        niche. Digest touchpoints are the open pixel + tracked /e/ hop, both of
+        which resolve to email_index 99 (open) / the '|99' referrer (click), so
+        opens/clicks are attributed back to each variant via the permanent pin."""
+        import collections as _co
+        kw_l = (kw or "").strip().lower()
+        rows = _wd_money_rows(kw_l)
+        if not rows:
+            return {"keyword": kw_l, "variants": [], "winner": None}
+        pins = _wd_money_pins(kw_l)
+        n = len(rows)
+
+        def assign(sid):
+            idx = pins.get(str(sid))
+            if idx is None:
+                idx = (int(sid or 0) % n) if n else 0
+            return idx if idx < n else n - 1
+
+        sent = _co.Counter()
+        opened = _co.Counter()
+        clicked = _co.Counter()
+        with _lock:
+            conn = _db()
+            for r in conn.execute(
+                    "SELECT DISTINCT subscriber_id FROM email_sends "
+                    "WHERE lower(keyword)=? AND campaign LIKE 'weeklydigest:%'",
+                    (kw_l,)).fetchall():
+                sent[assign(r["subscriber_id"])] += 1
+            for r in conn.execute(
+                    "SELECT subscriber_id FROM email_events "
+                    "WHERE lower(keyword)=? AND type='open' AND email_index=?",
+                    (kw_l, _WD_MV_OPEN_IDX)).fetchall():
+                opened[assign(r["subscriber_id"])] += 1
+            for r in conn.execute(
+                    "SELECT referrer FROM clicks WHERE slug=? AND source='email' "
+                    "AND content='email' AND referrer LIKE ?",
+                    (seo._slugify(kw_l), "%|" + str(_WD_MV_OPEN_IDX))).fetchall():
+                sid = (r["referrer"] or "").split("|")[0]
+                if sid.isdigit():
+                    clicked[assign(int(sid))] += 1
+            conn.close()
+        out = []
+        for idx, row in enumerate(rows):
+            s, o, c = sent[idx], opened[idx], clicked[idx]
+            out.append({
+                "variant": row["variant"], "idx": idx,
+                "subject": row.get("subject") or "",
+                "hook": row.get("hook") or "",
+                "enabled": bool(row.get("enabled")),
+                "sent": s, "opened": o, "opened_pct": round(o * 100.0 / s, 1) if s else 0.0,
+                "clicked": c, "ctr": round(c * 100.0 / s, 1) if s else 0.0,
+            })
+        winner = max((v for v in out if v["sent"] > 4 and v["enabled"]),
+                     key=lambda v: v["ctr"], default=None)
+        return {"keyword": kw_l, "variants": out,
+                "winner": winner and {"variant": winner["variant"],
+                                      "ctr": winner["ctr"],
+                                      "subject": winner["subject"],
+                                      "hook": winner["hook"]}}
+
+    def _top_money_niches(self, limit=3):
+        """Rank saved niches by total money clicks (tracked ASIN hops) — the
+        best proxy this app has for 'highest-earning niche', which is where the
+        permanent matchup should live."""
+        parent_for = {}
+        try:
+            with _lock:
+                conn = _db()
+                for tr in conn.execute(
+                        "SELECT parent_slug, slug FROM topics").fetchall():
+                    parent_for[tr["slug"]] = tr["parent_slug"]
+                conn.close()
+        except Exception:
+            pass
+        kw_for = {}
+        for n in _niches_rows():
+            kw_for[seo._slugify(n["keyword"])] = n["keyword"]
+        with _lock:
+            conn = _db()
+            rowss = conn.execute(
+                "SELECT slug, COUNT(*) AS c FROM clicks "
+                "WHERE asin != '' AND slug != '' "
+                "GROUP BY slug ORDER BY c DESC, slug ASC LIMIT ?",
+                (max(1, int(limit or 1)),)).fetchall()
+            conn.close()
+        out, used = [], set()
+        for r in rowss:
+            parent = parent_for.get(r["slug"], r["slug"])
+            kw = kw_for.get(parent)
+            if not kw or kw in used:
+                continue
+            used.add(kw)
+            out.append({"keyword": kw, "slug": parent,
+                        "clicks": int(r["c"])})
+        return out
 
     def _admin_weeklydigest(self, q):
         state = self._weeklydigest_state()
@@ -13711,6 +13978,10 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
 <p class="hint">{autoprune_btn}</p></section>
 <section class="card"><h2>Gate (sent weeks)</h2>
 <table><tr><th>Niche</th><th>Last sent week</th></tr>{gate_html}</table></section>
+<section class="card"><h2>Money-step A/B (permanent matchup)</h2>
+<div id="mvtop" style="font-size:13px;color:#6b7280;margin-bottom:8px">Loading…</div>
+<div id="mvwrap"></div>
+<p class="hint">Daily-school the ONE tracked hop: each subscriber is pinned to a subject + hero-CTA variant forever (cohort split on first send), and the opens/clicks below crown the money winner. Run the matchup on your highest-earning niche.</p></section>
 <section class="card"><h2>Actions</h2>
 <div class="actions">
 <button class="warm" onclick="sendNow()">Send now (this week)</button>
@@ -13736,7 +14007,77 @@ m.textContent=(d.ok?'+ Resumed — next cycle re-emails it':'✗ '+((d&&d.error)
 async function toggleAp(){const m=document.querySelector('#msg');const b=document.querySelector('#apbtn');
 const on=!b.classList.contains('on');m.textContent='Saving…';let r,d;
 try{r=await fetch('/api/weeklydigest/autoprune',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:on})});d=await r.json();}catch(e){m.textContent='✗ Server unreachable.';return;}
-m.textContent=(d.ok?'+ Auto-pause '+(on?'ON':'OFF'):'✗ '+((d&&d.error)||'fail'));setTimeout(()=>location.reload(),600);}"""
+m.textContent=(d.ok?'+ Auto-pause '+(on?'ON':'OFF'):'✗ '+((d&&d.error)||'fail'));setTimeout(()=>location.reload(),600);}
+/* ---- MME-10 money-step A/B editor (client-rendered from /api/weeklydigest/money) */
+function mvCell(txt){const t=document.createElement('td');t.textContent=txt;return t;}
+function mvBind(kw, rows, st){
+  const w=document.querySelector('#mvwrap');const wrap=document.createElement('div');
+  wrap.className='card';wrap.setAttribute('data-kw', kw);
+  const h=document.createElement('h3');h.textContent=kw;wrap.appendChild(h);
+  const table=document.createElement('table');table.className='mvt';
+  const thead=document.createElement('tr');
+  ['Variant','Subject (blank=default)','Hero CTA (blank=default)','On','Sent','Opened%','CTR%',''].forEach(x=>{const th=document.createElement('th');th.textContent=x;thead.appendChild(th);});
+  table.appendChild(thead);
+  const win=(st&&st.winner)||null;
+  const all=rows&&rows.length?rows:[{variant:1,subject:'',hook:'',enabled:true}];
+  for(const r of all){
+    const s=(st&&st.variants||[]).find(x=>x.variant===r.variant)||{};
+    const tr=document.createElement('tr');tr.className='mvrow';tr.setAttribute('data-v',String(r.variant));
+    const vtd=mvCell(win&&win.variant===r.variant?('#'+r.variant+' 🏆'):('#'+r.variant));tr.appendChild(vtd);
+    for(const cls of ['mvsub','mvhook']){
+      const t=document.createElement('td');const inp=document.createElement('input');inp.className=cls;
+      inp.value=r[cls==='mvsub'?'subject':'hook']||'';t.appendChild(inp);tr.appendChild(t);
+    }
+    const t=document.createElement('td');const cb=document.createElement('input');cb.type='checkbox';cb.className='mvon';
+    cb.checked=!(r.enabled===false);t.appendChild(cb);tr.appendChild(t);
+    tr.appendChild(mvCell(String(s.sent||0)));tr.appendChild(mvCell(String(s.opened_pct||0)));tr.appendChild(mvCell(String(s.ctr||0)));
+    const btd=document.createElement('td');const del=document.createElement('button');del.textContent='Del';
+    del.onclick=()=>mvDel(kw, r.variant);btd.appendChild(del);tr.appendChild(btd);
+    table.appendChild(tr);
+  }
+  wrap.appendChild(table);
+  const bar=document.createElement('div');bar.className='actions';
+  const add=document.createElement('button');add.textContent='+ variant';add.onclick=()=>mvAdd(kw, table);bar.appendChild(add);
+  const save=document.createElement('button');save.className='warm';save.textContent='Save '+kw;save.onclick=()=>mvSave(kw, table, save);bar.appendChild(save);
+  wrap.appendChild(bar);w.appendChild(wrap);
+}
+async function mvLoad(){
+  const m=document.querySelector('#msg');let d;
+  try{const r=await fetch('/api/weeklydigest/money');d=await r.json();}catch(e){m.textContent='✗ Server unreachable.';return;}
+  if(!d||!d.ok){m.textContent='✗ '+((d&&d.error)||'fail');return;}
+  const el=document.querySelector('#mvtop');el.textContent='';
+  const seed=document.createElement('button');seed.className='warm';seed.textContent='Seed matchup on top money niche';
+  seed.onclick=()=>mvAuto(seed);el.appendChild(seed);
+  const lbl=document.createElement('span');lbl.style.fontSize='12px';lbl.style.color='#6b7280';
+  lbl.textContent=' Top money niche: '+((d.top||[]).map(t=>t.keyword+' ('+t.clicks+' clicks)').join(' · ')||'—');
+  el.appendChild(lbl);
+  const w=document.querySelector('#mvwrap');w.textContent='';
+  let kws=Object.keys(d.variants||{});
+  if(!kws.length) kws=(d.top||[]).map(t=>t.keyword);
+  kws=kws.slice(0,8);
+  if(!kws.length){w.innerHTML='<p class="hint">No money niches yet — seed one above, or Save a variant below after configuring defaults.</p>';return;}
+  for(const kw of kws) mvBind(kw, (d.variants&&d.variants[kw])||[], (d.stats&&d.stats[kw])||null);
+}
+async function mvAuto(btn){const m=document.querySelector('#msg');btn.disabled=true;let r,d;
+ try{r=await fetch('/api/weeklydigest/money/autoconfig',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});d=await r.json();}catch(e){m.textContent='✗ Server unreachable.';return;}
+ m.textContent=(d.ok?'+ Seeded on '+(d.keyword||''):'✗ '+((d&&d.error)||'fail'));mvLoad();}
+async function mvSave(kw, table, btn){const m=document.querySelector('#msg');const vs=[];
+ table.querySelectorAll('tr.mvrow').forEach(tr=>{vs.push({variant:parseInt(tr.getAttribute('data-v'),10),subject:tr.querySelector('.mvsub').value,hook:tr.querySelector('.mvhook').value,enabled:tr.querySelector('.mvon').checked});});
+ btn.disabled=true;m.textContent='Saving '+kw+'…';let r,d;
+ try{r=await fetch('/api/weeklydigest/money/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keyword:kw,variants:vs})});d=await r.json();}catch(e){m.textContent='✗ Server unreachable.';return;}
+ m.textContent=(d.ok?'+ Saved '+kw+' — '+vs.length+' variant(s)':'✗ '+((d&&d.error)||'fail'));mvLoad();}
+function mvAdd(kw, table){const vs=[...table.querySelectorAll('tr.mvrow')].map(tr=>parseInt(tr.getAttribute('data-v'),10));const nv=(vs.length?Math.max.apply(null,vs):0)+1;
+ const tr=document.createElement('tr');tr.className='mvrow';tr.setAttribute('data-v',String(nv));
+ tr.appendChild(mvCell('#'+nv));
+ for(const cls of ['mvsub','mvhook']){const t=document.createElement('td');const inp=document.createElement('input');inp.className=cls;t.appendChild(inp);tr.appendChild(t);}
+ const t=document.createElement('td');const cb=document.createElement('input');cb.type='checkbox';cb.className='mvon';cb.checked=true;t.appendChild(cb);tr.appendChild(t);
+ tr.appendChild(mvCell('0'));tr.appendChild(mvCell('0'));tr.appendChild(mvCell('0'));
+ const btd=document.createElement('td');const del=document.createElement('button');del.textContent='Del';del.onclick=()=>mvDel(kw, nv);btd.appendChild(del);tr.appendChild(btd);
+ table.appendChild(tr);}
+async function mvDel(kw, v){const m=document.querySelector('#msg');let r,d;
+ try{r=await fetch('/api/weeklydigest/money/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keyword:kw,variant:v})});d=await r.json();}catch(e){m.textContent='✗ Server unreachable.';return;}
+ m.textContent=(d.ok?'+ Deleted #'+v+' of '+kw:'✗ '+((d&&d.error)||'fail'));mvLoad();}
+mvLoad();"""
         return self._send(200, (body + "<script>%s</script>" % js).encode("utf-8"),
                           "text/html; charset=utf-8")
 
@@ -14469,15 +14810,27 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                 hero_asin = ""
             if not hero_asin and nd and nd[0].get("asin"):
                 hero_asin = nd[0]["asin"]
+            # MONEY-STEP A/B (MME-10): deterministic per-subscriber payout with
+            # a permanent pin so the matchup never re-randomizes mid-flight.
+            mrows = [r for r in _wd_money_rows(niche) if r.get("enabled")]
+            pins = _wd_money_pins(niche) if mrows else {}
+            pinned = False
             for sub in members:
                 if self._already_sent("weeklydigest:" + week, sub["id"]):
                     already += 1
                     continue
                 name = (sub.get("first_name") or "").strip() or "there"
                 mref = [r for r in referrers if r["email"] == sub["email"]]
+                mvar = None
+                if mrows:
+                    mvar, pins = self._money_pick(mrows, pins, sub["id"])
+                    if not dry:
+                        pinned = True
                 mail = weeklydigest.digest_email(
                     niche, nw, nd, referrers=mref, week=week,
-                    base_url=os.environ.get("PSTORE_URL", ""))
+                    base_url=os.environ.get("PSTORE_URL", ""),
+                    subject=(mvar or {}).get("subject") or "",
+                    hook=(mvar or {}).get("hook") or "")
                 unsub = mailer.unsubscribe_url(sub["email"])
                 link = mailer.tracked_url(niche, hero_asin, sub["id"], 99) \
                     if hero_asin else ""
@@ -14501,6 +14854,8 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                     sent += 1
                 else:
                     errors += 1
+            if pinned and not dry:
+                _wd_money_pins_save(niche, pins)
         for niche in niches:
             if weeklydigest.weekly_gate(niche, last_week=gate.get(niche),
                                         week=week)["due"] or force:

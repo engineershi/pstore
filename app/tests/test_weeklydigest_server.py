@@ -109,6 +109,7 @@ class TestWeeklyDigestServer(unittest.TestCase):
             conn.execute("DELETE FROM niches")
             conn.execute("DELETE FROM pricewatch")
             conn.execute("DELETE FROM email_sends")
+            conn.execute("DELETE FROM money_variants")
             conn.commit()
             conn.close()
         server._set_setting(server._WEEKLYDIGEST_STATE_KEY, "")
@@ -315,6 +316,101 @@ class TestWeeklyDigestServer(unittest.TestCase):
         self.assertNotIn("quiet niche", server._wd_gate_state())
         # untouched niches stay paused
         self.assertIn("keto snacks", server._wd_pruned_state())
+
+    # ------------------------------------------------------------------ MME-10
+    def _mv_save(self, kw, variants):
+        st, _, r = self._raw("/api/weeklydigest/money/save", method="POST",
+                             body=json.dumps({"keyword": kw, "variants": variants}),
+                             cookie=self.cookie)
+        self.assertEqual(st, 200)
+        return json.loads(r)
+
+    def test_weeklydigest_money_ab_split_and_pins(self):
+        """MME-10: two money-step variants split the cohort deterministically,
+        each emitted digest carries the pinned subject+hook, pins persist, and
+        the scoreboard counts every send."""
+        self._seed(n_subs=2)
+        out = self._mv_save("keto snacks", [
+            {"variant": 1, "subject": "ABA subj", "hook": "ABA hook", "enabled": True},
+            {"variant": 2, "subject": "BBC subj", "hook": "BBC hook", "enabled": True}])
+        self.assertTrue(out["ok"], out)
+        captured = []
+        saved_send = mailer.send
+        mailer.send = lambda subject, body, to, attachments=None, pixel_url="", \
+            html="", reply_to="", in_reply_to="": (
+            captured.append({"to": to, "subject": subject, "body": body,
+                             "html": html}) or True)
+        try:
+            st, _, r = self._raw("/api/weeklydigest/run", method="POST",
+                                 body=b'{"force":true}', cookie=self.cookie)
+            self.assertEqual(st, 200)
+            data = json.loads(r)
+            self.assertEqual(data["sent"], 2, data)
+            self.assertEqual(len(captured), 2)
+            for c in captured:
+                self.assertIn(c["subject"], ("ABA subj", "BBC subj"), c)
+                self.assertTrue("ABA hook" in c["body"] or "BBC hook" in c["body"], c)
+                self.assertNotIn("{{tracked_link}}", c["html"])
+            # pins were persisted for BOTH real sends
+            pins = server._wd_money_pins("keto snacks")
+            self.assertEqual(len(pins), 2, pins)
+            # scoreboard counts both sends
+            st, _, r = self._raw("/api/weeklydigest/money", cookie=self.cookie)
+            self.assertEqual(st, 200)
+            info = json.loads(r)
+            sts = info["stats"]["keto snacks"]
+            self.assertEqual(sum(v["sent"] for v in sts["variants"]), 2, sts)
+            self.assertIn("keto snacks", {t["keyword"] for t in info["top"]}, info)
+        finally:
+            mailer.send = saved_send
+
+    def test_weeklydigest_money_stats_counts_opens_clicks(self):
+        """Digest open pixel (idx 99) + the '|99' tracked click attribute back
+        to the pinned variant on the money scoreboard."""
+        self._seed(n_subs=1)
+        out = self._mv_save("keto snacks", [
+            {"variant": 1, "subject": "S1", "hook": "H1", "enabled": True},
+            {"variant": 2, "subject": "S2", "hook": "H2", "enabled": True}])
+        self.assertTrue(out["ok"], out)
+        with server._lock:
+            conn = server._db()
+            sid = conn.execute(
+                "SELECT id FROM subscribers WHERE email='hot0@x'").fetchone()["id"]
+            conn.execute(
+                "INSERT INTO email_events (type, subscriber_id, email_index, keyword, asin) "
+                "VALUES ('open',?,?,?,?)", (sid, server._WD_MV_OPEN_IDX,
+                                            "keto snacks", "B012345678"))
+            conn.execute(
+                "INSERT INTO clicks (slug, source, referrer, asin, content, created_at) "
+                "VALUES ('keto-snacks','email',?,?, 'email', datetime('now'))",
+                ("%s|%d" % (sid, server._WD_MV_OPEN_IDX), "B012345678"))
+            conn.execute(
+                "INSERT INTO email_sends (campaign, subscriber_id, keyword, asin) "
+                "VALUES ('weeklydigest:TEST',?,?, '')", (sid, "keto snacks"))
+            conn.commit()
+            conn.close()
+        st, _, r = self._raw("/api/weeklydigest/money", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        sts = json.loads(r)["stats"]["keto snacks"]
+        self.assertEqual(sum(v["sent"] for v in sts["variants"]), 1, sts)
+        self.assertEqual(sum(v["opened"] for v in sts["variants"]), 1, sts)
+        self.assertEqual(sum(v["clicked"] for v in sts["variants"]), 1, sts)
+
+    def test_weeklydigest_money_autoconfig_seeds_top(self):
+        """One click sets up the permanent matchup on the top money niche with
+        two default variants, readable by the editor."""
+        self._seed(n_subs=1)
+        st, _, r = self._raw("/api/weeklydigest/money/autoconfig", method="POST",
+                             body=b'{}', cookie=self.cookie)
+        self.assertEqual(st, 200)
+        data = json.loads(r)
+        self.assertTrue(data["ok"], data)
+        self.assertEqual(data["keyword"], "keto snacks")
+        self.assertTrue(data["seeded"], data)
+        self.assertEqual(len(data["variants"]), 2, data)
+        st, _, r = self._raw("/api/weeklydigest/money", cookie=self.cookie)
+        info = json.loads(r)
+        self.assertIn("keto snacks", info["variants"], info)
 
 
 if __name__ == "__main__":

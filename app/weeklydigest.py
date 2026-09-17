@@ -246,7 +246,7 @@ def weekly_gate(keyword, last_week="", week=None, day=None):
 # re-enroll CTAs are plain lines. Exactly ONE moustache money token.
 
 def digest_email(keyword, winners, deals, referrers=None, week=None,
-                 base_url=""):
+                 base_url="", subject="", hook=""):
     kw = _txt_lower(keyword) or (winners[:1] or [{}])[0].get("keyword") \
         or (deals[:1] or [{}])[0].get("keyword") or "this niche"
     week = week or _iso_week()
@@ -254,8 +254,10 @@ def digest_email(keyword, winners, deals, referrers=None, week=None,
     winners = list(winners or [])
     deals = list(deals or [])
     referrers = list(referrers or [])
-
-    subject = "Your weekly %s money picks — %s" % (kw, week)
+    subject = (subject or "").strip()
+    if not subject:
+        subject = "Your weekly %s money picks — %s" % (kw, week)
+    hook = (hook or "").strip()
 
     # ---- plain text
     text = []
@@ -264,9 +266,9 @@ def digest_email(keyword, winners, deals, referrers=None, week=None,
     text.append("Hi {{first_name}},")
     text.append("")
     hero = (winners[:1] or deals[:1] or [{}])[0]
+    hero_cta = hook or "best-clicked this week; open it in the email"
     if hero.get("slug") or hero.get("title"):
-        text.append("1. %s — best-clicked this week; open it in the email:"
-                    % (hero.get("title") or kw_t))
+        text.append("1. %s — %s" % (hero.get("title") or kw_t, hero_cta))
     else:
         text.append("Quiet week in %s — a slow one can be a buying signal. "
                     "Reply and I'll dig up fresh picks." % kw_t)
@@ -289,11 +291,12 @@ def digest_email(keyword, winners, deals, referrers=None, week=None,
 
     # ---- tiny HTML (single {{tracked_link}}; inline-styled like the shell)
     hero = (winners[:1] or deals[:1] or [{}])[0]
+    cta = hook or "see it"
     if hero.get("slug") or hero.get("title"):
         lis_w = ("<li style='margin:8px 0'><strong>1.</strong> Hero pick — "
                  "<strong>%s</strong> — "
-                 "<a style='color:#a453ff' href='{{tracked_link}}'>see it</a></li>"
-                 % (hero.get("title") or hero.get("slug")))
+                 "<a style='color:#a453ff' href='{{tracked_link}}'>%s</a></li>"
+                 % (hero.get("title") or hero.get("slug"), cta))
     else:
         lis_w = ("<li style='margin:8px 0'>Quiet week in %s — a slow one can be "
                  "a buying signal. Reply and I'll dig up fresh picks.</li>" % kw)

@@ -113,6 +113,25 @@ class WeeklyDigestHermetic(_ut.TestCase):
                                 week="2026-W38")
         self.assertFalse(gate2["due"])
 
+    def test_money_email_ab_overrides(self):
+        """MME-10 money-step A/B: a subject + hero CTA override flows into the
+        digest without breaking the single-token money seam."""
+        email = _wd.digest_email("air fryer", self.winners, self.deals,
+                                 referrers=self.referrers, week="2026-W38",
+                                 subject="AIR A", hook="grab today's pick")
+        self.assertEqual(email["subject"], "AIR A")
+        self.assertIn("grab today's pick", email["text"])
+        self.assertIn("grab today's pick", email["html"])
+        both = email["text"] + email["html"]
+        self.assertEqual(both.count("{{tracked_link}}"), 1)
+        self.assertNotIn("see it", email["html"])
+        # empty overrides keep the defaults
+        dflt = _wd.digest_email("air fryer", self.winners, self.deals,
+                                referrers=self.referrers, week="2026-W38",
+                                subject=" ", hook="  ")
+        self.assertRegex(dflt["subject"], r"air fryer")
+        self.assertIn("see it", dflt["html"])
+
     def test_determinism_repeat(self):
         e1 = _wd.digest_email("air fryer", self.winners, self.deals,
                               referrers=self.referrers, week="2026-W38")
