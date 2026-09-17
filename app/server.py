@@ -7507,7 +7507,7 @@ font-weight:700;color:#fff}}
 
 <section class="card"><h2>2 · 🔎 Search-engine consoles — real impressions</h2>
 <p>Fetching console stats on the <a href="/admin/seoengines">Engines</a> page turns the <i>engine_traffic</i> rows from referral-attributed estimates into Google/Bing/Yandex click + impression truth.</p>
-<table><tbody>{tok_rows}</tbody></table>
+<div class="table-wrap"><table><tbody>{tok_rows}</tbody></table></div>
 <p class="hint" style="margin-top:8px">GSC and Yandex need an OAuth app (set the <code>PSTORE_GSC_CLIENT_ID/_SECRET</code> and <code>PSTORE_YANDEX_CLIENT_ID/_SECRET</code> envs, then <b>Connect</b>). Bing is a key: <code>PSTORE_BING_API_KEY</code> or paste it on the Engines page. Register your site, submit the sitemap — done.</p>
 <a class="btnline" href="/admin/seoengines">Open Search engines</a></section>
 
