@@ -36,6 +36,7 @@ import audience
 import ai
 import cms as cms_mod
 import cms_render
+import doctor
 import ebook as ebook_mod
 import editorial
 import earnings
@@ -108,10 +109,33 @@ def _telegram_button_html():
             '\u2708\ufe0f Join on Telegram</a>') % url
 
 
+# The Telegram join button is an OFF-SITE choice: a buyer who taps it leaves the
+# funnel before clicking an affiliate link. It is therefore allowed only on
+# non-commercial pages (about, blog index/posts, legal…) and never on a money
+# page (/n, /lp, /stories/<slug>, /vs, price & topic pages), where it would
+# directly cannibalise the click that earns.
+_TG_JOIN_ALLOW_EXACT = ("/about", "/contact", "/privacy", "/terms",
+                        "/disclosure", "/faq", "/how-it-works", "/stories")
+_TG_JOIN_ALLOW_PREFIX = ("/blog",)
+
+
+def _telegram_button_allowed(path):
+    """True only on non-commercial pages. The home page and every money page
+    must never distract the visitor with an off-site Telegram link."""
+    p = (path or "/").split("?", 1)[0].split("#", 1)[0].rstrip("/") or "/"
+    if p in _TG_JOIN_ALLOW_EXACT:
+        return True
+    return any(p == pre or p.startswith(pre + "/")
+               for pre in _TG_JOIN_ALLOW_PREFIX)
+
+
 def _inject_telegram_button(data, path):
-    """Append the opt-in button to a public HTML page (never /admin or /api)."""
+    """Append the opt-in button to a public non-commercial HTML page (never
+    /admin or /api, never a money page)."""
     path = path or ""
     if path.startswith(("/admin", "/api", "/dashboard", "/tool", "/keys")):
+        return data
+    if not _telegram_button_allowed(path):
         return data
     if _TG_JOIN_MARK in data or b"</body>" not in data:
         return data
@@ -1293,6 +1317,49 @@ def _publish_native(kits):
 
 def _native_posted_count(results):
     return sum(1 for r in results or [] if r and r.get("ok") and r.get("via") == "native")
+
+
+def _native_platform_status():
+    """{platform: bool} for every native channel: True when its posting
+    credentials are pasted. Twitter/X needs all four OAuth1 fields; every other
+    platform needs its single token. Powers the doctor's per-platform social
+    diagnosis."""
+    out = {}
+    for platform in social.PLATFORMS:
+        ns = social._key(platform)
+        if ns == "twitter":
+            fields = ("client_id", "client_secret", "access_token",
+                      "access_token_secret")
+            out[platform] = all(_get_setting("social.key.twitter.%s" % f, "")
+                                for f in fields)
+        else:
+            out[platform] = bool(_get_setting("social.key.%s" % ns, ""))
+    return out
+
+
+def _native_ready_platforms():
+    """Platforms whose native posting credentials are actually pasted, so the
+    doctor can say whether social delivery exists without a webhook."""
+    return [p for p, ok in _native_platform_status().items() if ok]
+
+
+def _social_post_counts():
+    """Status histogram of social_posts for the doctor's queue check. Returns
+    {} when the table is unavailable (never raises)."""
+    try:
+        with _lock:
+            conn = _db()
+            try:
+                counts = {}
+                for r in conn.execute(
+                        "SELECT status, COUNT(*) AS c FROM social_posts "
+                        "GROUP BY status").fetchall():
+                    counts[str(r["status"] or "").lower()] = int(r["c"] or 0)
+                return counts
+            finally:
+                conn.close()
+    except Exception:
+        return {}
 
 
 def _webhook_payload(kit):
@@ -7067,6 +7134,18 @@ document.addEventListener("click", function (e) {{
         body = self._body()
         action = (body.get("action") or "").strip()
         engine = (body.get("engine") or "").strip().lower()
+        if action == "doctor":
+            report = doctor.run(
+                seo.BASE_URL,
+                sample=int(body.get("sample") or 4),
+                engines=webmasters.engines_status(),
+                indexnow_key=indexnow.key(),
+                social={"webhook": bool(self._webhook_url()),
+                        "webhook_stats": dict(_WEBHOOK_STATS),
+                        "native": _native_ready_platforms(),
+                        "platforms": _native_platform_status(),
+                        "counts": _social_post_counts()})
+            return self._send(200, report)
         if action == "sync" and engine in ("gsc", "bing", "yandex"):
             ok, data = webmasters.sync_engine(engine,
                                               int(body.get("days") or 28))
@@ -7622,12 +7701,20 @@ pre.preview{white-space:pre-wrap;word-break:break-word;background:#f8fafc;border
    <tbody><tr><td colspan="5" class="hint">Loading…</td></tr></tbody></table></div>
   <p id="traffic-msg" class="msg"></p>
  </section>
- <section class="card"><h2>🩺 On-site health</h2>
-  <div class="features">
-   <div class="feature"><h3 id="h-host">—</h3><p class="hint">host</p></div>
-   <div class="feature"><h3 id="h-sitemap">—</h3><p class="hint">sitemap</p></div>
-   <div class="feature"><h3 id="h-robots">—</h3><p class="hint">robots</p></div></div>
- </section>
+  <section class="card"><h2>🩺 On-site health</h2>
+   <div class="features">
+    <div class="feature"><h3 id="h-host">—</h3><p class="hint">host</p></div>
+    <div class="feature"><h3 id="h-sitemap">—</h3><p class="hint">sitemap</p></div>
+    <div class="feature"><h3 id="h-robots">—</h3><p class="hint">robots</p></div></div>
+  </section>
+  <section class="card"><h2>🩺 End-to-end doctor</h2>
+   <p class="hint">One click, fix-first: fetches robots.txt + sitemap like a crawler, samples real sitemap URLs and proves each is indexable (200, self-canonical, no noindex), checks the IndexNow key file the engines fetch before trusting a ping, reads each console's connection state, and reports whether social posts can actually be delivered. Every failed check carries the exact fix.</p>
+   <div class="row" style="flex-wrap:wrap;gap:8px;align-items:center">
+    <label class="hint">sample URLs <input id="doc-n" type="number" min="1" max="10" value="3" style="width:70px"></label>
+    <button class="warm" onclick="runDoctor()">Run diagnosis</button>
+   </div>
+   <div id="doc-out" style="margin-top:10px;min-height:10px"></div>
+  </section>
 </main>
 <footer><p>Verification metas (google-site-verification, msvalidate.01, yandex-verification) are emitted on every public page. Console APIs add real impressions/positions; until then the Traffic panel shows referral-attributed visits and clicks collected by your own beacon.</p></footer>
 {totop}
@@ -7691,6 +7778,18 @@ function load(){fetch("/api/seoengines").then(r=>r.json()).then(d=>{
   msgs();
 }).catch(e=>{$("traffic-msg").textContent="Failed to load: "+e;});}
 function msgs(){const u=new URLSearchParams(location.search);const m=u.get("msg")||u.get("err");if(m){const t=$("traffic-msg");if(t){t.textContent=(u.get("err")?"✗ ":"")+m;setTimeout(()=>{t.textContent="";history.replaceState({},"","/admin/seoengines");},6000);}}}
+function docBadge(s){const m={fail:["#ffe6e6","#c0392b","✗ fail"],warn:["#fff3cd","#8a6d1a","▲ warn"],ok:["#e6ffe8","#1e8e3e","✓ ok"],info:["#eceff3","#556","• info"]}[s]||["#eceff3","#556",String(s)];return '<span class="badg" style="background:'+m[0]+';color:'+m[1]+'">'+m[2]+'</span>';}
+function runDoctor(){const $o=$("doc-out");if(!$o)return;const n=parseInt(($("doc-n")||{}).value||"3",10)||3;
+ $o.innerHTML='<p class="hint">Crawling the live site like a search-engine bot…</p>';
+ fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"doctor",sample:n})})
+ .then(r=>r.json()).then(d=>{if(!d.ok){$o.innerHTML='<p class="err">'+esc(d.error||"doctor failed")+'</p>';return;}
+  const head='<p class="msg">'+(d.verdict==="ok"?"✓ all checks passed":d.verdict==="warn"?"▲ "+(d.warnings||0)+" warning(s)":'<span style="color:#c0392b">✗ '+(d.blockers||0)+' blocker(s)</span>')+' · '+d.sitemap_size+' sitemap URLs · sampled '+(d.sampled||0)+'</p>';
+  const rows=d.checks.map(c=>'<div class="sub" style="border-left:3px solid '+(c.status==="fail"?"#c0392b":c.status==="warn"?"#e0a800":c.status==="ok"?"#1e8e3e":"#ccc")+';padding-left:10px;margin:8px 0">'
+   +'<div>'+docBadge(c.status)+' <b>'+esc(c.title)+'</b> <span class="hint">'+esc(c.area)+'</span></div>'
+   +'<div class="hint" style="margin-top:2px">'+esc(c.detail)+'</div>'
+   +(c.fix?'<div class="hint" style="margin-top:4px;color:#a05a00">→ '+esc(c.fix)+'</div>':'')+'</div>').join("");
+  $o.innerHTML=head+rows;})
+ .catch(e=>{$o.innerHTML='<p class="err">request failed: '+esc(e.message)+'</p>';});}
 document.addEventListener("DOMContentLoaded",load);
 </script>
 </body></html>""".replace("{nav}", nav).replace("{engines_rows}", engines_rows).replace(

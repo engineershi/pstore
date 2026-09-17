@@ -453,10 +453,18 @@ class TestTelegramServer(unittest.TestCase):
     def test_join_button_rendered_on_public_page_when_on(self):
         server._set_setting("telegram.on_page", "1")
         server._set_setting("telegram.botname", "pstorebot")
-        st, ct, body = self._raw("/")
+        st, ct, body = self._raw("/about")
         self.assertEqual(st, 200)
         self.assertIn(b"data-pstore-tg-join", body)
         self.assertIn(b"https://t.me/pstorebot?start=site", body)
+
+    def test_join_button_never_on_home_or_money_pages(self):
+        server._set_setting("telegram.on_page", "1")
+        server._set_setting("telegram.botname", "pstorebot")
+        for path in ("/", "/n/keto-snacks", "/stories/keto-bread"):
+            st, ct, body = self._raw(path)
+            self.assertEqual(st, 200, path)
+            self.assertNotIn(b"data-pstore-tg-join", body, path)
 
     def test_join_button_absent_on_admin(self):
         server._set_setting("telegram.on_page", "1")
