@@ -19,7 +19,7 @@ import editorial
 
 SITE_NAME = "pstore"
 SITE_DESC = "Hand-picked Amazon product picks by niche."
-BASE_URL = os.environ.get("PSTORE_URL", "https://pstore-gxbv.onrender.com").rstrip("/")
+BASE_URL = os.environ.get("PSTORE_URL", "https://trypstore.com").rstrip("/")
 
 # Optional Google Search Console ownership token — emits <meta name="google-site-verification">.
 GOOGLE_SITE_VERIFICATION = os.environ.get("PSTORE_GOOGLE_SITE_VERIFICATION", "")
@@ -335,7 +335,7 @@ def _footer():
 
 # ------------------------------------------------------------------ info pages
 STATIC_PAGES = ["about", "contact", "privacy", "terms", "disclosure"]
-CONTACT_EMAIL = os.environ.get("PSTORE_CONTACT", "hello@pstore-gxbv.onrender.com")
+CONTACT_EMAIL = os.environ.get("PSTORE_CONTACT", "hello@trypstore.com")
 
 
 def _page_header():

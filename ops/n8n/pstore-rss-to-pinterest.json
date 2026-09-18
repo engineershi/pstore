@@ -3,7 +3,7 @@
   "nodes": [
     {
       "parameters": {
-        "content": "Pstore RSS → Pinterest\n\nWatches https://pstore-gxbv.onrender.com/rss.xml every 6 hours and creates a pin for each new niche. Only-new dedup is stored in workflow static data (persisted after successful scheduled runs only).\n\nSetup:\n1. Install the community node n8n-nodes-pin-interest (Settings → Community nodes).\n2. Create the \"Pin-Interest OAuth2 API\" credential from your Pinterest developer app (scopes: pins:write, boards:read, user_accounts:read; redirect https://<your-n8n>/rest/oauth2-credential/callback).\n3. Run pinterest-list-boards.json once, copy the board id into \"Prep Pin Payload\".\n4. Activate.\n\nIMPORTANT: do NOT run this while Pinterest's native RSS bulk importer is also consuming /rss.xml — you would double-post every niche. Use one or the other."
+        "content": "Pstore RSS → Pinterest\n\nWatches https://trypstore.com/rss.xml every 6 hours and creates a pin for each new niche. Only-new dedup is stored in workflow static data (persisted after successful scheduled runs only).\n\nSetup:\n1. Install the community node n8n-nodes-pin-interest (Settings → Community nodes).\n2. Create the \"Pin-Interest OAuth2 API\" credential from your Pinterest developer app (scopes: pins:write, boards:read, user_accounts:read; redirect https://<your-n8n>/rest/oauth2-credential/callback).\n3. Run pinterest-list-boards.json once, copy the board id into \"Prep Pin Payload\".\n4. Activate.\n\nIMPORTANT: do NOT run this while Pinterest's native RSS bulk importer is also consuming /rss.xml — you would double-post every niche. Use one or the other."
       },
       "id": "00000000-0000-4000-8000-000000000000",
       "name": "Overview",
@@ -36,7 +36,7 @@
     },
     {
       "parameters": {
-        "url": "https://pstore-gxbv.onrender.com/rss.xml",
+        "url": "https://trypstore.com/rss.xml",
         "options": {
           "ignoreSSL": false
         }

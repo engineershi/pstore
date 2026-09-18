@@ -14,7 +14,7 @@ credential convention.
 
 ## Files
 - `pstore-rss-to-pinterest.json` — the main workflow: watches
-  `https://pstore-gxbv.onrender.com/rss.xml`, pins each new niche to Pinterest.
+  `https://trypstore.com/rss.xml`, pins each new niche to Pinterest.
   Defaults to every 6 hours, max 3 pins per run (Pinterest's own guides suggest
   10–25/day max — drip, not burst). Needs `n8n-nodes-pin-interest` + your
   approved Pinterest dev app.

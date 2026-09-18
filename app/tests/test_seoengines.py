@@ -45,17 +45,17 @@ class FakeWm:
              "AvgClickPosition": 0, "AvgImpressionPosition": 2.5,
              "Clicks": 1, "Impressions": 30,
              "Date": "\\/Date(1399100400000)\\/",
-             "Query": "http://pstore-gxbv.onrender.com/n/keto"},
+             "Query": "http://trypstore.com/n/keto"},
             {"__type": "PageStats:#Microsoft.Bing.Webmaster.Api",
              "AvgClickPosition": 1, "AvgImpressionPosition": 4.0,
              "Clicks": 2, "Impressions": 60,
              "Date": "\\/Date(1401519600000)\\/",
-             "Query": "http://pstore-gxbv.onrender.com/n/keto"},
+             "Query": "http://trypstore.com/n/keto"},
             {"__type": "PageStats:#Microsoft.Bing.Webmaster.Api",
              "AvgClickPosition": 0, "AvgImpressionPosition": 9.0,
              "Clicks": 0, "Impressions": 10,
              "Date": "\\/Date(1401519600000)\\/",
-             "Query": "http://pstore-gxbv.onrender.com/n/low-carb"}]}
+             "Query": "http://trypstore.com/n/low-carb"}]}
 
     def hook(self):
         self._saved = (webmasters._req, webmasters._STORE_GET,
@@ -90,7 +90,7 @@ class FakeWm:
             return 204, {}
         if "/webmasters/v3/sites" in url and "urlInspection" not in url:
             return 200, {"siteEntry": [
-                {"siteUrl": "https://pstore-gxbv.onrender.com/",
+                {"siteUrl": "https://trypstore.com/",
                  "permissionLevel": "full"},
                 {"siteUrl": "sc-domain:example.com"}]}
         if "urlInspection/index" in url:
@@ -118,9 +118,9 @@ class FakeWm:
             return 200, {"d": [{
                 "__type": "Site:#Microsoft.Bing.Webmaster.Api",
                 "AuthenticationCode": "ED01349E7C980956FE9C55F554DA7600",
-                "DnsVerificationCode": "abc.pstore-gxbv.onrender.com",
+                "DnsVerificationCode": "abc.trypstore.com",
                 "IsVerified": False,
-                "Url": "https://pstore-gxbv.onrender.com/"}]}
+                "Url": "https://trypstore.com/"}]}
         if "AddSite" in url and "?apikey=" in url:
             return 200, {"d": None}
         if url.endswith("/user/"):
@@ -130,7 +130,7 @@ class FakeWm:
                           "verified": False}
         if "/hosts/" in url and "search-queries" not in url:
             return 200, {"hosts": [{"host_id": "h1",
-                                    "host_name": "pstore-gxbv.onrender.com"}]}
+                                    "host_name": "trypstore.com"}]}
         if "/indexing/" in url:
             return 201, {}
         if "search-queries/summary" in url:
@@ -148,7 +148,7 @@ class TestWebmastersClients(unittest.TestCase):
         os.environ["PSTORE_BING_API_KEY"] = "bing-key-test"
         os.environ["PSTORE_YANDEX_CLIENT_ID"] = "yid-test"
         os.environ["PSTORE_YANDEX_CLIENT_SECRET"] = "ys-test"
-        os.environ["PSTORE_URL"] = "https://pstore-gxbv.onrender.com"
+        os.environ["PSTORE_URL"] = "https://trypstore.com"
         importlib.reload(seo)
         importlib.reload(webmasters)
         cls.wm = FakeWm()
@@ -220,7 +220,7 @@ class TestWebmastersClients(unittest.TestCase):
         self.assertEqual(len(put), 1)
         # feed path is host-less (just "sitemap.xml"); host only in site id
         self.assertTrue(put[0][1].endswith("/sitemaps/sitemap.xml"))
-        self.assertIn("https:%2F%2Fpstore-gxbv.onrender.com%2F", put[0][1])
+        self.assertIn("https:%2F%2Ftrypstore.com%2F", put[0][1])
 
     def test_gsc_crawl_budget_and_inspect(self):
         # inspector needs a connected bearer token
@@ -228,8 +228,8 @@ class TestWebmastersClients(unittest.TestCase):
         self.wm.store.pop("seoeng.gsc.inspect", None)
         self.wm.store.pop("seoeng.gsc.sitemap", None)
         self.wm.calls.clear()
-        urls = ["https://pstore-gxbv.onrender.com/n/keto-snacks/low-carb",
-                "https://pstore-gxbv.onrender.com/n/keto-snacks/healthy"]
+        urls = ["https://trypstore.com/n/keto-snacks/low-carb",
+                "https://trypstore.com/n/keto-snacks/healthy"]
         out = webmasters.gsc_crawl(urls)
         self.assertTrue(out["ok"])
         self.assertEqual(out["inspected"], 2)
@@ -249,7 +249,7 @@ class TestWebmastersClients(unittest.TestCase):
         self.wm.store["seoeng.gsc.token"] = json.dumps(GSC_TOK)
         self.wm.store["seoeng.gsc.enabled"] = "0"
         self.wm.store.pop("seoeng.gsc.inspect", None)
-        out = webmasters.gsc_crawl(["https://pstore-gxbv.onrender.com/n/x"])
+        out = webmasters.gsc_crawl(["https://trypstore.com/n/x"])
         self.assertEqual(out["inspected"], 0)
         self.assertTrue(out["submitted"])  # sitemap submit stays on
         self.wm.store["seoeng.gsc.enabled"] = "1"
@@ -277,7 +277,7 @@ class TestWebmastersClients(unittest.TestCase):
         ok, data = webmasters.gsc_user_sites()
         self.assertTrue(ok)
         self.assertTrue(data["registered"])
-        self.assertTrue(any("pstore-gxbv.onrender.com" in s for s in data["sites"]))
+        self.assertTrue(any("trypstore.com" in s for s in data["sites"]))
         self.assertEqual(len([c for c in self.wm.calls if "/webmasters/v3/sites" in c[1]]), 1)
 
     def test_gsc_user_sites_not_connected(self):
@@ -364,7 +364,7 @@ class TestWebmastersClients(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(data["user"], "uid-1")
         self.assertTrue(data["registered"])
-        self.assertIn("pstore-gxbv.onrender.com", data["hosts"])
+        self.assertIn("trypstore.com", data["hosts"])
 
     def test_yandex_add_host(self):
         self.wm.store["seoeng.yandex.token"] = json.dumps(YANDEX_TOK)
@@ -398,11 +398,11 @@ class TestWebmastersClients(unittest.TestCase):
 
     def test_bing_stats(self):
         ok, data = webmasters.bing_stats("bing-key-test",
-                                         "https://pstore-gxbv.onrender.com", 28)
+                                         "https://trypstore.com", 28)
         self.assertTrue(ok)
         self.assertEqual([r["page"] for r in data["rows"]],
-                         ["http://pstore-gxbv.onrender.com/n/keto",
-                          "http://pstore-gxbv.onrender.com/n/low-carb"])
+                         ["http://trypstore.com/n/keto",
+                          "http://trypstore.com/n/low-carb"])
         self.assertEqual(data["rows"][0]["clicks"], 3)
         self.assertEqual(data["rows"][0]["impressions"], 90)
         self.assertEqual(data["totals"]["clicks"], 3)
@@ -416,7 +416,7 @@ class TestWebmastersClients(unittest.TestCase):
         try:
             self.wm.bing_page_stats = {"d": []}
             ok, data = webmasters.bing_stats(
-                "bing-key-test", "https://pstore-gxbv.onrender.com", 28)
+                "bing-key-test", "https://trypstore.com", 28)
             self.assertTrue(ok)
             self.assertEqual(data["rows"], [])
             self.assertEqual(data["totals"]["clicks"], 0)
@@ -429,32 +429,32 @@ class TestWebmastersClients(unittest.TestCase):
         try:
             self.wm.bing_page_stats = [
                 {"Clicks": 2, "Impressions": 8, "AvgImpressionPosition": 1.5,
-                 "Query": "http://pstore-gxbv.onrender.com/n/waist"}]
+                 "Query": "http://trypstore.com/n/waist"}]
             ok, data = webmasters.bing_stats(
-                "bing-key-test", "https://pstore-gxbv.onrender.com", 28)
+                "bing-key-test", "https://trypstore.com", 28)
             self.assertTrue(ok)
             self.assertEqual(data["rows"][0]["page"],
-                             "http://pstore-gxbv.onrender.com/n/waist")
+                             "http://trypstore.com/n/waist")
             self.assertEqual(data["totals"]["impressions"], 8)
         finally:
             self.wm.bing_page_stats = saved
 
     def test_bing_submit_sitemap(self):
         s, d = webmasters.bing_submit_sitemap(
-            "bing-key-test", "https://pstore-gxbv.onrender.com")
+            "bing-key-test", "https://trypstore.com")
         self.assertEqual(s, 200)
         calls = [c for c in self.wm.calls if "SubmitFeed" in c[1]]
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0], "POST")
         body = calls[0][2] or {}
-        self.assertEqual(body.get("siteUrl"), "https://pstore-gxbv.onrender.com")
+        self.assertEqual(body.get("siteUrl"), "https://trypstore.com")
         self.assertTrue(body.get("feedUrl", "").endswith("/sitemap.xml"))
         self.assertNotIn("SubmitSitemap", calls[0][1])
 
     def test_bing_user_sites_parses_site_dicts(self):
         ok, data = webmasters.bing_user_sites("bing-key-test")
         self.assertTrue(ok)
-        self.assertEqual(data["sites"], ["pstore-gxbv.onrender.com"])
+        self.assertEqual(data["sites"], ["trypstore.com"])
         self.assertTrue(data["registered"])
         self.assertFalse(data["verified"])
 
@@ -513,7 +513,7 @@ class TestWebmastersClients(unittest.TestCase):
         self.wm.store["seoeng.yandex.token"] = json.dumps(YANDEX_TOK)
         st = {r["engine"]: r for r in webmasters.engines_status()}
         self.assertEqual(st["gsc"]["state"], "ready")
-        self.assertEqual(st["gsc"]["site"], "https://pstore-gxbv.onrender.com/")
+        self.assertEqual(st["gsc"]["site"], "https://trypstore.com/")
         self.assertEqual(st["bing"]["state"], "ready")
         self.assertEqual(st["yandex"]["state"], "ready")
 
@@ -587,7 +587,7 @@ class TestSeoengineServer(unittest.TestCase):
         os.environ["PSTORE_GOOGLE_SITE_VERIFICATION"] = "gsc-owner-meta"
         os.environ["PSTORE_BING_SITE_VERIFICATION"] = "bing-owner-meta"
         os.environ["PSTORE_YANDEX_VERIFICATION"] = "yandex-owner-meta"
-        os.environ["PSTORE_URL"] = "https://pstore-gxbv.onrender.com"
+        os.environ["PSTORE_URL"] = "https://trypstore.com"
         cls.wm_saved = (webmasters._req, webmasters._STORE_GET,
                         webmasters._STORE_SET)
         cls.wm = FakeWm()
@@ -915,7 +915,7 @@ class TestSeoengineServer(unittest.TestCase):
         st, _, body = self._raw(
             "POST", "/api/seoengines", cookie=self.cookie,
             body=json.dumps({"action": "crawl",
-                             "urls": ["https://pstore-gxbv.onrender.com/n/x"]}),
+                             "urls": ["https://trypstore.com/n/x"]}),
             ctype="application/json")
         d = json.loads(body)
         self.assertEqual(st, 200)

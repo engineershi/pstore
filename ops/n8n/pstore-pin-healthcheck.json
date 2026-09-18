@@ -39,7 +39,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://pstore-gxbv.onrender.com/admin/login",
+        "url": "https://trypstore.com/admin/login",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={\"email\":\"ADMIN_EMAIL_CHANGE_ME\",\"password\":\"ADMIN_PASSWORD_CHANGE_ME\",\"next\":\"\"}",
@@ -69,7 +69,7 @@
     {
       "parameters": {
         "method": "GET",
-        "url": "https://pstore-gxbv.onrender.com/api/pin-health?days=90",
+        "url": "https://trypstore.com/api/pin-health?days=90",
         "sendBody": false,
         "options": {
           "sendCookies": true,

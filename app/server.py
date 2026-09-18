@@ -7509,7 +7509,7 @@ document.addEventListener("click", function (e) {{
         # ---- 3 · custom domain + PSTORE_URL ----
         pstore_url = os.environ.get("PSTORE_URL", "").strip().rstrip("/")
         base = seo.BASE_URL.rstrip("/")
-        default_base = "https://pstore-gxbv.onrender.com"
+        default_base = "https://trypstore.com"
         domain_ok = bool(pstore_url) and "onrender.com" not in pstore_url
         domain_state = ('<span class="yes">custom domain live</span>' if domain_ok else
                         ('<span class="no">using the demo box</span>'

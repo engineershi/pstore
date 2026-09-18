@@ -115,7 +115,7 @@ SITE_SETTINGS = {"gsc": "seoeng.gsc.site", "bing": "seoeng.bing.site",
 
 def host_of():
     """The bare hostname the property is registered under (no scheme)."""
-    h = urllib.parse.urlsplit(seo.BASE_URL).hostname or "pstore-gxbv.onrender.com"
+    h = urllib.parse.urlsplit(seo.BASE_URL).hostname or "trypstore.com"
     return h.rstrip(".").lower()
 
 
