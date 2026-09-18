@@ -3242,6 +3242,19 @@ def _ensure_db_schema(conn):
         created_at TEXT DEFAULT (datetime('now')),
         UNIQUE(slug, platform, variant)
     )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS consent_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        subscriber_id INTEGER NOT NULL,
+        email TEXT NOT NULL,
+        source TEXT DEFAULT '',
+        keyword TEXT DEFAULT '',
+        ip TEXT DEFAULT '',
+        user_agent TEXT DEFAULT '',
+        page TEXT DEFAULT '',
+        created_at TEXT DEFAULT (datetime('now'))
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_consent_log_sub "
+                 "ON consent_log (subscriber_id)")
     cms_mod.ensure_tables(conn)
     conn.execute(linkauthority.SCHEMA)
     conn.execute(linkauthority.SCHEMA_INDEX)
@@ -12646,6 +12659,14 @@ document.addEventListener("click", async function(e){{
                     (utm_source, utm_content, sid))
             ref_token = self._ensure_ref_token(conn, sid)
             referrer_id = self._credit_referral(conn, sid, ref)
+            # Consent provenance: record who opted in, from where, on what page,
+            # from what device — a durable audit trail for the single opt-in.
+            conn.execute(
+                "INSERT INTO consent_log (subscriber_id, email, source, keyword, "
+                "ip, user_agent, page) VALUES (?,?,?,?,?,?,?)",
+                (sid, email, source, keyword,
+                 (self._client_ip() or "")[:64], (self.headers.get("User-Agent") or "")[:255],
+                 str(body.get("page") or "")[:255]))
             conn.commit()
             conn.close()
         if referrer_id:
@@ -12708,6 +12729,12 @@ document.addEventListener("click", async function(e){{
                          (email, asin, keyword))
             ref_token = self._ensure_ref_token(conn, sid)
             referrer_id = self._credit_referral(conn, sid, ref)
+            conn.execute(
+                "INSERT INTO consent_log (subscriber_id, email, source, keyword, "
+                "ip, user_agent, page) VALUES (?,?,?,?,?,?,?)",
+                (sid, email, "price-alert", keyword,
+                 (self._client_ip() or "")[:64], (self.headers.get("User-Agent") or "")[:255],
+                 str(body.get("page") or "")[:255]))
             conn.commit()
             conn.close()
         if referrer_id:
@@ -15575,6 +15602,10 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
         advance = bool(opts.get("advance"))
         ai_cache = {}
         sent = skipped = errors = 0
+        # Safety net: never burst beyond the per-run cap however this is called.
+        cap = max(1, mailer.MAX_EMAILS_PER_RUN)
+        if len(recipients) > cap:
+            recipients = recipients[:cap]
         for r in recipients:
             comp = self._compose_recipient(spec, r, ai_cache)
             if not comp:
@@ -15637,6 +15668,15 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
         if not recipients:
             return self._send(200, {"ok": False, "error": "No valid recipients selected.",
                                     "sent": 0, "errors": 0, "recipients": 0, "dry_run": dry})
+        capped = False
+        if not dry and not schedule_at:
+            # Burst guard: an immediate "send to all" must respect the per-run
+            # cap (same 50 default as the cron path) or one click would burst
+            # the whole list synchronously and hammer SMTP.
+            cap = max(1, mailer.MAX_EMAILS_PER_RUN)
+            if len(recipients) > cap:
+                recipients = recipients[:cap]
+                capped = True
         if schedule_at and not dry:
             normalized = schedule_at.replace("T", " ")
             if len(normalized) == 16:
@@ -15653,6 +15693,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                                     "outbox_id": cur.lastrowid,
                                     "recipients": len(recipients)})
         res = self._dispatch_studio(spec, recipients, dry=dry)
+        res["capped"] = bool(capped)
         return self._send(200, res)
 
     def _inbox_row(self, mid):
@@ -17499,12 +17540,37 @@ class _AutosendStub:
         return Handler._niche_items(self, keyword)
 
 
+_BOUNCE_FROM_RE = re.compile(r"mailer[-_ ]?daemon|postmaster", re.I)
+_BOUNCE_SUBJECT_RE = re.compile(
+    r"undeliverable|delivery (status|failure) notification|delivery failed|"
+    r"returned mail|failure notice|mail delivery (failed|subsystem)|"
+    r"(auto-?)?rejected|non[- ]delivery", re.I)
+_BOUNCE_STATUS_RE = re.compile(
+    r"\b5\.[0-9]\.[0-9]+\b|status[: ]+5\.[0-9]|permanent (failure|error)|"
+    r"recipient address rejected|no such user|unknown (user|recipient|address)|"
+    r"invalid (user|recipient|address)|mailbox (is )?(unavailable|not found)", re.I)
+
+
+def _detect_bounce(m):
+    """True when an inbound message is a hard-bounce report (permanent delivery
+    failure), never a normal customer reply. Requires a Mailer-Daemon/postmaster
+    sender AND a matching subject or a 5.x.x permanent-failure status line."""
+    frm = (m.get("from_addr") or "").strip().lower()
+    if not _BOUNCE_FROM_RE.search(frm):
+        return False
+    subj = m.get("subject") or ""
+    if _BOUNCE_SUBJECT_RE.search(subj):
+        return True
+    text = "%s %s" % ((m.get("text") or ""), (m.get("html") or ""))
+    return bool(_BOUNCE_STATUS_RE.search(text))
+
+
 def _ingest_inbound(messages, mailbox="inbox"):
     """Store fetched inbound messages into mailbox_messages, deduped by
     Message-ID, and link each to a subscriber: the tagged Reply-To wins (the
     address carries the subscriber id), else a from-address fallback match."""
     import hashlib as _hashlib
-    stored = dupes = linked = 0
+    stored = dupes = linked = bounces = 0
     cap = min(len(messages or []), 100)
     for m in (messages or [])[:cap]:
         msg_id = (m.get("message_id") or "").strip()
@@ -17543,7 +17609,21 @@ def _ingest_inbound(messages, mailbox="inbox"):
                 linked += 1
         else:
             dupes += 1
+        if sid and cur.rowcount and cur.rowcount > 0 and _detect_bounce(m):
+            # Hard bounce: the address is bad or refusing us — stop mailing it
+            # so the sender reputation doesn't spiral, and log the event.
+            with _lock:
+                conn = _db()
+                conn.execute("UPDATE subscribers SET unsubscribed=1 WHERE id=?", (sid,))
+                conn.execute("INSERT INTO email_events (type, subscriber_id, email_index) "
+                             "VALUES ('bounce', ?, 0)", (sid,))
+                conn.execute("UPDATE mailbox_messages SET status='bounce' WHERE message_id=?",
+                             (msg_id,))
+                conn.commit()
+                conn.close()
+            bounces += 1
     return {"ok": True, "stored": stored, "dupes": dupes, "linked": linked,
+            "bounces": bounces,
             "mailbox": mailbox}
 
 
