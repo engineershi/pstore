@@ -1391,6 +1391,111 @@ def _social_post_counts():
         return {}
 
 
+def _pin_health_report(days=90):
+    """Per-niche Pinterest attribution report (shared by the /api/pin-health
+    endpoint and the /admin/social pin-health card). Pins that drove clicks,
+    feed niches with traffic but no pin clicks (under-performers), and
+    published (feed) niches still silent. `days` limits the click window;
+    0 or absent means all time."""
+    try:
+        days = int(days if days is not None else 90)
+    except (TypeError, ValueError):
+        days = 90
+    if days > 0:
+        since = (datetime.datetime.utcnow() -
+                 datetime.timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        since_clause = " AND created_at >= ?"
+    else:
+        since = None
+        since_clause = ""
+    with _lock:
+        conn = _db()
+        pin_sql = (
+            "SELECT slug, COUNT(*) c, MAX(created_at) last FROM clicks "
+            "WHERE source IN ('pinterest','pin')" + since_clause +
+            " GROUP BY slug")
+        all_sql = (
+            "SELECT slug, COUNT(*) c, MAX(created_at) last FROM clicks " +
+            ("WHERE 1=1" + ("" if not since_clause else " AND created_at >= ?")) +
+            " GROUP BY slug")
+        pin_rows = conn.execute(
+            pin_sql, (since,) if since_clause else ()).fetchall()
+        all_rows = conn.execute(
+            all_sql, (since,) if since_clause else ()).fetchall()
+        pinnable = [r["keyword"] for r in conn.execute(
+            "SELECT keyword, products FROM niches").fetchall()
+            if (r["products"] or "").strip() not in ("", "[]", "{}")]
+        conn.close()
+    pin = {r["slug"]: (r["c"], r["last"]) for r in pin_rows}
+    allc = {r["slug"]: (r["c"], r["last"]) for r in all_rows}
+    pinned_hits, traffic_no_pin, published_silent = [], [], []
+    for kw in pinnable:
+        pc, plc = pin.get(kw, (0, None))
+        tc, tlc = allc.get(kw, (0, None))
+        row = {"slug": kw, "pin_clicks": pc, "total_clicks": tc,
+               "last_pin_click": plc, "last_click": tlc}
+        if pc:
+            pinned_hits.append(row)
+        elif tc:
+            traffic_no_pin.append(row)
+        else:
+            published_silent.append(row)
+    pinned_hits.sort(key=lambda r: r["pin_clicks"], reverse=True)
+    traffic_no_pin.sort(key=lambda r: r["total_clicks"], reverse=True)
+    published_silent.sort(key=lambda r: r["slug"])
+    return {
+        "ok": True,
+        "days": days,
+        "counts": {
+            "published_pinnable": len(pinnable),
+            "pinned_with_clicks": len(pinned_hits),
+            "traffic_without_pins": len(traffic_no_pin),
+            "silent": len(published_silent),
+            "pin_clicks": sum(r["pin_clicks"] for r in pinned_hits),
+        },
+        "pinned_hits": pinned_hits[:100],
+        "traffic_no_pin": traffic_no_pin[:100],
+        "published_silent": published_silent[:100],
+    }
+
+
+def _pin_health_card_html():
+    """Compact pin-health summary card for /admin/social — the same numbers as
+    /api/pin-health, rendered inline (with the API link for the n8n check)."""
+    r = _pin_health_report()
+    c = r["counts"]
+    def _rows(items, cls, label):
+        if not items:
+            return "<p class='hint' style='margin:4px 0 0'>None</p>"
+        rows = "".join(
+            "<li><code>%s</code> <span>%dp / %dc</span></li>"
+            % (seo._clean(i["slug"]), i["pin_clicks"], i["total_clicks"])
+            for i in items[:6])
+        more = ("<li class='hint'>… +%d more</li>" % (len(items) - 6)) if len(items) > 6 else ""
+        return "<ul class='pin-health %s'>%s%s</ul>" % (cls, rows, more)
+    hits = _rows(r["pinned_hits"], "hits", "Pin clicks")
+    traffic = _rows(r["traffic_no_pin"], "warn", "Traffic, no pins")
+    silent = _rows(r["published_silent"], "bad", "Silent niches")
+    return """<section class="card pin-health-card"><h2>📌 Pinterest health <span class="who">(90d)</span></h2>
+<div class="pin-health-grid">
+<div class="ph-stat"><b>{pp}</b><span>pinnable niches</span></div>
+<div class="ph-stat ok"><b>{pw}</b><span>pins driving clicks</span></div>
+<div class="ph-stat warn"><b>{tn}</b><span>traffic, no pins</span></div>
+<div class="ph-stat bad"><b>{sl}</b><span>silent niches</span></div>
+<div class="ph-stat ok"><b>{pc}</b><span>pin clicks</span></div>
+</div>
+<p class="hint" style="margin:8px 0 4px"><b>Pins driving clicks</b></p>
+{hits}
+<p class="hint" style="margin:8px 0 4px"><b>Traffic without pins</b></p>
+{traffic}
+<p class="hint" style="margin:8px 0 4px"><b>Published but silent</b></p>
+{silent}
+<p class="hint" style="margin:8px 0 0">Same data as <code>/api/pin-health</code> (used by the nightly health check).</p>
+</section>""".format(pp=c["published_pinnable"], pw=c["pinned_with_clicks"],
+                       tn=c["traffic_without_pins"], sl=c["silent"], pc=c["pin_clicks"],
+                       hits=hits, traffic=traffic, silent=silent)
+
+
 def _webhook_payload(kit):
     """One Make/Zapier-ready payload per kit. Everything the robot needs:
     copy + tracked link + platform + niche (slug/keyword/board) + both share
@@ -10022,14 +10127,33 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
                     break
             pin_preview = ""
             if kit.get("pin_image") and kit.get("platform") == "Pinterest":
+                variant_thumbs = ""
+                cvars = _valid_captions(slug, "Pinterest")
+                strips = []
+                for cv in cvars[:4]:
+                    vimg = social.pint_image_png_url(seo.BASE_URL, slug, int(cv["variant"] or 0))
+                    strips.append(
+                        "<a class='pin-v' target='_blank' rel='noopener' "
+                        "href='%s' title='Repin variant %d — caption %r'>"
+                        "<img src='%s' alt='Repin variant %d' loading='lazy'></a>"
+                        % (seo._clean(vimg), int(cv["variant"] or 0),
+                           (cv.get("caption") or "")[:24],
+                           seo._clean(vimg), int(cv["variant"] or 0)))
+                if strips:
+                    variant_thumbs = (
+                        "<div class='pin-vars'>"
+                        "<p class='hint' style='margin:6px 0'>Drip repin art:</p>"
+                        "<div class='pin-vars-row'>%s</div>"
+                        "</div>" % "".join(strips))
                 pin_preview = (
                     "<div class='pin-pre'>"
                     "<a target='_blank' rel='noopener' href='%s' title='Open full pin card'>"
                     "<img src='%s' alt='Auto-generated pin card for %s' loading='lazy'>"
                     "</a>"
                     "<p class='hint'>Auto-generated 1000×1500 pin card — opens full size.</p>"
+                    "%s"
                     "</div>" % (seo._clean(kit["pin_image"]), seo._clean(kit["pin_image"]),
-                                seo._clean(keyword)))
+                                seo._clean(keyword), variant_thumbs))
             kit_cards.append(f"""<div class="soc-kit">
 <div class="soc-head">
   <div>
@@ -10080,6 +10204,10 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
         amp_btn = ("<button class='warm' id='ampbtn'>⚡ Amplify winners now</button> "
                    "<button class='btnline' id='amptog' data-on='%d'>Turn %s</button>"
                    % (1 if amp_on else 0, "OFF" if amp_on else "ON"))
+        try:
+            pin_health_html = _pin_health_card_html()
+        except Exception:
+            pin_health_html = ""
         body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Social — pstore</title><link rel="stylesheet" href="/style.css">
@@ -10097,6 +10225,23 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
 .soc-kit .pin-pre img {{ width:180px; height:270px; object-fit:cover; border-radius:12px; border:1px solid var(--border,#e6e8ee); box-shadow:var(--shadow,#00000014); cursor:pointer; transition:transform .16s ease; }}
 .soc-kit .pin-pre img:hover {{ transform:scale(1.03); box-shadow:var(--shadow-lg,#0000001a); }}
 .soc-kit .pin-pre .hint {{ font-size:12px; margin:6px 0 0; }}
+.soc-kit .pin-vars {{ margin-top:8px; }}
+.soc-kit .pin-vars-row {{ display:flex; gap:8px; justify-content:center; flex-wrap:wrap; }}
+.soc-kit .pin-v {{ display:block; }}
+.soc-kit .pin-v img {{ width:84px; height:126px; object-fit:cover; border-radius:8px; border:1px solid var(--border,#e6e8ee); box-shadow:var(--shadow,#00000014); cursor:pointer; transition:transform .16s ease; }}
+.soc-kit .pin-v img:hover {{ transform:scale(1.06); box-shadow:var(--shadow-lg,#0000001a); }}
+.pin-health-card .who {{ font-size:12.5px; color:var(--muted,#667085); font-weight:600; }}
+.pin-health-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:10px; margin-top:10px; }}
+.ph-stat {{ background:var(--bg,#f4f7fb); border:1px solid var(--border,#e6e8ee); border-radius:14px; padding:10px 12px; text-align:center; }}
+.ph-stat b {{ display:block; font-size:22px; line-height:1.1; }}
+.ph-stat span {{ font-size:11.5px; color:var(--muted,#667085); }}
+.ph-stat.ok b {{ color:#1e8e3e; }} .ph-stat.warn b {{ color:#c77d00; }} .ph-stat.bad b {{ color:#c5221f; }}
+ul.pin-health {{ list-style:none; margin:4px 0 0; padding:0; display:grid; gap:4px; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); }}
+ul.pin-health li {{ display:flex; justify-content:space-between; gap:10px; background:var(--bg,#f4f7fb); border:1px solid var(--border,#e6e8ee); border-radius:10px; padding:6px 10px; font-size:12.5px; }}
+ul.pin-health li span {{ color:var(--muted,#667085); white-space:nowrap; }}
+ul.pin-health.hits li {{ border-color:#b6e0c0; }}
+ul.pin-health.warn li {{ border-color:#ecd9a8; }}
+ul.pin-health.bad li {{ border-color:#e6b0a5; }}
 .soc-kit textarea {{ width:100%; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; line-height:1.6; margin-top:14px; }}
 .soc-kit .key {{ margin:10px 0 0; word-break:break-all; background:var(--bg,#f4f7fb); border:1px solid var(--border,#e6e8ee); border-radius:999px; padding:7px 14px; font-size:12px; }}
 .soc-acts {{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-top:14px; }}
@@ -10115,6 +10260,7 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
 {self._admin_nav('social')}
 </header>
 <main>
+{pin_health_html}
 <section class="card"><h2>📣 Tracked post kits</h2>
 <p class="hint" style="margin-top:-4px">Webhook: {webhook_state}</p>
 <form class="row" method="get" action="/admin/social">
@@ -16388,67 +16534,12 @@ AI status: {"<b>configured</b> (%s · %s)" % (seo._clean(_active), seo._clean(ai
         check: pins that drove clicks, feed niches with traffic but no pin
         clicks (under-performers), and published (feed) niches still silent.
         `days` limits the click window; 0 or absent means all time."""
+        days = 90
         try:
             days = int((q.get("days") or ["90"])[0])
         except (TypeError, ValueError):
-            days = 90
-        if days > 0:
-            since = (datetime.datetime.utcnow() -
-                     datetime.timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-            since_clause = " AND created_at >= ?"
-        else:
-            since = None
-            since_clause = ""
-        with _lock:
-            conn = _db()
-            pin_sql = (
-                "SELECT slug, COUNT(*) c, MAX(created_at) last FROM clicks "
-                "WHERE source IN ('pinterest','pin')" + since_clause +
-                " GROUP BY slug")
-            all_sql = (
-                "SELECT slug, COUNT(*) c, MAX(created_at) last FROM clicks " +
-                ("WHERE 1=1" + ("" if not since_clause else " AND created_at >= ?")) +
-                " GROUP BY slug")
-            pin_rows = conn.execute(
-                pin_sql, (since,) if since_clause else ()).fetchall()
-            all_rows = conn.execute(
-                all_sql, (since,) if since_clause else ()).fetchall()
-            pinnable = [r["keyword"] for r in conn.execute(
-                "SELECT keyword, products FROM niches").fetchall()
-                if (r["products"] or "").strip() not in ("", "[]", "{}")]
-            conn.close()
-        pin = {r["slug"]: (r["c"], r["last"]) for r in pin_rows}
-        allc = {r["slug"]: (r["c"], r["last"]) for r in all_rows}
-        report, pinned_hits, traffic_no_pin, published_silent = [], [], [], []
-        for kw in pinnable:
-            pc, plc = pin.get(kw, (0, None))
-            tc, tlc = allc.get(kw, (0, None))
-            row = {"slug": kw, "pin_clicks": pc, "total_clicks": tc,
-                   "last_pin_click": plc, "last_click": tlc}
-            report.append(row)
-            if pc:
-                pinned_hits.append(row)
-            elif tc:
-                traffic_no_pin.append(row)
-            else:
-                published_silent.append(row)
-        pinned_hits.sort(key=lambda r: r["pin_clicks"], reverse=True)
-        traffic_no_pin.sort(key=lambda r: r["total_clicks"], reverse=True)
-        published_silent.sort(key=lambda r: r["slug"])
-        return self._send(200, {
-            "ok": True,
-            "days": days,
-            "counts": {
-                "published_pinnable": len(pinnable),
-                "pinned_with_clicks": len(pinned_hits),
-                "traffic_without_pins": len(traffic_no_pin),
-                "silent": len(published_silent),
-                "pin_clicks": sum(r["pin_clicks"] for r in pinned_hits),
-            },
-            "pinned_hits": pinned_hits[:100],
-            "traffic_no_pin": traffic_no_pin[:100],
-            "published_silent": published_silent[:100],
-        })
+            pass
+        return self._send(200, _pin_health_report(days))
 
     def _admin_analytics(self):
         with _lock:
