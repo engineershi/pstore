@@ -19,6 +19,7 @@ import os
 import re
 import smtplib
 import threading
+import time
 import urllib.parse
 from email import message_from_bytes
 from email.header import Header, decode_header as _decode_header
@@ -44,6 +45,8 @@ SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 SMTP_FROM = os.environ.get("SMTP_FROM", "") or (SMTP_USER or "noreply@localhost")
 SMTP_STARTTLS = os.environ.get("SMTP_STARTTLS", "1") == "1"
 MAX_EMAILS_PER_RUN = int(os.environ.get("SMTP_MAX_PER_RUN", "50") or "50")
+SMTP_MAX_ATTEMPTS = int(os.environ.get("SMTP_MAX_ATTEMPTS", "3") or "3")
+SMTP_RETRY_BASE = float(os.environ.get("SMTP_RETRY_BASE", "2") or "2")  # sec, x2 per retry
 SEQUENCE_LENGTH = 5
 
 # --- threaded replies ------------------------------------------------------
@@ -430,23 +433,32 @@ def _smtp_send(subject, body, to, from_addr=None, attachments=None, pixel_url=""
     from_addr = from_addr or SMTP_FROM
     msg = _build_message(subject, body, to, from_addr, attachments, pixel_url, html,
                          reply_to, in_reply_to)
-    try:
-        if SMTP_STARTTLS:
-            server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20)
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(SMTP_USER, SMTP_PASSWORD)
+    last = None
+    for attempt in range(max(1, SMTP_MAX_ATTEMPTS)):
+        server = None
+        try:
+            if SMTP_STARTTLS:
+                server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20)
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
+                server.login(SMTP_USER, SMTP_PASSWORD)
+            else:
+                server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20)
+                server.login(SMTP_USER, SMTP_PASSWORD)
             server.send_message(msg)
-            server.quit()
-        else:
-            server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20)
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.send_message(msg)
-            server.quit()
-        return True
-    except Exception:
-        return False
+            return True
+        except Exception as exc:  # noqa: BLE001 - retry any transport failure
+            last = exc
+        finally:
+            if server is not None:
+                try:
+                    server.quit()
+                except Exception:
+                    pass
+        if attempt + 1 < max(1, SMTP_MAX_ATTEMPTS):
+            time.sleep(SMTP_RETRY_BASE * (2 ** attempt))
+    return False
 
 
 def send(subject, body, to, attachments=None, pixel_url="", html="",

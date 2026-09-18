@@ -189,7 +189,6 @@ def _product_graph(items, page_url=None, slug=None):
     Every field is emitted only when there is data for it — a null price or an
     incomplete rating would fail Google's Rich Results validation — and each
     node carries a stable @id so the graph's ItemList can reference it."""
-    default_img = (BASE_URL + "/og/" + _slugify(slug) + ".png") if slug else ""
     graph = []
     for it in (items or [])[:10]:
         if not it.get("title"):
@@ -199,20 +198,21 @@ def _product_graph(items, page_url=None, slug=None):
             isinstance(price, (int, float)) and float(price) <= 0)
         stars = it.get("stars")
         reviews = it.get("reviews")
-        node = {
-            "@type": "Product",
-            "name": it.get("title"),
-            "image": it.get("image") or default_img,
-        }
+        node = {"@type": "Product", "name": it.get("title")}
+        if it.get("image"):
+            node["image"] = it["image"]
         if it.get("asin"):
             node["sku"] = it["asin"]
             if page_url:
                 node["@id"] = page_url.rstrip("/") + "#product-" + it["asin"]
-        offers = {"@type": "Offer", "url": it.get("url")}
+        offers = {"@type": "Offer"}
+        if it.get("url"):
+            offers["url"] = it["url"]
         if have_price:
             offers["price"] = price if isinstance(price, (int, float)) \
-                else _clean(str(price))
+                else str(price)
             offers["priceCurrency"] = it.get("currency") or "USD"
+            offers["availability"] = "https://schema.org/InStock"
         node["offers"] = offers
         if stars and reviews:
             node["aggregateRating"] = {
@@ -251,8 +251,9 @@ def landing_product_jsonld(pick, page_url, image_url=""):
         offers["url"] = pick["url"]
     if have_price:
         offers["price"] = price if isinstance(price, (int, float)) \
-            else _clean(str(price))
+            else str(price)
         offers["priceCurrency"] = pick.get("currency") or "USD"
+        offers["availability"] = "https://schema.org/InStock"
     node["offers"] = offers
     stars, reviews = pick.get("stars"), pick.get("reviews")
     if stars and reviews:
@@ -353,6 +354,19 @@ def render_page(slug, title, desc, content_html):
     head = _head(title, desc, canonical, canonical, jsonld=jsonld)
     body = ("%s\n<main><div class=\"card\"><h1>%s</h1>%s</div></main>\n"
             % (_page_header(), _clean(title), content_html)).encode("utf-8")
+    return head + body + _footer()
+
+
+def render_404():
+    """Friendly, noindex 404 page for unknown page URLs — never a JSON 404 in a
+    browser. No canonical/og:url so crawlers treat it as a soft-404, not a page."""
+    title = "Page not found"
+    desc = "The page you were looking for doesn't exist on %s anymore — or never did." % SITE_NAME
+    head = _head(title, desc, "/404", "/", noindex=True)
+    body = ("%s\n<main><div class=\"card\"><h1>%s</h1>"
+            "<p>The address you opened isn't a page on %s.</p>"
+            "<p><a href=\"/\">Back to the homepage</a> · <a href=\"/blog\">Browse the blog</a></p>"
+            "</div></main>\n" % (_page_header(), _clean(title), _clean(SITE_NAME))).encode("utf-8")
     return head + body + _footer()
 
 
@@ -578,10 +592,10 @@ def render_landing(saved_niches):
             {"@type": "Organization", "name": SITE_NAME, "url": BASE_URL},
         ],
     }
+    home_title = ("Best Amazon Picks by Niche — live prices, real ratings")
     home_desc = ("Ranked, data-backed best-Amazon-pick guides by niche — live price, "
-                 "rating and review signals decide the ranking, and the verdict comes "
-                 "first. Honest picks, affiliate-tagged links, no filler.")
-    head = _head(home_desc, home_desc, "/", "/", jsonld=jsonld,
+                 "rating and review signals decide the ranking. Honest picks, no filler.")
+    head = _head(home_title, home_desc, "/", "/", jsonld=jsonld,
                  og_image=BASE_URL + "/og/home.png")
     top_pick_niches = saved_niches or []
     # comparison preview of the single most-picked niche (scannable, table-flow pill)
@@ -974,10 +988,13 @@ def indexable_urls(saved_niches, base_url=None, saved_topics=None):
 def render_blog(saved_niches):
     """Public /blog landing: index of editorial articles, one per saved niche.
     Each card links to the full ranked notebook (/n/<slug>) and is SEO-shaped
-    (title/desc/canonical + indexable)."""
+    (title/desc/canonical + indexable). Cards list every niche (long-tail crawl
+    surface); the JSON-LD blogPost array is capped to the newest handful so the
+    page stays light while the sitemap still carries the full listing."""
     niches = [n for n in (saved_niches or []) if n.get("products")]
+    niches.sort(key=lambda n: (n.get("created_at") or ""), reverse=True)
     articles = []
-    for n in niches:
+    for n in niches[:12]:
         slug = _slugify(n["keyword"])
         best = editorial.best_pick(n["products"])
         title = "The best %s: a ranked, data-backed pick" % n["keyword"]

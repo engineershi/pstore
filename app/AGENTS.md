@@ -18,8 +18,9 @@ operate normally from `/root/projects/mazon` (git auto-reads the gitfile).
 - Server: `python3 server.py` (serves `static/` + `/api/*` on port 8765).
 - Env: `PSTORE_TAG=<your-tag>-NN`, `PSTORE_MARKET=com` (default),
   `PSTORE_ADMIN_EMAIL=<email>` + `PSTORE_ADMIN_PASSWORD=<pw>` (gates /admin,
-  /dashboard, /tool, /keys, /api/*; falls back to a default with a startup
-  warning when either is unset).
+  /dashboard, /tool, /keys, /api/*). Fail-closed: when either env var is unset
+  a random single-boot credential is generated and printed once at startup —
+  there is no code-known default in the repo (do not reintroduce one).
 - Optional social login: set `OAUTH_GOOGLE_CLIENT_ID`/`OAUTH_GOOGLE_CLIENT_SECRET`
   and/or `OAUTH_FACEBOOK_APP_ID`/`OAUTH_FACEBOOK_APP_SECRET` (with `PSTORE_URL`
   set to the live origin). Redirect URIs are `<PSTORE_URL>/admin/oauth/google/callback`

@@ -351,10 +351,15 @@ def _disk_warning():
 # password (PSTORE_ADMIN_EMAIL / PSTORE_ADMIN_PASSWORD) with an in-memory
 # session cookie. Public pages keep serving without a cookie: /, /n/*, /lp/*,
 # about/legal, robots, sitemap, key.
-_ADMIN_EMAIL = os.environ.get("PSTORE_ADMIN_EMAIL", "salahuddinhabibisah@gmail.com")
-_ADMIN_PW = os.environ.get("PSTORE_ADMIN_PASSWORD", "$_Salahu1991")
-_ADMIN_EMAIL_FROM_ENV = bool(os.environ.get("PSTORE_ADMIN_EMAIL"))
-_ADMIN_PW_FROM_ENV = bool(os.environ.get("PSTORE_ADMIN_PASSWORD"))
+_ADMIN_EMAIL = (os.environ.get("PSTORE_ADMIN_EMAIL") or "").strip().lower()
+_ADMIN_PW = os.environ.get("PSTORE_ADMIN_PASSWORD") or ""
+_ADMIN_CRED_VIA_ENV = bool(_ADMIN_EMAIL and _ADMIN_PW)
+if not _ADMIN_CRED_VIA_ENV:
+    # Fail-closed: no code-known default. When either env var is missing we
+    # generate an unguessable, single-boot credential (printed once at startup)
+    # instead of shipping a hardcoded admin password in a public repo.
+    _ADMIN_EMAIL = "owner+%s@localhost" % secrets.token_hex(4)
+    _ADMIN_PW = secrets.token_urlsafe(32)
 _COOKIE = "pstore_admin"
 _OAUTH_COOKIE = "pstore_oauth"
 _SESSION_TTL = 12 * 60 * 60  # seconds
@@ -2834,23 +2839,36 @@ _DB_SCHEMA_LOCK = threading.Lock()
 _db_schema_ready = False
 
 
-def _db():
-    conn = sqlite3.connect(DB)
+def _connect_db():
+    conn = sqlite3.connect(DB, timeout=15)
     conn.row_factory = sqlite3.Row
-    global _db_schema_ready
-    if _db_schema_ready:
-        return conn
-    with _DB_SCHEMA_LOCK:
-        if _db_schema_ready:
-            return conn
-        _ensure_db_schema(conn)
-        _db_schema_ready = True
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=15000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.Error:
+        pass
     return conn
 
 
+def _db():
+    global _db_schema_ready
+    with _DB_SCHEMA_LOCK:
+        if _db_schema_ready:
+            return _connect_db()
+        conn = _connect_db()
+        _ensure_db_schema(conn)
+        _db_schema_ready = True
+        return conn
+
+
 def _ensure_db_schema(conn):
-    conn = sqlite3.connect(DB)
+    conn = sqlite3.connect(DB, timeout=15)
     conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.Error:
+        pass
     conn.execute("""CREATE TABLE IF NOT EXISTS niches (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         keyword TEXT NOT NULL,
@@ -5372,7 +5390,10 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._opportunities(q)
             if path == "/api/earnings/priority":
                 return self._earnings_priority(q)
-            self._send(404, {"error": "not found"})
+            if path.startswith("/api/"):
+                self._send(404, {"error": "not found"})
+            else:
+                self._send(404, seo.render_404(), "text/html; charset=utf-8")
         except Exception as e:
             self._send(500, {"error": str(e)})
 
@@ -17741,9 +17762,10 @@ Handler._tg_config_save = telegram_admin._config_save
 
 def main():
     _init()
-    if not _ADMIN_EMAIL_FROM_ENV or not _ADMIN_PW_FROM_ENV:
-        print("WARNING: PSTORE_ADMIN_EMAIL / PSTORE_ADMIN_PASSWORD not both set — "
-              "using the default admin credentials. Set them in Render/env before going public.")
+    if not _ADMIN_CRED_VIA_ENV:
+        print("WARNING: PSTORE_ADMIN_EMAIL / PSTORE_ADMIN_PASSWORD not both set — admin login "
+              "uses an EPHEMERAL single-boot credential (email=%s password=%s). Set both env "
+              "vars in Render and redeploy before going public." % (_ADMIN_EMAIL, _ADMIN_PW))
     if not oauth.providers_configured():
         print("NOTE: Google/Facebook OAuth login disabled — set OAUTH_GOOGLE_CLIENT_ID/SECRET "
               "or OAUTH_FACEBOOK_APP_ID/APP_SECRET to enable it.")
