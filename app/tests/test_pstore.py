@@ -1491,6 +1491,75 @@ class TestRoutes(unittest.TestCase):
         for f in ("client_id", "client_secret", "access_token", "access_token_secret"):
             server._set_setting("social.key.twitter.%s" % f, "")
 
+    def test_publish_key_getter_env_fallback(self):
+        # native posting creds can come straight from env (PSTORE_<NS>_<FIELD>)
+        # so the operator turns on Telegram/Pinterest/etc. via the host
+        # dashboard without editing the app DB.
+        touched = ("PSTORE_TELEGRAM_TOKEN", "PSTORE_TELEGRAM_CHAT",
+                   "PSTORE_PINTEREST_TOKEN", "PSTORE_INSTAGRAM_TOKEN",
+                   "PSTORE_INSTAGRAM_IG_USER_ID", "PSTORE_TWITTER_CLIENT_ID",
+                   "PSTORE_TWITTER_CLIENT_SECRET", "PSTORE_TWITTER_ACCESS_TOKEN",
+                   "PSTORE_TWITTER_ACCESS_TOKEN_SECRET")
+        saved = {k: os.environ.get(k) for k in touched}
+        try:
+            os.environ["PSTORE_TELEGRAM_TOKEN"] = "TTOK"
+            os.environ["PSTORE_TELEGRAM_CHAT"] = "@chan"
+            os.environ["PSTORE_PINTEREST_TOKEN"] = "PTOK"
+            os.environ["PSTORE_INSTAGRAM_TOKEN"] = "ITOK"
+            os.environ["PSTORE_INSTAGRAM_IG_USER_ID"] = "1789x"
+            os.environ["PSTORE_TWITTER_CLIENT_ID"] = "CK"
+            os.environ["PSTORE_TWITTER_CLIENT_SECRET"] = "CS"
+            os.environ["PSTORE_TWITTER_ACCESS_TOKEN"] = "AT"
+            os.environ["PSTORE_TWITTER_ACCESS_TOKEN_SECRET"] = "ATS"
+            kv = server._publish_key_getter()
+            self.assertEqual(kv("telegram", "token"), "TTOK")
+            self.assertEqual(kv("telegram", "chat"), "@chan")
+            self.assertEqual(kv("pinterest", "token"), "PTOK")
+            self.assertEqual(kv("instagram", "access_token"), "ITOK")
+            self.assertEqual(kv("instagram", "ig_user_id"), "1789x")
+            self.assertEqual(kv("twitter", "client_id"), "CK")
+            self.assertEqual(kv("twitter", "client_secret"), "CS")
+            self.assertEqual(kv("twitter", "access_token"), "AT")
+            self.assertEqual(kv("twitter", "access_token_secret"), "ATS")
+            # env wins over the DB-pasted key
+            server._set_setting("social.key.pinterest", "DBTOK")
+            self.assertEqual(kv("pinterest", "token"), "PTOK")
+            server._set_setting("social.key.pinterest", "")
+            # an unmapped field falls back to the platform's single env token
+            self.assertEqual(kv("pinterest", "bogus"), "PTOK")
+        finally:
+            for k in touched:
+                if saved[k] is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = saved[k]
+
+    def test_native_platform_status_counts_env_keys(self):
+        # doctor/console "ready" verdict is true when the creds are env-only,
+        # and Telegram is not 'ready' from a token alone (a chat is needed too).
+        touched = ("PSTORE_TELEGRAM_TOKEN", "PSTORE_TELEGRAM_CHAT",
+                   "PSTORE_PINTEREST_TOKEN")
+        saved = {k: os.environ.get(k) for k in touched}
+        try:
+            os.environ["PSTORE_TELEGRAM_TOKEN"] = "T"
+            os.environ["PSTORE_TELEGRAM_CHAT"] = "@c"
+            os.environ["PSTORE_PINTEREST_TOKEN"] = "P"
+            st = server._native_platform_status()
+            self.assertTrue(st.get("Telegram"))
+            self.assertTrue(st.get("Pinterest"))
+            ready = [p for p, ok in st.items() if ok]
+            self.assertIn("Telegram", ready)
+            self.assertIn("Pinterest", ready)
+            os.environ.pop("PSTORE_TELEGRAM_CHAT", None)
+            st2 = server._native_platform_status()
+            self.assertFalse(st2.get("Telegram"))
+        finally:
+            for k in touched:
+                if saved[k] is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = saved[k]
+
     def test_paapi_partial_save_preserves_other_fields(self):
         # save all three, then re-save only partner_tag (as the masked JS does):
         # the untouched access/secret keys must not be blanked

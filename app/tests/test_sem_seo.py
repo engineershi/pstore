@@ -206,6 +206,31 @@ class TestSemSeoSite(unittest.TestCase):
         self.assertIn(st, (301, 302, 303))
         self.assertIn("/admin/login", loc or "")
 
+    def test_admin_golive_native_chips_and_env_hint(self):
+        import os
+        touched = ("PSTORE_TELEGRAM_TOKEN", "PSTORE_TELEGRAM_CHAT",
+                   "PSTORE_PINTEREST_TOKEN")
+        saved = {k: os.environ.get(k) for k in touched}
+        try:
+            os.environ["PSTORE_TELEGRAM_TOKEN"] = "T"
+            os.environ["PSTORE_TELEGRAM_CHAT"] = "@c"
+            os.environ["PSTORE_PINTEREST_TOKEN"] = "P"
+            st, _, _, body = self._raw("GET", "/admin/golive", cookie=self.cookie)
+            self.assertEqual(st, 200)
+            html = body.decode("utf-8", "replace")
+            self.assertIn("deliver natively", html)
+            self.assertIn("PSTORE_TELEGRAM_TOKEN", html)
+            self.assertIn("PSTORE_TELEGRAM_CHAT", html)
+            self.assertIn("PSTORE_PINTEREST_TOKEN", html)
+            self.assertIn("PSTORE_INSTAGRAM_IG_USER_ID", html)
+            self.assertIn("PSTORE_YOUTUBE_TOKEN", html)
+        finally:
+            for k in touched:
+                if saved[k] is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = saved[k]
+
     def test_admin_golive_lists_repo_n8n_flows(self):
         st, _, _, body = self._raw("GET", "/admin/golive", cookie=self.cookie)
         self.assertEqual(st, 200)

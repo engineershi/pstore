@@ -1263,23 +1263,44 @@ def _pricedrop_auto_loop():
             _beat("pricedrop-auto", False, str(exc))
 
 
+def _env_key(ns, field="token"):
+    """One native-posting credential from env: `PSTORE_<NS>_<FIELD>` (e.g.
+    PSTORE_TELEGRAM_TOKEN, PSTORE_TELEGRAM_CHAT, PSTORE_PINTEREST_TOKEN,
+    PSTORE_INSTAGRAM_IG_USER_ID, PSTORE_TWITTER_CLIENT_ID). Env wins over the
+    DB-pasted keys so the operator can feed secrets through the host dashboard
+    (which survives redeploys) instead of editing the app DB. `token` is the
+    default field, so `PSTORE_PINTEREST_TOKEN` answers kv('pinterest','token')."""
+    key = ("PSTORE_" + (ns or "").upper().replace("-", "_")
+           + "_" + (field or "token").upper().replace("-", "_").replace(" ", "_"))
+    return os.environ.get(key, "").strip()
+
+
 def _publish_key_getter():
     """Wire the persisted social API keys (from the /admin/apikeys settings KV)
     into the native posting gateway. Maps the composer's (platform, field) into
-    the settings key that holds that credential:
+    the credential for that (platform, field):
+      * env first — `PSTORE_<NS>_<FIELD>` (PSTORE_TELEGRAM_TOKEN,
+        PSTORE_PINTEREST_TOKEN, PSTORE_INSTAGRAM_TOKEN + _IG_USER_ID, …),
       * Twitter / X needs four OAuth 1.0a creds stored as `social.key.twitter.<field>`
-        (client_id, client_secret, access_token, access_token_secret).
-      * Every other platform publishes a single token stored as `social.key.<platform>`,
+        (client_id, client_secret, access_token, access_token_secret),
+      * every other platform publishes a single token stored as `social.key.<platform>`,
         so each candidate field name resolves to that one value."""
     def kv(ns, name):
+        fname = (name or "token").strip() or "token"
+        env_field = _env_key(ns, fname)
+        if env_field:
+            return env_field
         base = _get_setting("social.key." + ns, "")
         if ns == "twitter":
-            sub = _get_setting("social.key.twitter.%s" % name, "")
+            sub = _get_setting("social.key.twitter.%s" % fname, "")
             return sub or base
-        # Non-token named keys (e.g. `social.key.pinterest.board`) must resolve
-        # to that named sub-key, not the platform token.
-        sub = _get_setting("social.key.%s.%s" % (ns, name), "")
-        return sub or base
+        # Non-token named keys (e.g. `social.key.pinterest.board`) resolve to
+        # that named sub-key; every other field falls back to the platform's
+        # single token (env or DB), e.g. access_token → PSTORE_INSTAGRAM_TOKEN.
+        sub = _get_setting("social.key.%s.%s" % (ns, fname), "")
+        if sub:
+            return sub
+        return _env_key(ns, "token") or base
     return kv
 
 
@@ -1321,19 +1342,27 @@ def _native_posted_count(results):
 
 def _native_platform_status():
     """{platform: bool} for every native channel: True when its posting
-    credentials are pasted. Twitter/X needs all four OAuth1 fields; every other
-    platform needs its single token. Powers the doctor's per-platform social
-    diagnosis."""
+    credentials are present (env `PSTORE_<NS>_<FIELD>` first, then the DB keys
+    pasted on /admin/apikeys). Twitter/X needs all four OAuth1 fields; every
+    other platform needs its single token (Telegram also needs a chat id — or a
+    TOKEN|@channel fold). Powers the doctor's per-platform social diagnosis."""
     out = {}
     for platform in social.PLATFORMS:
         ns = social._key(platform)
         if ns == "twitter":
             fields = ("client_id", "client_secret", "access_token",
                       "access_token_secret")
-            out[platform] = all(_get_setting("social.key.twitter.%s" % f, "")
-                                for f in fields)
+            out[platform] = all(
+                _env_key("twitter", f)
+                or _get_setting("social.key.twitter.%s" % f, "")
+                for f in fields)
         else:
-            out[platform] = bool(_get_setting("social.key.%s" % ns, ""))
+            tok = _env_key(ns, "token") or _get_setting("social.key.%s" % ns, "")
+            if ns == "telegram":
+                chat = _env_key(ns, "chat") or _get_setting("social.key.telegram.chat", "")
+                out[platform] = bool(tok) and bool(chat or ("|" in tok))
+            else:
+                out[platform] = bool(tok)
     return out
 
 
@@ -7422,6 +7451,35 @@ document.addEventListener("click", function (e) {{
                               'expects.</p>'
                               % (clean(hi),
                                  " (env override)" if webhook_env else " (stored setting)"))
+        # ---- native platform chips (env or DB keys) ----
+        native_state = _native_platform_status()
+        native_on = sorted(p for p, ok in native_state.items() if ok)
+        native_off = sorted(p for p, ok in native_state.items() if not ok)
+        native_chips = ("".join('<span class="chip ok">%s</span>' % clean(p)
+                                for p in native_on) if native_on else
+                        '<i class="hint">none yet</i>')
+        if native_off:
+            native_chips += '<span class="chip off" title="%s">%s</span>' % (
+                "no key pasted", ", ".join(native_off))
+        native_intro = ('<span class="yes">%d/%d platforms <b>deliver natively</b>'
+                        '</span>' % (len(native_on), len(native_state))
+                        if native_on else
+                        '<span class="no">0 native channels — every post waits on '
+                        'the webhook above</span>')
+        native_envhint = ('<p class="hint" style="margin-top:8px"><b>No-database '
+                          'option:</b> feed the same credentials straight through '
+                          'env vars — <code>PSTORE_TELEGRAM_TOKEN</code> (+ '
+                          '<code>PSTORE_TELEGRAM_CHAT</code>), '
+                          '<code>PSTORE_PINTEREST_TOKEN</code>, '
+                          '<code>PSTORE_INSTAGRAM_TOKEN</code> + '
+                          '<code>PSTORE_INSTAGRAM_IG_USER_ID</code>, '
+                          '<code>PSTORE_YOUTUBE_TOKEN</code>, '
+                          '<code>PSTORE_FACEBOOK_TOKEN</code>, '
+                          '<code>PSTORE_LINKEDIN_TOKEN</code>, and the four X '
+                          'fields <code>PSTORE_TWITTER_CLIENT_ID/_CLIENT_SECRET/'
+                          '_ACCESS_TOKEN/_ACCESS_TOKEN_SECRET</code>. They\'re '
+                          'picked up on the next deploy and also count the '
+                          'doctor/console as ready.</p>')
         # ---- 2 · search-engine consoles ----
         gsc_creds = bool(webmasters.GSC_CLIENT_ID and webmasters.GSC_CLIENT_SECRET)
         gsc_tok = bool(_get_setting(webmasters.TOKEN_SETTINGS["gsc"]))
@@ -7486,6 +7544,10 @@ span.yes{{color:#2e8b57;font-weight:600}} span.no{{color:#c00;font-weight:600}}
 .trail .dot{{width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;
 font-weight:700;color:#fff}}
 .trail .dot.on{{background:#2e8b57}} .trail .dot.off{{background:#b8bcc8}}
+.chiprow{{display:flex;flex-wrap:wrap;gap:6px;align-items:center}}
+.chip{{display:inline-block;padding:2px 10px;border-radius:999px;font-size:11.5px;font-weight:700;
+color:#fff;background:#b8bcc8}}
+.chip.ok{{background:#2e8b57}} .chip.off{{background:#b8bcc8}}
 </style>
 </head><body>
 <header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
@@ -7497,13 +7559,16 @@ font-weight:700;color:#fff}}
 <div class="trail">{trail}
 <span class="hint" style="margin-left:8px"><b>{done}/{total} done</b> — {done}/{total} items ready</span></div>
 
-<section class="card"><h2>1 · 🔀 Social router — n8n webhook</h2>
+<section class="card"><h2>1 · 🔀 Social router — n8n webhook + native keys</h2>
 <p>{wh_state}</p>
 {webhook_target}
-<p class="hint" style="margin-top:8px">When a kit publishes, this box also POSTs the default payload to <code>SOCIAL_WEBHOOK</code>. Point it at a real <b>n8n</b> host and import the router flow this repo ships so every cast fans out to the platforms with no native backend here (Instagram reels via Webhooks, Threads, Telegram, Reddit…).</p>
+<p class="hint" style="margin-top:8px">When a kit publishes, this box also POSTs the default payload to <code>SOCIAL_WEBHOOK</code>. Point it at a real <b>n8n</b> host and import the router flow this repo ships so every cast fans out to the platforms with no native backend here (Instagram reels via Webhooks, Threads, Telegram, Reddit…). Or skip the third party entirely: point it at this site's own router — <code>SOCIAL_WEBHOOK=https://{clean(seo.BASE_URL.rstrip("/"))}/api/social/webhook</code> — and pasting a platform key below makes it post natively.</p>
 <ul style="margin:8px 0 4px 16px">{flow_list}</ul>
+<div style="margin:10px 0"><div class="chiprow">{native_chips}</div>
+<p>{native_intro}</p>
+{native_envhint}</div>
 <p class="hint">Set <code>SOCIAL_WEBHOOK=https://&lt;your-n8n&gt;/webhook/pstore-social</code> as an env var (or save it under Social). Import one of those <i>.json</i> files, publish a test kit from <a href="/admin/social">Social publishing</a>, then watch the flow fire.</p>
-<a class="btnline" href="/admin/social">Open Social publishing</a></section>
+<a class="btnline" href="/admin/social">Open Social publishing</a> <a class="btnline" href="/admin/apikeys">Open Security &amp; keys</a></section>
 
 <section class="card"><h2>2 · 🔎 Search-engine consoles — real impressions</h2>
 <p>Fetching console stats on the <a href="/admin/seoengines">Engines</a> page turns the <i>engine_traffic</i> rows from referral-attributed estimates into Google/Bing/Yandex click + impression truth.</p>
@@ -11656,7 +11721,8 @@ fresh();
 </form>
 </section>
 <section class="card" id="sec-social"><h2>📣 Social publishing keys</h2>
-<p class="hint">Per-platform {len(social.PLATFORMS)} keys power native posting. Leave blank to skip that platform. Enable native posting by pasting each platform's API key/token here; real posting also fires <code>SOCIAL_WEBHOOK</code> if set.</p>
+ <p class="hint">Per-platform {len(social.PLATFORMS)} keys power native posting. Leave blank to skip that platform. Enable native posting by pasting each platform's API key/token here; real posting also fires <code>SOCIAL_WEBHOOK</code> if set.</p>
+ <p class="hint">💾 <b>Prefer env?</b> The same credentials work as host env vars and survive every redeploy — no DB edit needed: <code>PSTORE_TELEGRAM_TOKEN</code> (+ <code>PSTORE_TELEGRAM_CHAT</code>), <code>PSTORE_PINTEREST_TOKEN</code>, <code>PSTORE_INSTAGRAM_TOKEN</code> + <code>PSTORE_INSTAGRAM_IG_USER_ID</code>, <code>PSTORE_YOUTUBE_TOKEN</code>, <code>PSTORE_FACEBOOK_TOKEN</code>, <code>PSTORE_LINKEDIN_TOKEN</code>, and X's <code>PSTORE_TWITTER_CLIENT_ID/_CLIENT_SECRET/_ACCESS_TOKEN/_ACCESS_TOKEN_SECRET</code>. Env wins if both are set.</p>
 <form class="cols-form" id="fsoc" onsubmit="return soc_save();">
   <label>Webhook URL <input type="url" name="webhook" value="{webhook_val}" placeholder="https://hook.example/hook (Zapier/Make)"></label>
 {key_rows}

@@ -93,6 +93,12 @@ The app reads everything from environment variables. Set these before you launch
 | `PSTORE_MARKET` | Which Amazon store (com/co.uk/de/ca/co.jp/com.au/in) | `com` |
 | `PSTORE_NAME` | Your brand name (shows in emails & signatures) | `BestPicks` |
 | `PSTORE_URL` | Your live site URL (canonicals, sitemap, links) | `https://pstore-gxbv.onrender.com` |
+| `PSTORE_TELEGRAM_TOKEN` / `PSTORE_TELEGRAM_CHAT` | Native **Telegram** posting + broadcast (token from BotFather; chat = `@channel` or numeric id — or fold both as `TOKEN\|@channel`) | — |
+| `PSTORE_PINTEREST_TOKEN` | Native **Pinterest** pins (long-lived access token from a Pinterest app) | — |
+| `PSTORE_INSTAGRAM_TOKEN` / `PSTORE_INSTAGRAM_IG_USER_ID` | Native **Instagram** photo posts (long-lived Graph token + IG Business account id) | — |
+| `PSTORE_YOUTUBE_TOKEN` | Native **YouTube Shorts** uploads (OAuth access token, `youtube.upload` scope) | — |
+| `PSTORE_FACEBOOK_TOKEN` / `PSTORE_LINKEDIN_TOKEN` | Native Facebook / LinkedIn posts | — |
+| `PSTORE_TWITTER_CLIENT_ID/…_SECRET/…_ACCESS_TOKEN/…_ACCESS_TOKEN_SECRET` | Native X (Twitter) v2 posts (OAuth 1.0a app creds) | — |
 | `PSTORE_ADMIN_EMAIL` / `PSTORE_ADMIN_PASSWORD` | Your admin login | — |
 | `SMTP_HOST`/`SMTP_USER`/`SMTP_PASSWORD` | **Required to send emails** (use Gmail app password) | `smtp.gmail.com` |
 | `SMTP_REPLY_TO` | Optional single address customers reply to (fallback) | `replies@yourdomain.com` |
