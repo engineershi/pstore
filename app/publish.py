@@ -665,8 +665,14 @@ def _post_pinterest(b, kv):
     }
     st, data = _post("https://api.pinterest.com/v5/pins",
                      payload, {"Authorization": "Bearer " + tok, **pint_ignore()})
-    return {"ok": 200 <= st < 300, "platform": "Pinterest", "via": "native",
-            "message": ("created " + str((data or {}).get("id") or "")) if data else str(st)}
+    if not (200 <= st < 300):
+        raw = json.dumps(data or st)
+        return {"ok": False, "platform": "Pinterest", "via": "native",
+                "message": ("pinterest rejected (%s): %s"
+                            % (st, raw[:240]))}
+    pid = (data or {}).get("id") if isinstance(data, dict) else None
+    return {"ok": True, "platform": "Pinterest", "via": "native",
+            "message": "created " + str(pid or "")}
 
 
 def _post_facebook(b, kv):
