@@ -10020,6 +10020,16 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
                     badge = "<span class='badge' style='background:#fff6e0;color:#c77d00'>scheduled %s</span>" % \
                         seo._clean(p.get("scheduled_at") or "")
                     break
+            pin_preview = ""
+            if kit.get("pin_image") and kit.get("platform") == "Pinterest":
+                pin_preview = (
+                    "<div class='pin-pre'>"
+                    "<a target='_blank' rel='noopener' href='%s' title='Open full pin card'>"
+                    "<img src='%s' alt='Auto-generated pin card for %s' loading='lazy'>"
+                    "</a>"
+                    "<p class='hint'>Auto-generated 1000×1500 pin card — opens full size.</p>"
+                    "</div>" % (seo._clean(kit["pin_image"]), seo._clean(kit["pin_image"]),
+                                seo._clean(keyword)))
             kit_cards.append(f"""<div class="soc-kit">
 <div class="soc-head">
   <div>
@@ -10028,6 +10038,7 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
   </div>
   {badge}
 </div>
+{pin_preview}
 <textarea readonly rows="4">{seo._clean(kit['body'])}</textarea>
 <p class="key" title="Tracked link (UTM) — every share uses this exact URL">{seo._clean(kit['link'])}</p>
 <div class="soc-acts" role="group" aria-label="Post actions">
@@ -10082,6 +10093,10 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
 .soc-kit .who {{ font-size:12.5px; color:var(--muted,#667085); font-weight:600; }}
 .soc-kit .clicks {{ margin:3px 0 0; font-size:12.5px; color:var(--muted,#667085); }}
 .soc-kit .badge {{ white-space:nowrap; margin:0; }}
+.soc-kit .pin-pre {{ margin:12px 0; text-align:center; }}
+.soc-kit .pin-pre img {{ width:180px; height:270px; object-fit:cover; border-radius:12px; border:1px solid var(--border,#e6e8ee); box-shadow:var(--shadow,#00000014); cursor:pointer; transition:transform .16s ease; }}
+.soc-kit .pin-pre img:hover {{ transform:scale(1.03); box-shadow:var(--shadow-lg,#0000001a); }}
+.soc-kit .pin-pre .hint {{ font-size:12px; margin:6px 0 0; }}
 .soc-kit textarea {{ width:100%; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; line-height:1.6; margin-top:14px; }}
 .soc-kit .key {{ margin:10px 0 0; word-break:break-all; background:var(--bg,#f4f7fb); border:1px solid var(--border,#e6e8ee); border-radius:999px; padding:7px 14px; font-size:12px; }}
 .soc-acts {{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-top:14px; }}
