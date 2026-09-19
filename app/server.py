@@ -857,7 +857,9 @@ def _autosend_cfg():
     except Exception:
         pass
     enabled = (raw_e != "0") if raw_e or _AUTOSEND_HOURS else bool(hours)
-    return {"enabled": bool(enabled and hours), "hours": hours, "limit": max(limit, 0)}
+    max_day, min_gap = _email_freq_settings()
+    return {"enabled": bool(enabled and hours), "hours": hours, "limit": max(limit, 0),
+            "max_per_day": max_day, "min_gap_hours": min_gap}
 
 _TOTOP = ('<div class="totop"><a href="#top" aria-label="Back to top">&uarr;</a></div>'
           '<script src="/ui.js" defer></script>')
@@ -1225,6 +1227,60 @@ def _sales_event_summary():
         return sales_events.upcoming_summary()
     except Exception:
         return {}
+
+
+def _email_freq_settings():
+    """Per-subscriber broadcast frequency guard so several automations can't hit
+    the same lead on the same day. `email.freq.max_per_day` (default 1) caps
+    broadcast emails per subscriber per rolling 24h; 0 disables the cap.
+    `email.freq.min_gap_hours` (default 0) is the minimum spacing between two.
+    Never raises."""
+    try:
+        max_day = int(float(_get_setting("email.freq.max_per_day", "1") or 0))
+    except (TypeError, ValueError):
+        max_day = 1
+    try:
+        gap = float(_get_setting("email.freq.min_gap_hours", "0") or 0)
+    except (TypeError, ValueError):
+        gap = 0.0
+    return max(0, max_day), max(0.0, gap)
+
+
+def _freq_capped_sids(sids, max_day=None, min_gap=None):
+    """Subset of subscriber ids that are over the broadcast frequency cap right
+    now, read from the `email_sends` delivery log. One query for a whole batch.
+    Never raises (returns an empty set on error)."""
+    if max_day is None or min_gap is None:
+        max_day, min_gap = _email_freq_settings()
+    if not max_day and not min_gap:
+        return set()
+    ids = [int(s) for s in (sids or [])
+           if str(s or "").lstrip("-").isdigit()]
+    if not ids:
+        return set()
+    window = int(max(24, min_gap) + 1)
+    blocked = set()
+    try:
+        with _lock:
+            conn = _db()
+            ph = ",".join("?" * len(ids))
+            rows = conn.execute(
+                "SELECT subscriber_id, COUNT(*) c, "
+                "MIN(julianday('now') - julianday(sent_at)) gap_days "
+                "FROM email_sends WHERE subscriber_id IN (%s) "
+                "AND sent_at >= datetime('now', ?) GROUP BY subscriber_id" % ph,
+                tuple(ids) + ("-%d hours" % window,)).fetchall()
+            conn.close()
+        for r in rows:
+            c = r["c"] or 0
+            gap_days = r["gap_days"]
+            if (max_day and c >= max_day) or (
+                    min_gap and gap_days is not None
+                    and (gap_days or 0) * 24 < min_gap):
+                blocked.add(int(r["subscriber_id"]))
+    except Exception:
+        return set()
+    return blocked
 
 
 def _pricedrop_auto_hours():
@@ -3697,6 +3753,10 @@ class Handler(BaseHTTPRequestHandler):
                 "host": mailer.SMTP_HOST or "",
                 "max_per_run": mailer.MAX_EMAILS_PER_RUN,
             },
+            "email": {
+                "max_per_day": _email_freq_settings()[0],
+                "min_gap_hours": _email_freq_settings()[1],
+            },
             "ai": {
                 "configured": ai.configured(),
                 "provider": ai.active_provider(),
@@ -5981,6 +6041,22 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                       "age", "audience", "income", "tone"):
                 if f in demo:
                     _set_setting("demo.%s" % f, str(demo.get(f) or "").strip())
+        # Broadcast frequency guard: per-subscriber emails/day (0 = unlimited)
+        # and optional minimum spacing between two broadcast sends.
+        em = body.get("email")
+        if isinstance(em, dict):
+            if "max_per_day" in em:
+                try:
+                    v = max(0, min(int(float(em.get("max_per_day") or 0)), 50))
+                except (TypeError, ValueError):
+                    v = 1
+                _set_setting("email.freq.max_per_day", str(v))
+            if "min_gap_hours" in em:
+                try:
+                    v = max(0.0, min(float(em.get("min_gap_hours") or 0), 168.0))
+                except (TypeError, ValueError):
+                    v = 0.0
+                _set_setting("email.freq.min_gap_hours", str(v))
         return self._send(200, self._settings())
 
     def _settings_test(self):
@@ -15248,6 +15324,8 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
         `campaign` + subscriber + asin form the dedup key (INSERT OR IGNORE)."""
         if self._already_sent(campaign, sub["id"], asin):
             return False
+        if _freq_capped_sids([sub["id"]]):
+            return False
         sid = sub["id"]
         link_url = mailer.tracked_url(kw, asin, sid, 99) if asin else ""
         pixel_url = mailer.open_pixel_url(kw, asin, sid, 99) if pixel_on else ""
@@ -15859,6 +15937,15 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
         cap = max(1, mailer.MAX_EMAILS_PER_RUN)
         if len(recipients) > cap:
             recipients = recipients[:cap]
+        # Frequency cap: at most N broadcast emails per subscriber per 24h (and
+        # optional min spacing) so two automations can't burn the same lead.
+        max_day, min_gap = _email_freq_settings()
+        freq_blocked = set()
+        if not dry and (max_day or min_gap):
+            freq_blocked = _freq_capped_sids(
+                [r.get("id") for r in recipients
+                 if r.get("kind") == "sub" and r.get("id")], max_day, min_gap)
+        freq_capped = 0
         for r in recipients:
             comp = self._compose_recipient(spec, r, ai_cache)
             if not comp:
@@ -15867,6 +15954,10 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             cid = int(r.get("id") or 0)
             if dedup and r.get("kind") == "sub" and cid and \
                     self._already_sent(comp["campaign"], cid, comp["asin"]):
+                skipped += 1
+                continue
+            if r.get("kind") == "sub" and cid and cid in freq_blocked:
+                freq_capped += 1
                 skipped += 1
                 continue
             link_url = mailer.tracked_url(comp["kw"], comp["asin"], cid, comp["idx"]) \
@@ -15904,6 +15995,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             else:
                 errors += 1
         return {"ok": True, "sent": sent, "skipped": skipped, "errors": errors,
+                "freq_capped": freq_capped,
                 "recipients": len(recipients), "dry_run": bool(dry)}
 
     def _studio_send(self, body):
@@ -16106,6 +16198,18 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                     _set_setting("autosend.limit", str(max(int(limit), 0)))
                 except (TypeError, ValueError):
                     pass
+            if body.get("max_per_day") is not None:
+                try:
+                    v = max(0, min(int(float(body.get("max_per_day") or 0)), 50))
+                except (TypeError, ValueError):
+                    v = 1
+                _set_setting("email.freq.max_per_day", str(v))
+            if body.get("min_gap_hours") is not None:
+                try:
+                    v = max(0.0, min(float(body.get("min_gap_hours") or 0), 168.0))
+                except (TypeError, ValueError):
+                    v = 0.0
+                _set_setting("email.freq.min_gap_hours", str(v))
             return self._send(200, {"ok": True, "config": _autosend_cfg()})
         if action == "cancel":
             try:
@@ -16262,11 +16366,16 @@ __NAV__
   <div class="row">
    <label style="flex-direction:row;align-items:center;gap:8px" class="switch">
      <input type="checkbox" id="as-on"><span class="trk"></span> Auto-send enabled</label>
-   <label>Per-run cap
-     <input id="as-limit" type="number" min="0" value="50" style="width:90px"></label>
-   <button id="as-save" class="warm">Save schedule config</button>
-   <span id="as-msg" class="msg"></span>
+    <label>Per-run cap
+      <input id="as-limit" type="number" min="0" value="50" style="width:90px"></label>
+    <label>Max emails/subscriber/day
+      <input id="as-freq-day" type="number" min="0" max="50" value="1" style="width:90px"></label>
+    <label>Min hours between sends
+      <input id="as-freq-gap" type="number" min="0" max="168" step="0.5" value="0" style="width:90px"></label>
+    <button id="as-save" class="warm">Save schedule config</button>
+    <span id="as-msg" class="msg"></span>
   </div>
+  <p class="hint">Frequency guard: broadcast emails (studio/automations) per subscriber per rolling 24h — <b>0</b> disables it. Keeps two automations from hitting the same lead the same day.</p>
   <p class="sec-tag">Pick the UTC hour chips the 5-step sequence auto-sends on</p>
   <div class="hourgrid" id="hourchips"></div>
  </section>
@@ -16446,10 +16555,10 @@ function updBtn(){const dry=$("o-dry").checked,when=document.querySelector('inpu
 function onWhen(){const sched=document.querySelector('input[name="when"]:checked').value==="sched";$("w-dt").style.display=sched?"":"none";$("dt-hint").style.display=sched?"":"none";updBtn();}
 function fillNiches(keep){const sel=DATA.niches||[];const cur=keep||$("c-niche").value;for(const el of [$("f-niche"),$("c-niche")]){el.innerHTML=`<option value="">${el.id==="f-niche"?"All niches":"No niche (custom only)"}</option>`+sel.map(k=>`<option value="${esc(k)}">${esc(k)}</option>`).join("");}if(cur)$("c-niche").value=cur;}
 function fillSegs(){if(!DATA)return;const c=DATA.segments||{};const map={"hot":c.hot||0,"warm":c.warm||0,"cold":c.cold||0,"converted":c.converted||0,"inactive":c.inactive||0};const sel=$("f-seg");for(const o of sel.options){if(o.value&&map[o.value]!==undefined)o.textContent=o.value==="inactive"?"⛔ Inactive ("+map[o.value]+")":o.textContent.split("(")[0].trim()+" ("+map[o.value]+")";}}
-function renderNow(){const n=DATA.niches||[];$("smtp-state").textContent=DATA.smtp_configured?"✅ "+DATA.smtp_host:"✱ SMTP not configured";const cfg=DATA.config;const hours=cfg.hours||[];$("as-hrs").textContent=hours.length?hours.join(","):"off";$("as-on").checked=cfg.enabled;fillHourChips(hours);const st=DATA.autosend_state;$("as-last").textContent=st&&st.last_run?st.status+" @"+st.last_run+(st.sent?" ("+st.sent+" sent)":""):"never ran";$("as-limit").value=cfg.limit;fillHourChips(hours);}
+function renderNow(){const n=DATA.niches||[];$("smtp-state").textContent=DATA.smtp_configured?"✅ "+DATA.smtp_host:"✱ SMTP not configured";const cfg=DATA.config;const hours=cfg.hours||[];$("as-hrs").textContent=hours.length?hours.join(","):"off";$("as-on").checked=cfg.enabled;fillHourChips(hours);const st=DATA.autosend_state;$("as-last").textContent=st&&st.last_run?st.status+" @"+st.last_run+(st.sent?" ("+st.sent+" sent)":""):"never ran";$("as-limit").value=cfg.limit;if($("as-freq-day"))$("as-freq-day").value=(cfg.max_per_day!=null?cfg.max_per_day:1);if($("as-freq-gap"))$("as-freq-gap").value=(cfg.min_gap_hours!=null?cfg.min_gap_hours:0);fillHourChips(hours);}
 function fillHourChips(hours){const hset=new Set(hours);$("hourchips").innerHTML=Array.from({length:24},(_,h)=>`<span class="hourgap ${hset.has(h)?"on":""}" data-h="${h}" onclick="togHour(${h})">${String(h).padStart(2,"0")}</span>`).join("");}
 function togHour(h){const el=document.querySelector(`[data-h='${h}']`);el.classList.toggle("on");}
-function saveCfg(){const hours=[...document.querySelectorAll(".hourgap.on")].map(e=>+e.dataset.h);fetch("/api/mail",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"config",hours,hours,enabled:$("as-on").checked,limit:$("as-limit").value})}).then(r=>r.json()).then(d=>{$("as-msg").textContent="Saved — "+(d.config.hours.length?"sends at "+d.config.hours.join(", ")+" UTC":"autosend off")+". Adjust the sender interval next tick.";setTimeout(()=>$("as-msg").textContent="",4000);});}
+function saveCfg(){const hours=[...document.querySelectorAll(".hourgap.on")].map(e=>+e.dataset.h);fetch("/api/mail",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"config",hours,hours,enabled:$("as-on").checked,limit:$("as-limit").value,max_per_day:$("as-freq-day")?$("as-freq-day").value:1,min_gap_hours:$("as-freq-gap")?$("as-freq-gap").value:0})}).then(r=>r.json()).then(d=>{$("as-msg").textContent="Saved — "+(d.config.hours.length?"sends at "+d.config.hours.join(", ")+" UTC":"autosend off")+". Adjust the sender interval next tick.";setTimeout(()=>$("as-msg").textContent="",4000);});}
 async function preview(){const s0=spec();s0.options=opts();const p=await fetch("/api/mail",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"preview",spec:s0})});const d=await p.json();$("prevbox").textContent=d.ok?`Subject: ${esc(d.subject)}\n\n${d.body}\n\n── preview (tracked link ${d.asin?"on":""} · open pixel ${opts().open_pixel?"on":"off"})`:"⚠ "+d.error;}
 function onSpec(){preview();}
 function onCust(){const c=tmpl()==="custom";$("cust-opts").style.display=c?"":"none";if(c)onSpec();}
