@@ -1067,5 +1067,54 @@ class TestMmeWaveB(unittest.TestCase):
         self.assertEqual(len(r2["enrolled"]), 0)
 
 
+class TestBlogPagination(unittest.TestCase):
+    """Pure render_blog pagination checks (no HTTP server needed)."""
+
+    @staticmethod
+    def _niches(n):
+        return [{"keyword": "guide %02d" % i,
+                 "products": [{"asin": "B0", "title": "p", "price": 1,
+                               "stars": 4, "reviews": 5}],
+                 "created_at": "2026-09-01 00:00:%02d" % i}
+                for i in range(n)]
+
+    def test_page_1_indexable_newest_24(self):
+        html = seo.render_blog(self._niches(50), page=1).decode()
+        self.assertEqual(html.count('<article class="card">'), 24)
+        self.assertEqual(html.count("<h2>"), 24)
+        self.assertNotIn("noindex,nofollow", html)
+        self.assertIn("application/ld+json", html)
+        self.assertIn('rel="next"', html)
+        self.assertNotIn('rel="prev"', html)
+        self.assertIn('<link rel="canonical" href="%s/blog">'
+                      % seo.BASE_URL, html)
+
+    def test_depth_pages_noindex_and_prev_next(self):
+        html = seo.render_blog(self._niches(50), page=2).decode()
+        self.assertIn("noindex,nofollow", html)
+        self.assertIn('href="%s/blog?p=1"' % seo.BASE_URL, html)
+        self.assertIn('href="%s/blog?p=3"' % seo.BASE_URL, html)
+        self.assertNotIn("application/ld+json", html)
+        self.assertIn('<link rel="canonical" href="%s/blog?p=2">'
+                      % seo.BASE_URL, html)
+
+    def test_page_beyond_end_clamps_to_last_page(self):
+        html = seo.render_blog(self._niches(50), page=99).decode()
+        self.assertEqual(html.count('<article class="card">'), 2)
+        self.assertIn("Page 3 of 3", html)
+        self.assertNotIn("Older", html)
+
+    def test_small_blog_has_no_pager(self):
+        html = seo.render_blog(self._niches(5), page=1).decode()
+        self.assertNotIn("blog-pager", html)
+        self.assertNotIn("noindex,nofollow", html)
+        self.assertEqual(html.count('<article class="card">'), 5)
+
+    def test_zero_niches_still_renders(self):
+        html = seo.render_blog([], page=1).decode()
+        self.assertIn("Fresh guides on the way", html)
+        self.assertIn("noindex,nofollow", html)
+
+
 if __name__ == "__main__":
     unittest.main()

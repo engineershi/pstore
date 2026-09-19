@@ -117,6 +117,66 @@ def monthly_summary(months_data):
             "total_earnings": total_earn}
 
 
+def measured(clicks, orders, revenue, commission):
+    """Measured earnings layer for one click cohort.
+
+    Links REAL recorded orders (that the operator logs from the Associates
+    dashboard against this exact cohort) to the clicks that produced them, and
+    returns the measured order-rate and commission-per-click next to the old
+    `estimate()` projection. A cohort with zero clicks yields a zero measured
+    layer because there is no denominator — never a made-up number."""
+    clicks = max(int(clicks or 0), 0)
+    orders = max(int(orders or 0), 0)
+    revenue = max(float(revenue or 0.0), 0.0)
+    commission = max(float(commission or 0.0), 0.0)
+    est = estimate(clicks, "")
+    return {
+        "clicks": clicks,
+        "orders": orders,
+        "revenue": revenue,
+        "commission": commission,
+        "orders_est": est["orders_est"],
+        "commission_est": est["commission_est"],
+        "measured_order_rate": (orders / clicks) if clicks else 0.0,
+        "measured_commission_per_click": (commission / clicks) if clicks else 0.0,
+        "measured_aov": (revenue / orders) if orders else 0.0,
+        "gap": commission - est["commission_est"],
+    }
+
+
+def attribution_layer(cohorts):
+    """Run every cohort through `measured()` and roll up by channel.
+
+    `cohorts` — list of dicts with month/channel/slug/campaign/clicks/orders/
+    revenue/commission. Returns the per-cohort rows plus channel and grand
+    totals so one shared computation feeds the API and the admin table."""
+    rows = []
+    for c in cohorts:
+        rec = measured(c.get("clicks", 0), c.get("orders", 0),
+                       c.get("revenue", 0), c.get("commission", 0))
+        rec.update({
+            "month": c.get("month", ""), "channel": c.get("channel", "other"),
+            "slug": c.get("slug", ""), "campaign": c.get("campaign", ""),
+        })
+        rows.append(rec)
+    rows.sort(key=lambda r: (r["month"], r["channel"], r["clicks"]),
+              reverse=True)
+    by_channel = {}
+    for r in rows:
+        ch = r["channel"]
+        rec = by_channel.setdefault(ch, {
+            "clicks": 0, "orders": 0, "revenue": 0.0, "commission": 0.0})
+        rec["clicks"] += r["clicks"]
+        rec["orders"] += r["orders"]
+        rec["revenue"] += r["revenue"]
+        rec["commission"] += r["commission"]
+    grand = {"clicks": sum(c["clicks"] for c in rows),
+             "orders": sum(c["orders"] for c in rows),
+             "revenue": round(sum(c["revenue"] for c in rows), 2),
+             "commission": round(sum(c["commission"] for c in rows), 2)}
+    return {"rows": rows, "by_channel": by_channel, "grand": grand}
+
+
 def priority_rows(rows, category_for=None):
     """Rank niches by estimated earnings for prioritization.
 

@@ -825,6 +825,13 @@ class TestRoutes(unittest.TestCase):
         self.assertIn('rel="canonical"', html)
         self.assertIn('href="/blog"', html)
 
+    def test_blog_pagination_route_safe(self):
+        for path in ("/blog?p=1", "/blog?p=2", "/blog?p=abc", "/blog?p=-3"):
+            st, ctype, body = self._get(path)
+            self.assertEqual(st, 200, path)
+            self.assertTrue(ctype.startswith("text/html"), (path, ctype))
+            self.assertTrue(body.startswith(b"<!DOCTYPE html>"), path)
+
     def test_company_pages_application_ready(self):
         for slug in seo.STATIC_PAGES:
             st, ctype, body = self._get("/" + slug)
@@ -1157,6 +1164,85 @@ class TestRoutes(unittest.TestCase):
         d = _json.loads(body)
         self.assertFalse(d["ok"])
 
+    def test_earnings_orders_attribution_roundtrip(self):
+        import json as _json
+        with server._lock:
+            conn = server._db()
+            conn.execute("DELETE FROM order_attributions")
+            conn.commit()
+            conn.close()
+        st, body = self._raw_json(
+            "/api/earnings/orders",
+            {"month": "2026-09", "channel": "email",
+             "slug": "keto-snacks", "campaign": "s1",
+             "orders": 9, "revenue": "1200", "commission": "72"},
+            cookie=self.cookie)
+        self.assertEqual(st, 200)
+        d = _json.loads(body)
+        self.assertTrue(d["ok"], d)
+        # the cohort shows up with measured metadata (no clicks yet -> rate 0)
+        st, _, _, body = self._raw("/api/earnings/orders", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        d = _json.loads(body)
+        row = [r for r in d["rows"]
+               if r["campaign"] == "s1" and r["month"] == "2026-09"]
+        self.assertEqual(len(row), 1)
+        self.assertEqual(row[0]["orders"], 9)
+        self.assertAlmostEqual(row[0]["commission"], 72.0)
+        self.assertEqual(row[0]["measured_order_rate"], 0.0)
+        # upsert merges on the same cohort key
+        self._raw_json(
+            "/api/earnings/orders",
+            {"month": "2026-09", "channel": "email",
+             "slug": "keto-snacks", "campaign": "s1",
+             "orders": 12, "revenue": "1600", "commission": "96"},
+            cookie=self.cookie)
+        st, _, _, body = self._raw("/api/earnings/orders", cookie=self.cookie)
+        row = [r for r in _json.loads(body)["rows"]
+               if r["campaign"] == "s1" and r["month"] == "2026-09"]
+        self.assertEqual(row[0]["orders"], 12)
+        # bad month rejected
+        st, body = self._raw_json(
+            "/api/earnings/orders",
+            {"month": "09/2026", "channel": "email", "orders": 1},
+            cookie=self.cookie)
+        d = _json.loads(body)
+        self.assertFalse(d["ok"])
+        # auth gate: no session -> 401
+        st, _, _, _ = self._raw("/api/earnings/orders")
+        self.assertEqual(st, 401)
+        st, body = self._raw_json("/api/earnings/orders", {"month": "2026-09"})
+        self.assertEqual(st, 401)
+
+    def test_earnings_measured_adopts_config(self):
+        import json as _json
+        saved = dict(earnings._runtime)
+        try:
+            with server._lock:
+                conn = server._db()
+                conn.execute("DELETE FROM order_attributions")
+                conn.commit()
+                conn.close()
+            # measured layer from a cohort with real clicks + orders
+            st, body = self._raw_json(
+                "/api/earnings/orders",
+                {"month": "2026-09", "channel": "email",
+                 "slug": "", "campaign": "s9",
+                 "orders": 3, "revenue": "120", "commission": "6"},
+                cookie=self.cookie)
+            self.assertTrue(_json.loads(body)["ok"])
+            st, _, _, body = self._raw("/api/earnings/orders", cookie=self.cookie)
+            layer = _json.loads(body)
+            self.assertIn("grand", layer)
+            self.assertIn("rows", layer)
+            self.assertIn("by_channel", layer)
+            g = layer["grand"]
+            self.assertEqual(g["orders"], 3)
+            self.assertAlmostEqual(g["commission"], 6.0)
+        finally:
+            earnings._runtime.clear()
+            earnings._runtime.update(saved)
+
     def test_analytics_page_has_earnings(self):
         st, _, _, body = self._raw("/admin/analytics", cookie=self.cookie)
         self.assertEqual(st, 200)
@@ -1164,6 +1250,8 @@ class TestRoutes(unittest.TestCase):
         self.assertIn("Earnings", html)
         self.assertIn("est. commission", html)
         self.assertIn("/api/earnings/config", html)
+        self.assertIn("Order attribution", html)
+        self.assertIn("/api/earnings/orders", html)
 
     def test_earnings_priority_ranks_by_commission(self):
         # seed clicks so keto-snacks outclicks best-fish-oil

@@ -21,6 +21,10 @@ SITE_NAME = "pstore"
 SITE_DESC = "Hand-picked Amazon product picks by niche."
 BASE_URL = os.environ.get("PSTORE_URL", "https://trypstore.com").rstrip("/")
 
+# Blog cards per page — keeps /blog light (the old single page ballooned to
+# ~445KB / 485 <h2> once the niche list grew).
+BLOG_PAGE_SIZE = 24
+
 # Optional Google Search Console ownership token — emits <meta name="google-site-verification">.
 GOOGLE_SITE_VERIFICATION = os.environ.get("PSTORE_GOOGLE_SITE_VERIFICATION", "")
 BING_SITE_VERIFICATION = os.environ.get("PSTORE_BING_SITE_VERIFICATION", "")
@@ -277,7 +281,9 @@ def landing_product_jsonld(pick, page_url, image_url=""):
     return {"@context": "https://schema.org", "@graph": graph}
 
 
-def _head(title, desc, canonical, path, jsonld=None, og_image=None, noindex=False):
+def _head(title, desc, canonical, path, jsonld=None, og_image=None, noindex=False, extra=""):
+    """Build the shared <head>. `extra` injects raw <link>/<meta> tags (used by
+    the paginated blog for rel prev/next) right after the canonical tag."""
     img_html = ""
     if og_image:
         abs_img = og_image if str(og_image).startswith("http") else BASE_URL + og_image
@@ -297,6 +303,7 @@ def _head(title, desc, canonical, path, jsonld=None, og_image=None, noindex=Fals
 <meta name="description" content="{_clean(desc)}">
 <link rel="icon" type="image/png" href="{_clean(BASE_URL)}/og/favicon.png">
 {rob}<link rel="canonical" href="{_clean(BASE_URL + path)}">
+{extra}
 <meta property="og:locale" content="en_US">
 <meta property="og:type" content="website">
 <meta property="og:title" content="{_clean(title)}">
@@ -985,39 +992,57 @@ def indexable_urls(saved_niches, base_url=None, saved_topics=None):
     return urls
 
 
-def render_blog(saved_niches):
+def render_blog(saved_niches, page=1, per_page=BLOG_PAGE_SIZE):
     """Public /blog landing: index of editorial articles, one per saved niche.
     Each card links to the full ranked notebook (/n/<slug>) and is SEO-shaped
-    (title/desc/canonical + indexable). Cards list every niche (long-tail crawl
-    surface); the JSON-LD blogPost array is capped to the newest handful so the
-    page stays light while the sitemap still carries the full listing."""
+    (title/desc/canonical + indexable). Cards are paginated (BLOG_PAGE_SIZE per
+    page) so the page stays light even with hundreds of niches: page 1 holds the
+    newest cards and deep pages are noindex,follow with prev/next navigation.
+    The JSON-LD blogPost array appears only on page 1, capped to the newest
+    handful, while the sitemap still carries the full listing."""
     niches = [n for n in (saved_niches or []) if n.get("products")]
     niches.sort(key=lambda n: (n.get("created_at") or ""), reverse=True)
+    total_pages = max(1, -(-len(niches) // per_page))
+    page = max(1, int(page or 1))
+    page = min(page, total_pages)
+    page_niches = niches[(page - 1) * per_page:page * per_page]
     articles = []
-    for n in niches[:12]:
-        slug = _slugify(n["keyword"])
-        best = editorial.best_pick(n["products"])
-        title = "The best %s: a ranked, data-backed pick" % n["keyword"]
-        synopsis = (best or {}).get("title") or n["keyword"]
-        articles.append({
-            "@type": "BlogPosting",
-            "headline": title,
-            "description": synopsis[:160],
-            "image": BASE_URL + "/og/" + slug + ".png",
-            "url": BASE_URL + "/n/" + slug,
-            "datePublished": (n.get("created_at") or "")[:10],
-            "dateModified": (n.get("created_at") or "")[:10],
-            "author": {"@type": "Organization", "name": SITE_NAME},
-            "publisher": {"@type": "Organization", "name": SITE_NAME},
-        })
-    jsonld = {"@context": "https://schema.org", "@type": "Blog",
-              "name": SITE_NAME, "url": BASE_URL + "/blog",
-              "blogPost": articles}
+    if page == 1:
+        for n in niches[:12]:
+            slug = _slugify(n["keyword"])
+            best = editorial.best_pick(n["products"])
+            title = "The best %s: a ranked, data-backed pick" % n["keyword"]
+            synopsis = (best or {}).get("title") or n["keyword"]
+            articles.append({
+                "@type": "BlogPosting",
+                "headline": title,
+                "description": synopsis[:160],
+                "image": BASE_URL + "/og/" + slug + ".png",
+                "url": BASE_URL + "/n/" + slug,
+                "datePublished": (n.get("created_at") or "")[:10],
+                "dateModified": (n.get("created_at") or "")[:10],
+                "author": {"@type": "Organization", "name": SITE_NAME},
+                "publisher": {"@type": "Organization", "name": SITE_NAME},
+            })
+    jsonld = None
+    if articles:
+        jsonld = {"@context": "https://schema.org", "@type": "Blog",
+                  "name": SITE_NAME, "url": BASE_URL + "/blog",
+                  "blogPost": articles}
+    page_url = "/blog" if page <= 1 else "/blog?p=%d" % page
+    rel_prev_next = ""
+    if total_pages > 1 and page > 1:
+        rel_prev_next += ('<link rel="prev" href="%s/blog?p=%d">'
+                          % (BASE_URL, page - 1))
+    if total_pages > 1 and page < total_pages:
+        rel_prev_next += ('<link rel="next" href="%s/blog?p=%d">'
+                          % (BASE_URL, page + 1))
     head = _head("The blog", "Ranked buying guides, data methodology and honest picks, niche by niche.",
-                 "/blog", "/blog", noindex=len(niches) == 0, jsonld=jsonld,
-                 og_image=BASE_URL + "/og/blog.png")
+                 page_url, page_url, noindex=page > 1 or len(niches) == 0,
+                 jsonld=jsonld, og_image=BASE_URL + "/og/blog.png",
+                 extra=rel_prev_next)
     cards = ""
-    for n in niches:
+    for n in page_niches:
         slug = _slugify(n["keyword"])
         best = editorial.best_pick(n["products"])
         title = "The best %s: a ranked, data-backed pick" % n["keyword"]
@@ -1030,6 +1055,15 @@ def render_blog(saved_niches):
 </article>"""
     if not cards:
         cards = '<section class="card"><h2>Fresh guides on the way</h2><p class="hint">We\'re ranking new niches now. Check back soon or <a href="/">browse the picks</a>.</p></section>'
+    nav = ""
+    if total_pages > 1:
+        prev_link = ('<a class="blog-prev" href="/blog?p=%d" rel="prev">&larr; Newer</a>'
+                     % (page - 1)) if page > 1 else ""
+        next_link = ('<a class="blog-next" href="/blog?p=%d" rel="next">Older &rarr;</a>'
+                     % (page + 1)) if page < total_pages else ""
+        nav = ('<nav class="blog-pager" style="display:flex;gap:16px;margin:24px 0">'
+               "%s<span class=\"pager-page\" style=\"flex:1;text-align:center\">Page %d of %d</span>%s</nav>"
+               % (prev_link, page, total_pages, next_link))
     body = f"""<header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
 <p class="tagline">{_clean(SITE_DESC)}</p>
 <nav><a href="/">🏠 Home</a><a href="/blog">📝 Blog</a><a href="/disclosure">Disclosure</a></nav></header>
@@ -1040,7 +1074,7 @@ def render_blog(saved_niches):
   live price, rating and review signals, honest methodology. No filler.</p>
 </section>
 {cards}
-</main>
+{nav}</main>
 """.encode("utf-8")
     return head + body + _footer()
 

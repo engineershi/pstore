@@ -1331,6 +1331,47 @@ def _click_channel(source):
     return "organic"
 
 
+def _attribution_cohorts():
+    """Every click cohort (month × channel × niche × campaign) plus the real
+    orders the operator logged against it, so measured order-rate replaces the
+    estimate. Cohorts with recorded orders but zero clicks are kept — the
+    mismatch stays visible instead of silently vanishing."""
+    with _lock:
+        conn = _db()
+        try:
+            click_rows = conn.execute(
+                "SELECT substr(created_at,1,7) AS month, "
+                "COALESCE(NULLIF(channel,''),'organic') AS channel, "
+                "COALESCE(NULLIF(slug,''),'') AS slug, "
+                "COALESCE(NULLIF(content,''),'') AS content, "
+                "COUNT(*) AS clicks FROM clicks "
+                "GROUP BY month, channel, slug, content").fetchall()
+            attr_rows = conn.execute(
+                "SELECT month, channel, slug, campaign, orders, revenue, "
+                "commission FROM order_attributions").fetchall()
+        finally:
+            conn.close()
+    cohorts = {}
+    for r in click_rows:
+        key = (r["month"], r["channel"], r["slug"], r["content"])
+        cohorts.setdefault(key, {"month": r["month"], "channel": r["channel"],
+                                 "slug": r["slug"], "campaign": r["content"],
+                                 "clicks": r["clicks"], "orders": 0,
+                                 "revenue": 0.0, "commission": 0.0})
+    for r in attr_rows:
+        key = (r["month"], r["channel"], r["slug"], r["campaign"])
+        base = cohorts.setdefault(key, {"month": r["month"],
+                                        "channel": r["channel"],
+                                        "slug": r["slug"],
+                                        "campaign": r["campaign"],
+                                        "clicks": 0, "orders": 0,
+                                        "revenue": 0.0, "commission": 0.0})
+        base["orders"] = max(base["orders"], int(r["orders"] or 0))
+        base["revenue"] += float(r["revenue"] or 0.0)
+        base["commission"] += float(r["commission"] or 0.0)
+    return list(cohorts.values())
+
+
 def _publish_native(kits):
     """Best-effort native per-platform posting for a batch of kits. Uses the
     keys the operator pasted on /admin/apikeys; platforms without keys report
@@ -3255,6 +3296,18 @@ def _ensure_db_schema(conn):
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_consent_log_sub "
                  "ON consent_log (subscriber_id)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS order_attributions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        month TEXT NOT NULL,
+        channel TEXT NOT NULL DEFAULT 'other',
+        slug TEXT NOT NULL DEFAULT '',
+        campaign TEXT NOT NULL DEFAULT '',
+        orders INTEGER NOT NULL DEFAULT 0,
+        revenue REAL NOT NULL DEFAULT 0,
+        commission REAL NOT NULL DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(month, channel, slug, campaign)
+    )""")
     cms_mod.ensure_tables(conn)
     conn.execute(linkauthority.SCHEMA)
     conn.execute(linkauthority.SCHEMA_INDEX)
@@ -5179,7 +5232,12 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                                          "application/rss+xml; charset=utf-8",
                                          max_age=3600)
             if path == "/blog":
-                return self._send_cached(seo.render_blog(self._all_niches()),
+                try:
+                    blog_page = max(1, int((q.get("p") or ["1"])[0]))
+                except (TypeError, ValueError):
+                    blog_page = 1
+                return self._send_cached(seo.render_blog(self._all_niches(),
+                                                         page=blog_page),
                                          "text/html; charset=utf-8", edge=False)
             key_body = indexnow.serve_key(path)
             if key_body is not None:
@@ -5403,6 +5461,9 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._opportunities(q)
             if path == "/api/earnings/priority":
                 return self._earnings_priority(q)
+            if path == "/api/earnings/orders":
+                return self._send(200,
+                                  earnings.attribution_layer(_attribution_cohorts()))
             if path.startswith("/api/"):
                 self._send(404, {"error": "not found"})
             else:
@@ -5553,6 +5614,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._earnings_config()
             if parsed.path == "/api/earnings/log":
                 return self._earnings_log()
+            if parsed.path == "/api/earnings/orders":
+                return self._earnings_orders()
             if parsed.path == "/api/variants/save":
                 return self._variants_save()
             if parsed.path == "/api/pricedrop/run":
@@ -16679,6 +16742,54 @@ AI status: {"<b>configured</b> (%s · %s)" % (seo._clean(_active), seo._clean(ai
         real = [{"month": r["month"], "orders": r["orders"], "earnings": r["earnings"]}
                 for r in month_rows]
         real_summary = earnings.monthly_summary(real)
+        attr = earnings.attribution_layer(_attribution_cohorts())
+        attr_table = "".join(
+            '<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class="ct">%d</td>'
+            '<td class="ct">%d</td><td class="ct">$%.2f</td><td class="ct">$%.2f</td>'
+            '<td class="ct">%.2f%%</td><td class="ct">%.2f%%</td></tr>'
+            % (seo._clean(r["month"]), seo._clean(r["channel"]),
+               seo._clean(r["slug"] or "—"), seo._clean(r["campaign"] or "—"),
+               r["clicks"], r["orders"], r["revenue"], r["commission"],
+               r["measured_order_rate"] * 100,
+               (r["orders_est"] / r["clicks"] * 100) if r["clicks"] else 0.0)
+            for r in attr["rows"]) or (
+            "<tr><td colspan='10' class='hint'>No clicks yet — cohorts appear "
+            "as visitors tap Amazon links. Log real orders against them below.</td></tr>")
+        attr_chan_rows = "".join(
+            '<tr><td>%s</td><td class="ct">%d</td><td class="ct">%d</td>'
+            '<td class="ct">$%.2f</td><td class="ct">%.2f%%</td></tr>'
+            % (seo._clean(ch), rec["clicks"], rec["orders"], rec["commission"],
+               (rec["orders"] / rec["clicks"] * 100) if rec["clicks"] else 0.0)
+            for ch, rec in sorted(attr["by_channel"].items(),
+                                  key=lambda kv: -kv[1]["clicks"]))
+        g = attr["grand"]
+        g_rate = (g["orders"] / g["clicks"] * 100) if g["clicks"] else 0.0
+        g_meas_note = (
+            "%.2f%% measured order-rate across %d clicks" % (g_rate, g["clicks"])
+            if g["clicks"] else "No clicks to measure yet.")
+        attr_chan_html = (
+            '<div class="table-wrap" style="margin-top:8px"><table class="plain">'
+            '<thead><tr><th>Channel</th><th class="ct">Clicks</th>'
+            '<th class="ct">Orders</th><th class="ct">Commission $</th>'
+            '<th class="ct">Measured rate</th></tr></thead><tbody>%s</tbody></table></div>'
+            % attr_chan_rows)
+        attr_adopt_rate = (g["orders"] / g["clicks"]) if g["clicks"] else 0.0
+        if g["clicks"] >= 30 and 0 < g_rate < 100:
+            attr_meas_html = (
+                '<div class="row" style="align-items:end;margin-top:6px">'
+                '<p class="hint" id="attr_meas">Measured so far: %s.</p>'
+                '<button id="o_adopt" class="warm" data-rate="%.6f">'
+                "Adopt measured rate as the whole-site order rate</button></div>"
+                % (g_meas_note, g_rate / 100.0))
+        else:
+            attr_meas_html = (
+                '<p class="hint" style="margin-top:6px" id="attr_meas">%s.</p>'
+                % g_meas_note)
+            if g["clicks"]:
+                attr_meas_html = (
+                    '<p class="hint" style="margin-top:6px" id="attr_meas">%s — log at '
+                    "least 30 clicks of cohort-verified orders before adopting the "
+                    "rate site-wide.</p>" % g_meas_note)
         earn_note = ("tuned" if (earnings._runtime.get("commission_pct") or
                                  earnings._runtime.get("avg_order") or
                                  earnings._runtime.get("order_rate"))
@@ -16889,6 +17000,25 @@ AI status: {"<b>configured</b> (%s · %s)" % (seo._clean(_active), seo._clean(ai
 <div class="table-wrap"><table class="plain"><thead><tr><th>Source</th><th>Clicks</th></tr></thead><tbody>{src_rows}</tbody></table></div></section>
 <section class="card"><h2>🧾 Recent clicks</h2>
 <div class="table-wrap"><table class="plain"><thead><tr><th>Niche</th><th>Source</th><th>Referrer</th><th>When</th></tr></thead><tbody>{recent_rows}</tbody></table></div></section>
+<section class="card"><h2>🎯 Order attribution (measured, not guessed)</h2>
+<p class="hint">Log the real orders a channel/niche/campaign produced from your Associates report, and this card replaces the "3% order-rate" estimate for that cohort with the measured rate. Zero-click cohorts stay visible so gaps show up, not vanish.</p>
+<div class="table-wrap"><table class="plain"><thead><tr><th>Month</th><th>Channel</th><th>Niche</th><th>Campaign</th><th class="ct">Clicks</th><th class="ct">Orders</th><th class="ct">Revenue $</th><th class="ct">Commission $</th><th class="ct">Measured rate</th><th class="ct">Est. rate</th></tr></thead><tbody>{attr_table}</tbody></table></div>
+{attr_chan_html}
+<div class="sub"><h3>Log real orders against a cohort</h3>
+<div class="row" style="align-items:end">
+  <label>Month <input id="o_month" value="{datetime.date.today().strftime('%Y-%m')}"></label>
+  <label>Channel <input id="o_channel" list="attr_channels" placeholder="email / social / organic / paid / referral / other" value="email"></label>
+  <datalist id="attr_channels"><option>email</option><option>social</option><option>organic</option><option>paid</option><option>referral</option><option>other</option></datalist>
+  <label>Niche slug (blank=any) <input id="o_slug" placeholder="keto-snacks"></label>
+  <label>Campaign (blank=any) <input id="o_campaign" placeholder="utm content / email index"></label>
+  <label>Orders <input id="o_orders" type="number" min="0" placeholder="0"></label>
+  <label>Revenue $ <input id="o_rev" type="number" step="0.01" min="0" placeholder="0.00"></label>
+  <label>Commission $ <input id="o_comm" type="number" step="0.01" min="0" placeholder="0.00"></label>
+  <button id="o_save" class="warm">Log order batch</button>
+</div>
+<p class="msg" id="o_msg"></p>
+{attr_meas_html}
+</div></section>
 </main>
 <footer><p>Views + interactions are captured privacy-first (IP hashes only) via /api/pageview; clicks via /api/track. Promo/countdown/sticky/gate elements are auto-tagged so you can see exactly which page behavior earns engagement and conversions.</p></footer>
 <script src="/section-nav.js" defer></script>
@@ -16908,6 +17038,20 @@ if ($("r_save")) $("r_save").onclick = async () => {{
   try{{
     const d=await postj("/api/earnings/log",{{month:$("r_month").value.trim(),orders:parseInt($("r_orders").value||"0",10),earnings:parseFloat($("r_earn").value||"0")}});
     m.textContent=d.ok?"✓ Logged. Refresh to see the table update.":("✗ "+(d.error||"failed")); m.className=d.ok?"msg":"msg";
+  }}catch(e){{ m.textContent="✗ Could not reach the server."; }}
+}};
+if ($("o_save")) $("o_save").onclick = async () => {{
+  const m=$("o_msg"); m.textContent="Saving…"; m.className="msg";
+  try{{
+    const d=await postj("/api/earnings/orders",{{month:$("o_month").value.trim(),channel:$("o_channel").value.trim()||"other",slug:$("o_slug").value.trim(),campaign:$("o_campaign").value.trim(),orders:parseInt($("o_orders").value||"0",10),revenue:parseFloat($("o_rev").value||"0"),commission:parseFloat($("o_comm").value||"0")}});
+    m.textContent=d.ok?"✓ Order batch logged. Refresh to see measured rates.":("✗ "+(d.error||"failed")); m.className=d.ok?"msg":"msg";
+  }}catch(e){{ m.textContent="✗ Could not reach the server."; }}
+}};
+if ($("o_adopt")) $("o_adopt").onclick = async () => {{
+  const m=$("o_msg")||$("attr_meas"); m.textContent="Saving…"; m.className="msg";
+  try{{
+    const d=await postj("/api/earnings/config",{{commission_pct:parseFloat($("e_pct").value),avg_order:parseFloat($("e_aov").value),order_rate:parseFloat($("o_adopt").dataset.rate||"0")}});
+    m.textContent=d.ok?"✓ Order rate now matches what your orders actually say. The whole dashboard re-estimates on refresh.":("✗ "+(d.error||"failed")); m.className=d.ok?"msg":"msg";
   }}catch(e){{ m.textContent="✗ Could not reach the server."; }}
 }};
 </script>
@@ -16976,6 +17120,43 @@ if ($("r_save")) $("r_save").onclick = async () => {{
                 conn.execute(
                     "INSERT INTO earnings_records (month, orders, earnings) VALUES (?,?,?)",
                     (month, orders, earnings_amt))
+            conn.commit()
+            conn.close()
+        return self._send(200, {"ok": True})
+
+    def _earnings_orders(self):
+        """Admin: attribute a batch of REAL Amazon orders to a click cohort
+        (month × channel × niche × campaign). The dashboard then shows the
+        measured order-rate / commission-per-click for that cohort instead of
+        the global estimate, so the money numbers come from the Associates
+        report, not from assumptions."""
+        body = self._body()
+        month = str(body.get("month") or "").strip()[:7]
+        if not re.match(r"^\d{4}-\d{2}$", month):
+            return self._send(200, {"ok": False, "error": "Month must be YYYY-MM."})
+        channel = str(body.get("channel") or "other").strip().lower()[:32]
+        if not channel:
+            return self._send(200, {"ok": False, "error": "Channel required."})
+        slug = str(body.get("slug") or "").strip().lower()[:64]
+        campaign = str(body.get("campaign") or "").strip()[:64]
+        try:
+            orders = max(int(body.get("orders") or 0), 0)
+            revenue = max(float(body.get("revenue") or 0), 0.0)
+            commission = max(float(body.get("commission") or 0), 0.0)
+        except (TypeError, ValueError):
+            return self._send(200, {"ok": False, "error": "Numbers required."})
+        if not orders and not revenue and not commission:
+            return self._send(200, {"ok": False, "error": "Nothing to log."})
+        with _lock:
+            conn = _db()
+            conn.execute(
+                "INSERT INTO order_attributions "
+                "(month, channel, slug, campaign, orders, revenue, commission) "
+                "VALUES (?,?,?,?,?,?,?) "
+                "ON CONFLICT(month, channel, slug, campaign) DO UPDATE SET "
+                "orders=excluded.orders, revenue=excluded.revenue, "
+                "commission=excluded.commission",
+                (month, channel, slug, campaign, orders, revenue, commission))
             conn.commit()
             conn.close()
         return self._send(200, {"ok": True})
