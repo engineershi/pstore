@@ -4,6 +4,7 @@
 /admin/social page and per-post click attribution via /api/track."""
 
 import json
+import datetime
 import os
 import shutil
 import sys
@@ -24,6 +25,7 @@ import security
 import server
 import seo
 import social
+import webmasters
 
 
 class _WebhookHandler(BaseHTTPRequestHandler):
@@ -1083,6 +1085,151 @@ class TestSocialSuite(unittest.TestCase):
         finally:
             self._restore_drip_settings(saved)
 
+    def test_drip_board_payload_and_backlog_math(self):
+        saved = self._drip_settings()
+        try:
+            server._set_setting("social.drip.last", "2000-01-01")
+            b = server._drip_board()
+            self.assertTrue(b["ok"])
+            for key in ("on", "token", "daily", "min_gap_days", "last_run",
+                        "already_today", "pinnable", "pinned_niches", "backlog",
+                        "backfill_days", "horizon"):
+                self.assertIn(key, b)
+            self.assertEqual(b["daily"], 6)
+            self.assertEqual(b["backlog"],
+                             max(b["pinnable"] - b["pinned_niches"], 0))
+            self.assertFalse(b["already_today"])
+            self.assertIsInstance(b["horizon"], list)
+        finally:
+            self._restore_drip_settings(saved)
+
+    def test_drip_board_gate_and_token_flags(self):
+        saved = self._drip_settings()
+        try:
+            server._set_setting("social.drip", "0")
+            server._set_setting("social.key.pinterest.token", "")
+            b = server._drip_board()
+            self.assertFalse(b["on"])
+            self.assertFalse(b["token"])
+            server._set_setting("social.drip", "1")
+            server._set_setting("social.key.pinterest.token", "pin-token")
+            b = server._drip_board()
+            self.assertTrue(b["on"])
+            self.assertTrue(b["token"])
+        finally:
+            self._restore_drip_settings(saved)
+
+    def test_spawn_first_pin_gating(self):
+        saved = self._drip_settings()
+        try:
+            server._set_setting("social.drip", "0")
+            ok, reason = server._spawn_first_pin("off niche", [{"asin": "B1"}])
+            self.assertEqual((ok, reason), (False, "drip_off"))
+            server._set_setting("social.drip", "1")
+            server._set_setting("social.key.pinterest.token", "")
+            ok, reason = server._spawn_first_pin("no token", [{"asin": "B2"}])
+            self.assertEqual((ok, reason), (False, "no_token"))
+            server._set_setting("social.key.pinterest.token", "pin-token")
+            ok, reason = server._spawn_first_pin("", [{"asin": "B3"}])
+            self.assertEqual((ok, reason), (False, "not_pinnable"))
+        finally:
+            self._restore_drip_settings(saved)
+
+    def test_spawn_first_pin_schedules_once_then_skips(self):
+        saved = self._drip_settings()
+        kw = "fresh drip niche test"
+        try:
+            server._set_setting("social.key.pinterest.token", "pin-token")
+            server._set_setting("social.drip", "1")
+            with server._lock:
+                c = server._db()
+                c.execute("DELETE FROM social_posts WHERE keyword=?", (kw,))
+                c.commit()
+                c.close()
+            ok, reason = server._spawn_first_pin(
+                kw, [{"asin": "B9", "title": "T", "price": 9.99,
+                      "reviews": 1, "stars": 4.5}])
+            self.assertEqual((ok, reason), (True, "scheduled"))
+            ok2, reason2 = server._spawn_first_pin(kw, [{"asin": "B9"}])
+            self.assertEqual((ok2, reason2), (False, "already_pinned"))
+        finally:
+            self._restore_drip_settings(saved)
+
+    def test_drip_api_get_board_and_pace_save(self):
+        saved = self._drip_settings()
+        try:
+            st, _, _, _ = self._raw("/api/social/drip")
+            self.assertEqual(st, 401)
+            server._set_setting("social.key.pinterest.token", "pin-token")
+            st, _, _, data = self._raw("/api/social/drip", cookie=self.cookie)
+            self.assertEqual(st, 200)
+            b = json.loads(data)
+            self.assertTrue(b["ok"])
+            self.assertIn("backlog", b)
+            st, _, _, data = self._raw("/api/social/drip", "POST",
+                                       body=json.dumps({"daily": 3}),
+                                       cookie=self.cookie)
+            self.assertEqual(st, 200)
+            self.assertEqual(json.loads(data)["daily"], 3)
+            self.assertEqual(server._get_setting("social.drip.daily"), "3")
+        finally:
+            self._restore_drip_settings(saved)
+
+    def test_drip_api_run_sweep_respects_today_marker(self):
+        saved = self._drip_settings()
+        try:
+            server._set_setting("social.key.pinterest.token", "pin-token")
+            server._set_setting("social.drip.last",
+                                datetime.datetime.utcnow().strftime("%Y-%m-%d"))
+            st, _, _, data = self._raw("/api/social/drip", "POST",
+                                       body=json.dumps({"run": True}),
+                                       cookie=self.cookie)
+            self.assertEqual(st, 200)
+            res = json.loads(data)
+            self.assertTrue(res["already"])
+            self.assertEqual(res["scheduled"], 0)
+        finally:
+            self._restore_drip_settings(saved)
+
+    def test_save_niche_hook_spawns_first_pin(self):
+        saved = self._drip_settings()
+        saved_topics = server._get_setting("niches.auto_topics")
+        saved_inspect = webmasters.inspect_new
+        saved_gsc = webmasters.gsc_submit_sitemap_daily
+        kw = "hook test %s" % uuid.uuid4().hex[:6]
+        try:
+            webmasters.inspect_new = lambda *a, **k: None
+            webmasters.gsc_submit_sitemap_daily = lambda *a, **k: None
+            server._set_setting("niches.auto_topics", "0")
+            server._set_setting("social.drip", "1")
+            server._set_setting("social.key.pinterest.token", "")
+            self._raw("/api/niches", "POST", cookie=self.cookie,
+                      body=json.dumps({"keyword": kw, "score": 5, "saturation": 1,
+                                       "products": [{"asin": "B9"}]}))
+            server._set_setting("social.key.pinterest.token", "pin-token")
+            kw2 = "hook test b %s" % uuid.uuid4().hex[:6]
+            self._raw("/api/niches", "POST", cookie=self.cookie,
+                      body=json.dumps({"keyword": kw2, "score": 5, "saturation": 1,
+                                       "products": [
+                                           {"asin": "B9", "title": "T",
+                                            "price": 9.99, "reviews": 1,
+                                            "stars": 4.5}]}))
+            with server._lock:
+                c = server._db()
+                row = c.execute(
+                    "SELECT slug, keyword, status, scheduled_at FROM social_posts "
+                    "WHERE lower(platform)='pinterest' AND keyword=?",
+                    (kw2,)).fetchone()
+                c.close()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["slug"], seo._slugify(kw2))
+            self.assertEqual(row["status"], "scheduled")
+            self.assertIsNotNone(row["scheduled_at"])
+        finally:
+            self._restore_drip_settings(saved)
+            server._set_setting("niches.auto_topics", saved_topics)
+            webmasters.inspect_new = saved_inspect
+            webmasters.gsc_submit_sitemap_daily = saved_gsc
 
     def _seed_caption_variants(self, platform="Twitter / X"):
         """Insert two enabled caption variants for a platform on keto-snacks."""

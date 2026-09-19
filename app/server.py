@@ -1542,6 +1542,49 @@ def _pin_health_card_html():
                        hits=hits, traffic=traffic, silent=silent)
 
 
+def _drip_board_card_html():
+    """Flight-board card for /admin/social: gate, token, backlog and the pace
+    needed to clear it, plus inline controls to run a sweep now or change the
+    backfill pace — the visibility loop that makes the drip a system."""
+    b = _drip_board()
+    if not b.get("ok"):
+        return ("<section class='card pin-health-card'><h2>📌 Pinterest drip "
+                "flight board</h2><p class='hint'>Status unavailable.</p></section>")
+    token_cls = "ok" if b["token"] else "bad"
+    token_lbl = "token set" if b["token"] else "NO token"
+    last = b["last_run"] or "never"
+    run_state = ("ran today" if b["already_today"] else "due for today")
+    horizon = "".join(
+        "<li><code>%s</code> <span>%s</span></li>" % (seo._clean(h["slug"]),
+                                                      seo._clean(h["at"] or ""))
+        for h in b["horizon"]) or ("<li class='hint'>nothing queued — run a "
+                                   "sweep below</li>")
+    days = ("%d day(s) at current pace" % b["backfill_days"]
+            if b["backfill_days"] else "backlog clear")
+    return """<section class="card pin-health-card"><h2>📌 Pinterest drip flight board</h2>
+<div class="pin-health-grid">
+<div class="ph-stat %s"><b>%s</b><span>drip gate</span></div>
+<div class="ph-stat %s"><b>%s</b><span>token</span></div>
+<div class="ph-stat"><b>%d</b><span>pinnable niches</span></div>
+<div class="ph-stat %s"><b>%d</b><span>unpinned backlog</span></div>
+<div class="ph-stat %s"><b>%s</b><span>backlog clear</span></div>
+</div>
+<p class="hint" style="margin:8px 0 4px">Last sweep %s · %s · next scheduled pins:</p>
+<ul class="pin-health warn">%s</ul>
+<div class="row" style="align-items:end;margin-top:8px">
+<label>Backfill pace (pins/day) <input id="drip_daily" type="number" min="1" max="50" value="%d"></label>
+<button class="warm" id="drip_run">▶ Run drip sweep now</button>
+<button class="btnline" id="drip_save">Save pace</button>
+</div>
+<p id="dripout" class="msg" style="margin-top:6px"></p>
+</section>""" % (
+        "ok" if b["on"] else "bad", "ON" if b["on"] else "OFF",
+        token_cls, token_lbl, b["pinnable"],
+        ("warn" if b["backlog"] else "ok"), b["backlog"],
+        ("bad" if b["backfill_days"] else "ok"), days,
+        seo._clean(last), seo._clean(run_state), horizon, b["daily"])
+
+
 def _webhook_payload(kit):
     """One Make/Zapier-ready payload per kit. Everything the robot needs:
     copy + tracked link + platform + niche (slug/keyword/board) + both share
@@ -2874,6 +2917,89 @@ def _pin_drip(now=None):
             continue
     _set_setting("social.drip.last", today)
     return {"on": True, "scheduled": scheduled, "niches": len(picked)}
+
+
+def _drip_board():
+    """One shared truth for the Pinterest drip flight board: gate + token, last
+    sweep, the real backlog (pinnable niches with zero Pinterest posts) and the
+    scheduled horizon — so a solo operator sees the system working and knows how
+    fast to run backfill. Feeds GET /api/social/drip and the /admin/social
+    flight-board card. Never raises."""
+    try:
+        gate = _get_setting("social.drip")
+        on = (gate == "" or str(gate).strip().lower() in ("1", "on", "true", "yes"))
+    except Exception:
+        on = True
+    token = _get_setting("social.key.pinterest.token", "") \
+        or _get_setting("social.key.pinterest.access_token", "")
+    try:
+        daily = max(1, min(int(_get_setting("social.drip.daily") or 6), 50))
+    except (TypeError, ValueError):
+        daily = 6
+    try:
+        min_gap = float(_get_setting("social.drip.min_gap_days") or 2.0)
+    except (TypeError, ValueError):
+        min_gap = 2.0
+    last_run = _get_setting("social.drip.last")
+    today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+    try:
+        with _lock:
+            conn = _db()
+            pinnable = conn.execute(
+                "SELECT COUNT(*) c FROM niches WHERE products IS NOT NULL "
+                "AND trim(products) NOT IN ('','[]','{}')").fetchone()["c"]
+            pinned = conn.execute(
+                "SELECT DISTINCT lower(slug) s FROM social_posts "
+                "WHERE lower(platform)='pinterest'").fetchall()
+            horizon = conn.execute(
+                "SELECT slug, keyword, scheduled_at FROM social_posts "
+                "WHERE lower(platform)='pinterest' AND status='scheduled' "
+                "AND scheduled_at >= datetime('now') "
+                "ORDER BY scheduled_at ASC LIMIT 8").fetchall()
+            conn.close()
+    except Exception:
+        return {"ok": False, "error": "db"}
+    pinned_niches = {r["s"] for r in pinned}
+    backlog = max(int(pinnable or 0) - len(pinned_niches), 0)
+    backfill_days = (backlog + daily - 1) // daily if backlog else 0
+    return {
+        "ok": True, "on": on, "token": bool(token), "daily": daily,
+        "min_gap_days": min_gap, "last_run": last_run,
+        "already_today": str(last_run or "") == today,
+        "pinnable": int(pinnable or 0), "pinned_niches": len(pinned_niches),
+        "backlog": backlog, "backfill_days": backfill_days,
+        "horizon": [{"slug": h["slug"], "keyword": h["keyword"],
+                     "at": h["scheduled_at"]} for h in horizon],
+    }
+
+
+def _spawn_first_pin(keyword, products):
+    """Queue the FIRST Pinterest pin for a brand-new niche at the next peak
+    slot, so freshly saved content doesn't sit un-pinned until the next daily
+    drip sweep. Same gating as the drip: off when `social.drip` is disabled,
+    quiet without a Pinterest token, and skipped when the niche already has a
+    pin. Never raises. Returns (scheduled: bool, reason: str)."""
+    try:
+        gate = _get_setting("social.drip")
+        if gate != "" and str(gate).strip().lower() not in ("1", "on", "true", "yes"):
+            return False, "drip_off"
+        token = _get_setting("social.key.pinterest.token", "") \
+            or _get_setting("social.key.pinterest.access_token", "")
+        if not token:
+            return False, "no_token"
+        keyword = keyword or ""
+        if not str(keyword).strip() or not products:
+            return False, "not_pinnable"
+        slug = seo._slugify(keyword)
+        count, _, _ = _drip_state(slug)
+        if count:
+            return False, "already_pinned"
+        at = _next_peak_slots(datetime.datetime.utcnow(), 1)[0]
+        ok = _schedule_drip_pin({"slug": slug, "keyword": keyword or "",
+                                 "items": products, "count": 0, "clicks": 0}, at)
+        return ok, ("scheduled" if ok else "sched_failed")
+    except Exception:
+        return False, "error"
 
 
 _DB_SCHEMA_LOCK = threading.Lock()
@@ -5385,6 +5511,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._seo_snippet(path[len("/seo/snippet/"):])
             if path == "/api/social":
                 return self._social_api(q)
+            if path == "/api/social/drip":
+                return self._drip_api()
             if path == "/keys":
                 return self._keys_page()
             key_group = re.match(r"^/keys/([a-z0-9_-]+)/([a-z0-9_.-]+)$", path)
@@ -5569,6 +5697,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._social_publish_all()
             if parsed.path == "/api/social/pint":
                 return self._social_pint_blitz()
+            if parsed.path == "/api/social/drip":
+                return self._drip_api()
             if parsed.path == "/api/social/schedule":
                 return self._social_schedule()
             if parsed.path == "/api/social/flush":
@@ -5577,8 +5707,6 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._social_blitz()
             if parsed.path == "/api/social/amplify":
                 return self._social_amplify()
-            if parsed.path == "/api/social/drip":
-                return self._social_drip()
             if parsed.path == "/api/social/topics":
                 return self._social_topics()
             if parsed.path == "/api/telegram/state":
@@ -6034,6 +6162,13 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 topics_created = self._generate_topics(slug, 6)
             except Exception:
                 topics_created = []
+        # First-pin auto-spawn: a freshly saved niche gets its first Pinterest
+        # pin queued at the next peak slot right away (gated by the drip +
+        # token), instead of waiting for the next daily sweep.
+        try:
+            _spawn_first_pin(body.get("keyword"), body.get("products"))
+        except Exception:
+            pass
         _bust_admin_data_cache()
         return self._send(200, {"id": nid, "topics_created": len(topics_created)})
 
@@ -9986,6 +10121,45 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
         return self._send(200, {"ok": True, "published": published, "native": native,
                                 "skipped": skipped, "niches": pined})
 
+    def _drip_api(self):
+        """Pinterest drip flight-board API. GET returns the shared board (gate,
+        token, backlog, pace, scheduled horizon). POST actions:
+          {run: true}   — kick a drip sweep right now (respects the once-a-day
+                          marker unless >24h have passed since the last run),
+          {daily: n}    — set the backfill pace (pins/day, 1..50, quota-safe),
+          {min_gap: d}  — tune the min days between two pins of one niche,
+          {enable: b}   — flip the whole drip gate on/off."""
+        if self.command == "POST":
+            body = self._body()
+            if not isinstance(body, dict):
+                return self._send(200, {"ok": False, "error": "json body required"})
+            if "enable" in body:
+                _set_setting("social.drip", "1" if body.get("enable") else "0")
+            recognized = set(body) & {"enable", "daily", "min_gap", "run"}
+            if (not recognized
+                    or any(body.get(k) in (True, 1, "1", "true", "on", "yes")
+                           for k in ("run",))):
+                res = _pin_drip()
+                res["ok"] = True
+                res["board"] = _drip_board()
+                return self._send(200, res)
+            if "daily" in body:
+                try:
+                    daily = max(1, min(int(body["daily"]), 50))
+                except (TypeError, ValueError):
+                    return self._send(200, {"ok": False, "error": "Pace must be 1..50 pins/day."})
+                _set_setting("social.drip.daily", str(daily))
+            if "min_gap" in body:
+                try:
+                    min_gap = max(0.5, min(float(body["min_gap"]), 30.0))
+                except (TypeError, ValueError):
+                    return self._send(200, {"ok": False, "error": "Min gap must be a number."})
+                _set_setting("social.drip.min_gap_days", str(min_gap))
+            b = _drip_board()
+            b["ok"] = True
+            return self._send(200, b)
+        return self._send(200, _drip_board())
+
     def _schedule_times(self, count, hours=24, now=None):
         """Spread `count` posts across the next `hours`, but snap each slot to a
         high-engagement window (peak-slot biasing) so a niche's batch lands when
@@ -10091,18 +10265,6 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
             val = "1" if body.get("enable") else "0"
             _set_setting("social.amplify", val)
         res = _auto_amplify_winners()
-        return self._send(200, dict(res, ok=True))
-
-    def _social_drip(self):
-        """Manual trigger for the Pinterest fresh-pin drip (POST
-        /api/social/drip), so an owner can queue fresh pins on demand instead of
-        waiting for the daily daemon sweep. Also toggles the feature via a JSON
-        `enable` flag."""
-        body = self._body()
-        if "enable" in body:
-            val = "1" if body.get("enable") else "0"
-            _set_setting("social.drip", val)
-        res = _pin_drip()
         return self._send(200, dict(res, ok=True))
 
     def _auto_amplify(self, now=None):
@@ -10305,6 +10467,10 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
             pin_health_html = _pin_health_card_html()
         except Exception:
             pin_health_html = ""
+        try:
+            drip_board_html = _drip_board_card_html()
+        except Exception:
+            drip_board_html = ""
         body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Social — pstore</title><link rel="stylesheet" href="/style.css">
@@ -10357,6 +10523,7 @@ ul.pin-health.bad li {{ border-color:#e6b0a5; }}
 {self._admin_nav('social')}
 </header>
 <main>
+{drip_board_html}
 {pin_health_html}
 <section class="card"><h2>📣 Tracked post kits</h2>
 <p class="hint" style="margin-top:-4px">Webhook: {webhook_state}</p>
@@ -10458,6 +10625,29 @@ async function recycle(){{
     ? "Built kits from " + d.kits_built + " long-tail page(s); " + d.scheduled + " scheduled across 48h (" + d.niches.length + " niches)."
     : "Recycle failed.";
   setTimeout(()=>location.reload(), 1200);
+}}
+async function driprun() {{
+  $("dripout").textContent = "Running drip sweep…";
+  const r = await fetch("/api/social/drip", {{method:"POST", headers:{{"Content-Type":"application/json"}},
+    body: JSON.stringify({{run: true}})}});
+  const d = await r.json().catch(()=>({{ok:false}}));
+  $("dripout").textContent = d && d.ok
+    ? (d.already
+       ? "Drip already ran today (scheduled " + (d.board?.backlog || 0) + " backlog remains)."
+       : "Scheduled " + (d.scheduled || 0) + " pin(s)" + (d.need_token ? " — no Pinterest token yet." : "") + ".")
+    : "Drip sweep failed.";
+  setTimeout(()=>location.reload(), 1200);
+}}
+async function dripsave() {{
+  $("dripout").textContent = "Saving pace…";
+  const r = await fetch("/api/social/drip", {{method:"POST", headers:{{"Content-Type":"application/json"}},
+    body: JSON.stringify({{daily: parseInt($("drip_daily").value || "6", 10)}})}});
+  const d = await r.json().catch(()=>({{ok:false}}));
+  $("dripout").textContent = d && d.ok ? "Pace saved to " + d.daily + " pin(s)/day." : "Save failed.";
+  setTimeout(()=>location.reload(), 1200);
+}}
+if ($("drip_run")) $("drip_run").onclick = driprun;
+if ($("drip_save")) $("drip_save").onclick = dripsave;
 }}
 async function ampl(){{
   $("ampout").textContent = "Amplifying winners…";
