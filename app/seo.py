@@ -205,8 +205,13 @@ def _product_graph(items, page_url=None, slug=None):
         node = {"@type": "Product", "name": it.get("title")}
         if it.get("image"):
             node["image"] = it["image"]
+        elif slug:
+            node["image"] = "%s/og/%s.png" % (BASE_URL, slug)
+        if it.get("title"):
+            node["description"] = it["title"]
         if it.get("asin"):
             node["sku"] = it["asin"]
+            node["mpn"] = it["asin"]
             if page_url:
                 node["@id"] = page_url.rstrip("/") + "#product-" + it["asin"]
         offers = {"@type": "Offer"}
