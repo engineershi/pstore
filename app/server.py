@@ -1930,6 +1930,43 @@ def _set_setting(key, value):
         pass
 
 
+_VERIFY_SETTERS = {
+    "google": seo.set_google_site_verification,
+    "bing": seo.set_bing_site_verification,
+    "yandex": seo.set_yandex_site_verification,
+    "pinterest": seo.set_pinterest_site_verification,
+}
+_VERIFY_ENV = {
+    "google": seo.GOOGLE_SITE_VERIFICATION,
+    "bing": seo.BING_SITE_VERIFICATION,
+    "yandex": seo.YANDEX_SITE_VERIFICATION,
+    "pinterest": seo.PINTEREST_SITE_VERIFICATION,
+}
+
+
+def _set_saved_verification(engine, token):
+    """Apply + persist a search/social engine ownership token so it survives
+    redeploys. The env var (PSTORE_*_VERIFICATION) still wins at read time; a
+    UI-pasted token must not vanish on restart."""
+    setter = _VERIFY_SETTERS.get(engine)
+    if setter is None:
+        return
+    token = (token or "").strip()
+    setter(token)
+    _set_setting("site.verify." + engine, token)
+
+
+def _load_saved_verification_tokens():
+    """At boot, re-apply ownership tokens saved through the UI. If the env var
+    is set it wins, so a stored token is only used as the fallback."""
+    for engine, env_val in _VERIFY_ENV.items():
+        if (env_val or "").strip():
+            continue
+        saved = _get_setting("site.verify." + engine, "").strip()
+        if saved:
+            _VERIFY_SETTERS[engine](saved)
+
+
 # ------------------------------------------------------------ daily content engine
 def _niches_rows():
     """All saved niches as plain dicts (SQL rows, single connection) — for
@@ -7851,11 +7888,7 @@ document.addEventListener("click", function (e) {{
             return self._send(200, {"ok": True})
         if action == "verify" and engine in ("google", "bing", "yandex", "pinterest"):
             token = (body.get("token") or "").strip()
-            setter = {"google": seo.set_google_site_verification,
-                      "bing": seo.set_bing_site_verification,
-                      "yandex": seo.set_yandex_site_verification,
-                      "pinterest": seo.set_pinterest_site_verification}[engine]
-            setter(token)
+            _set_saved_verification(engine, token)
             return self._send(200, {"ok": True, "engine": engine,
                                     "active": bool(token)})
         if action == "connect" and engine in ("gsc", "yandex"):
@@ -8652,15 +8685,33 @@ $("key").addEventListener("keydown", e => {{ if (e.key === "Enter") $("save").on
                                         "live": indexnow.key(),
                                         "note": "applies now; set INDEXNOW_KEY env to persist"})
             if key_id == "gsc":
-                seo.set_google_site_verification(key)
+                _set_saved_verification("google", key)
                 return self._send(200, {"ok": True, "provider": "gsc",
                                         "set": bool(key),
-                                        "note": "applies now; set PSTORE_GOOGLE_SITE_VERIFICATION env to persist"})
+                                        "note": "applies now and survives redeploys "
+                                                "(env PSTORE_GOOGLE_SITE_VERIFICATION "
+                                                "still wins)"})
+            if key_id == "bing":
+                _set_saved_verification("bing", key)
+                return self._send(200, {"ok": True, "provider": "bing",
+                                        "set": bool(key),
+                                        "note": "applies now and survives redeploys "
+                                                "(env PSTORE_BING_SITE_VERIFICATION "
+                                                "still wins)"})
+            if key_id == "yandex":
+                _set_saved_verification("yandex", key)
+                return self._send(200, {"ok": True, "provider": "yandex",
+                                        "set": bool(key),
+                                        "note": "applies now and survives redeploys "
+                                                "(env PSTORE_YANDEX_VERIFICATION "
+                                                "still wins)"})
             if key_id == "pinterest":
-                seo.set_pinterest_site_verification(key)
+                _set_saved_verification("pinterest", key)
                 return self._send(200, {"ok": True, "provider": "pinterest",
                                         "set": bool(key),
-                                        "note": "applies now; set PSTORE_PINTEREST_VERIFICATION env to persist"})
+                                        "note": "applies now and survives redeploys "
+                                                "(env PSTORE_PINTEREST_VERIFICATION "
+                                                "still wins)"})
             return self._send(200, {"ok": False, "error": "unknown site token"})
         if group == "market":
             if key_id == "affiliate":
@@ -18606,6 +18657,7 @@ Handler._tg_config_save = telegram_admin._config_save
 
 def main():
     _init()
+    _load_saved_verification_tokens()
     if not _ADMIN_CRED_VIA_ENV:
         print("WARNING: PSTORE_ADMIN_EMAIL / PSTORE_ADMIN_PASSWORD not both set — admin login "
               "uses an EPHEMERAL single-boot credential (email=%s password=%s). Set both env "

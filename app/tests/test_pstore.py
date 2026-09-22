@@ -1154,6 +1154,58 @@ class TestRoutes(unittest.TestCase):
         finally:
             seo._GOOGLE_SITE_VERIFICATION_RUNTIME = saved
 
+    def test_keys_save_owner_tokens_persist_across_boot(self):
+        """Bing + Yandex ownership metas saved through the UI must apply now
+        AND survive redeploys: the token is written to settings so a fresh
+        boot re-applies it. Regression: msvalidate.01 lived only in a module
+        global and vanished after a redeploy."""
+        import json as _json
+        from urllib.parse import urlencode
+        prev_bing = seo._BING_SITE_VERIFICATION_RUNTIME
+        prev_yandex = seo._YANDEX_SITE_VERIFICATION_RUNTIME
+        conn = server._db()
+        try:
+            conn.execute("DELETE FROM settings WHERE key LIKE 'site.verify.%'")
+            conn.commit()
+        finally:
+            conn.close()
+        try:
+            for keyid, eng, getter in (
+                    ("bing", "bing", seo.bing_site_verification),
+                    ("yandex", "yandex", seo.yandex_site_verification)):
+                token = "tok-%s-12345" % eng
+                body = urlencode({"group": "site", "keyid": keyid,
+                                  "key": token}).encode()
+                st, _, _, body = self._raw("/api/keys/save", "POST",
+                                           body=body, cookie=self.cookie)
+                self.assertEqual(st, 200)
+                self.assertTrue(_json.loads(body)["ok"])
+                self.assertEqual(getter(), token)
+                self.assertEqual(server._get_setting("site.verify.%s" % eng),
+                                 token)
+            # "fresh boot": wipe the runtime overrides, re-apply from store
+            seo._BING_SITE_VERIFICATION_RUNTIME = None
+            seo._YANDEX_SITE_VERIFICATION_RUNTIME = None
+            server._load_saved_verification_tokens()
+            self.assertEqual(seo.bing_site_verification(), "tok-bing-12345")
+            self.assertEqual(seo.yandex_site_verification(), "tok-yandex-12345")
+            # clearing also persists (and the meta stops being emitted)
+            body = urlencode({"group": "site", "keyid": "bing", "key": ""}).encode()
+            st, _, _, body = self._raw("/api/keys/save", "POST", body=body,
+                                       cookie=self.cookie)
+            self.assertEqual(st, 200)
+            self.assertEqual(server._get_setting("site.verify.bing"), "")
+            self.assertEqual(seo.bing_site_verification(), "")
+        finally:
+            seo._BING_SITE_VERIFICATION_RUNTIME = prev_bing
+            seo._YANDEX_SITE_VERIFICATION_RUNTIME = prev_yandex
+            conn = server._db()
+            try:
+                conn.execute("DELETE FROM settings WHERE key LIKE 'site.verify.%'")
+                conn.commit()
+            finally:
+                conn.close()
+
     def test_keys_save_gsc_accepts_full_meta_tag(self):
         """Pasting the entire <meta name="google-site-verification" ... /> tag
         Google hands you (or just the content="..." bit) must normalize to the
