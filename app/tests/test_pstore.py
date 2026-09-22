@@ -2,6 +2,7 @@
 """Offline tests for pstore (no live network). Stub amazon._urlopen."""
 import json
 import os
+import re
 import sys
 import unittest
 import urllib.request
@@ -439,6 +440,39 @@ class TestSEO(unittest.TestCase):
         self.assertLess(html.index("application/ld+json"), html.index("</head>"))
         self.assertIn('"@type": "Product"', html)
         self.assertTrue(html.rstrip().endswith("</html>"))
+
+    def test_product_offers_require_price_currency_availability(self):
+        # Google rich results reject an Offer without "price"; non-critical
+        # warnings fire when priceCurrency, availability, aggregateRating or
+        # review are missing. Only fully-populated products may be marked up:
+        # a priced+rated item emits the complete trio + aggregateRating, while
+        # rows missing a price OR the rating data are skipped entirely.
+        import json
+        html = seo.render_niche("keto snacks", {
+            "products": [
+                {"asin": "B0KETO1234", "title": "Keto Bar", "price": 12.99,
+                 "stars": 4.5, "reviews": 10, "url": "https://www.amazon.com/dp/B0KETO1234"},
+                {"asin": "B0KETO9999", "title": "Unpriced Snack Jar",
+                 "stars": 4.0, "reviews": 3, "url": "https://www.amazon.com/dp/B0KETO9999"},
+                {"asin": "B0KETO7777", "title": "Unrated New Product", "price": 8.0,
+                 "url": "https://www.amazon.com/dp/B0KETO7777"},
+            ],
+            "source": "amazon"}).decode("utf-8")
+        blocks = re.findall(r'<script type="application/ld\+json">(.*?)</script>',
+                            html, re.S)
+        products = []
+        for block in blocks:
+            data = json.loads(block)
+            for node in (data.get("@graph", [data]) if isinstance(data, dict) else [data]):
+                if isinstance(node, dict) and node.get("@type") == "Product":
+                    products.append(node)
+        names = {p["name"] for p in products}
+        self.assertEqual(names, {"Keto Bar"})
+        node = products[0]
+        off = node["offers"]
+        self.assertEqual(sorted(off), sorted(["@type", "price", "priceCurrency",
+                                              "availability", "url"]))
+        self.assertIn("aggregateRating", node)
 
     def test_sitemap(self):
         s = seo.render_sitemap([("/", "2026-08-28"), ("/n/keto-snacks", "2026-08-28")])

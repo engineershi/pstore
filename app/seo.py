@@ -190,9 +190,11 @@ def _slugify(text):
 
 def _product_graph(items, page_url=None, slug=None):
     """Product nodes (+Offer, +AggregateRating) for niche/topic/landing pages.
-    Every field is emitted only when there is data for it — a null price or an
-    incomplete rating would fail Google's Rich Results validation — and each
-    node carries a stable @id so the graph's ItemList can reference it."""
+    Only fully-populated products are marked up: Google rejects an Offer without
+    a price and flags nodes missing priceCurrency, availability, aggregateRating
+    or review — so rows missing the price or the rating data are skipped rather
+    than serialized half-dressed. Each node carries a stable @id so the graph's
+    ItemList can reference it."""
     graph = []
     for it in (items or [])[:10]:
         if not it.get("title"):
@@ -202,6 +204,8 @@ def _product_graph(items, page_url=None, slug=None):
             isinstance(price, (int, float)) and float(price) <= 0)
         stars = it.get("stars")
         reviews = it.get("reviews")
+        if not have_price or not stars or not reviews:
+            continue
         node = {"@type": "Product", "name": it.get("title")}
         if it.get("image"):
             node["image"] = it["image"]
@@ -214,23 +218,20 @@ def _product_graph(items, page_url=None, slug=None):
             node["mpn"] = it["asin"]
             if page_url:
                 node["@id"] = page_url.rstrip("/") + "#product-" + it["asin"]
-        offers = {"@type": "Offer"}
+        node["offers"] = {"@type": "Offer",
+                          "price": price if isinstance(price, (int, float))
+                          else str(price),
+                          "priceCurrency": it.get("currency") or "USD",
+                          "availability": "https://schema.org/InStock"}
         if it.get("url"):
-            offers["url"] = it["url"]
-        if have_price:
-            offers["price"] = price if isinstance(price, (int, float)) \
-                else str(price)
-            offers["priceCurrency"] = it.get("currency") or "USD"
-            offers["availability"] = "https://schema.org/InStock"
-        node["offers"] = offers
-        if stars and reviews:
-            node["aggregateRating"] = {
-                "@type": "AggregateRating",
-                "ratingValue": round(float(stars), 1),
-                "reviewCount": int(reviews),
-                "bestRating": 5,
-                "worstRating": 1,
-            }
+            node["offers"]["url"] = it["url"]
+        node["aggregateRating"] = {
+            "@type": "AggregateRating",
+            "ratingValue": round(float(stars), 1),
+            "reviewCount": int(reviews),
+            "bestRating": 5,
+            "worstRating": 1,
+        }
         graph.append(node)
     return graph
 
@@ -263,7 +264,7 @@ def landing_product_jsonld(pick, page_url, image_url=""):
             else str(price)
         offers["priceCurrency"] = pick.get("currency") or "USD"
         offers["availability"] = "https://schema.org/InStock"
-    node["offers"] = offers
+        node["offers"] = offers
     stars, reviews = pick.get("stars"), pick.get("reviews")
     if stars and reviews:
         node["aggregateRating"] = {
