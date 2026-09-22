@@ -101,8 +101,29 @@ DEFAULT_SECTION_ORDER = [
 
 # ── default style palette ──────────────────────────────────────────────────────
 # Style keys: mode(light|dark), bg, card_bg, accent, accent2, text, muted,
-# cta_gradient, font_family, border_radius, layout, hero_style.
+# cta_gradient, font_family, border_radius, layout, hero_style. Every style also
+# carries a "theme" marker so onpagers created/edited after the premium update
+# are never re-skimmed by normalize_style().
 DEFAULT_STYLE = {
+    "preset": "premium",
+    "theme": "premium",
+    "mode": "light",
+    "bg": "#f6f7f9",
+    "card_bg": "#ffffff",
+    "accent": "#0f8b9d",
+    "accent2": "#4f67e0",
+    "text": "#262b36",
+    "muted": "#66707f",
+    "cta_gradient": "linear-gradient(135deg, #0f8b9d, #14afb6)",
+    "font_family": "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+    "border_radius": "20px",
+    "layout": "centered",           # centered | wide | split
+    "hero_style": "gradient",       # gradient | minimal | bold
+}
+
+# The pre-premium default — kept as a reference so stock rows can be told apart
+# from custom edits when upgrading legacy data.
+_LEGACY_DEFAULT_STYLE = {
     "preset": "sunset",
     "mode": "light",
     "bg": "#fff7ec",
@@ -114,8 +135,8 @@ DEFAULT_STYLE = {
     "cta_gradient": "linear-gradient(135deg, #ff6b2c, #ff873c)",
     "font_family": "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
     "border_radius": "22px",
-    "layout": "centered",           # centered | wide | split
-    "hero_style": "gradient",       # gradient | minimal | bold
+    "layout": "centered",
+    "hero_style": "gradient",
 }
 
 
@@ -188,16 +209,59 @@ STYLE_PRESETS = {
             "hero_style": "gradient",
         },
     },
+    "premium": {
+        "label": "Premium Minimal", "desc": "Calm teal, high-trust, editorial",
+        "swatches": ["#f6f7f9", "#0f8b9d", "#4f67e0"],
+        "style": DEFAULT_STYLE,
+    },
 }
 
 
+# Legacy stock values (the pre-premium default + presets) — used to tell a
+# stored value that is "just the old default" apart from a deliberate custom
+# edit when upgrading legacy onepagers.
+_LEGACY_STOCK = [_LEGACY_DEFAULT_STYLE] + [
+    p.get("style") or {} for name, p in STYLE_PRESETS.items() if name != "premium"]
+_STOCK_VALUES = {}
+for _sd in _LEGACY_STOCK:
+    for _key, _val in (_sd or {}).items():
+        _STOCK_VALUES.setdefault(_key, set()).add(_val)
+
+
+def normalize_style(style):
+    """Return a complete, premium-consistent style for any onepager.
+
+    Styles with a "theme" marker were saved by the editor after the premium
+    update and are returned untouched. Legacy rows (stock defaults or old
+    presets, stored before the theme marker existed) have every field upgraded
+    to the premium default unless the stored value is a custom edit that was
+    never a legacy stock value."""
+    style = dict(style or {})
+    if style.get("theme"):
+        return style
+    out = dict(DEFAULT_STYLE)
+    for key, val in style.items():
+        if val in (None, ""):
+            continue
+        stock = _STOCK_VALUES.get(key)
+        if stock is not None and val in stock:
+            continue
+        out[key] = val
+    return out
+
+
 def preset_style(name):
-    """Return a copy of a preset's style dict (or the default when unknown)."""
+    """Return a copy of a preset's style dict (or the default when unknown).
+    Stamps the preset's "theme" marker so the style is treated as explicit and
+    never re-skinned by normalize_style()."""
     p = STYLE_PRESETS.get(name or "")
     if not p:
-        return dict(DEFAULT_STYLE)
+        style = dict(DEFAULT_STYLE)
+        style["preset"] = DEFAULT_STYLE.get("preset", "premium")
+        return style
     style = dict(p.get("style") or {})
     style["font_family"] = DEFAULT_STYLE["font_family"]
+    style["theme"] = name
     return style
 
 # ── default section content ────────────────────────────────────────────────────
@@ -644,10 +708,7 @@ def build_page_context(conn, keyword, niche_data):
         sec_data["_meta"] = SECTION_TYPES.get(stype, {})
         sections.append(sec_data)
 
-    style = page.get("style") or DEFAULT_STYLE
-    if not style.get("preset"):
-        style = dict(style)
-        style["preset"] = "sunset"
+    style = normalize_style(page.get("style") or DEFAULT_STYLE)
     settings = merge_settings(page.get("settings") or {})
 
     return {

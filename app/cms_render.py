@@ -39,12 +39,13 @@ def _rgba(hexc, alpha):
 # (the old saturated accent-on-accent gradient drowned the headline and wash
 # out the subheadline).
 _CALM_HERO_BANDS = {
+    "premium": "linear-gradient(135deg, #e8f4f6 0%, #eef2ff 55%, #f3f1ff 100%)",
     "sunset": "linear-gradient(135deg, #ffe9d6 0%, #f6e2ff 52%, #dff4e8 100%)",
     "clean": "linear-gradient(135deg, #e3efff 0%, #e2f3fe 50%, #eef2ff 100%)",
     "forest": "linear-gradient(135deg, #dcf3e5 0%, #d5efe8 55%, #eef2ff 100%)",
     "ocean": "linear-gradient(135deg, #d7edff 0%, #e2e8ff 52%, #eef2ff 100%)",
 }
-_FALLBACK_CALM_BAND = "linear-gradient(135deg, #e7f0ff 0%, #eae5ff 50%, #e0f5ea 100%)"
+_FALLBACK_CALM_BAND = "linear-gradient(135deg, #e8f4f6 0%, #eef2ff 55%, #f3f1ff 100%)"
 
 
 def _style_css(style):
@@ -55,16 +56,16 @@ def _style_css(style):
     """
     s = style or {}
     dark = (s.get("mode") or "light") == "dark"
-    radius = s.get("border_radius", "22px")
+    radius = s.get("border_radius", "20px")
     font = s.get("font_family",
                  "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif")
-    accent = s.get("accent", "#ff6b2c")
-    accent2 = s.get("accent2", "#7c5cff")
-    text = s.get("text", "#2b2233")
-    muted = s.get("muted", "#887b94")
-    bg = s.get("bg", "#fff7ec")
+    accent = s.get("accent", "#0f8b9d")
+    accent2 = s.get("accent2", "#4f67e0")
+    text = s.get("text", "#262b36")
+    muted = s.get("muted", "#66707f")
+    bg = s.get("bg", "#f6f7f9")
     card_bg = s.get("card_bg", "#ffffff")
-    cta_grad = s.get("cta_gradient", "linear-gradient(135deg, #ff6b2c, #ff873c)")
+    cta_grad = s.get("cta_gradient", "linear-gradient(135deg, #0f8b9d, #14afb6)")
     cta_grad2 = "linear-gradient(135deg, %s, %s)" % (accent2, accent)
     hero_style = s.get("hero_style", "gradient")
 
@@ -78,10 +79,10 @@ def _style_css(style):
         inputs_bg = "#1d2740"
         inputs_bd = "rgba(255,255,255,.18)"
     else:
-        line = "rgba(20,12,40,.10)"
+        line = "rgba(16,19,27,.10)"
         soft = "#ffffff"
-        soft2 = "#fffdf8"
-        shadow = "0 18px 44px rgba(255,120,60,.14)"
+        soft2 = "#fbfcfe"
+        shadow = "0 18px 44px rgba(15,139,157,.16)"
         hero_band = _CALM_HERO_BANDS.get(s.get("preset") or "", _FALLBACK_CALM_BAND)
         badge_bg = "#eee9ff"
         inputs_bg = "#ffffff"

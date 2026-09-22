@@ -63,8 +63,20 @@ def _review_hum(reviews):
     return "%s" % (int(reviews) if isinstance(reviews, (int, float)) else reviews)
 
 
-def _display(item):
-    return item.get("title") or item.get("asin") or "this pick"
+_ASINISH = re.compile(r"^B[0-9A-Z]{9}$")
+
+
+def _display(item, keyword=None):
+    """Human-facing name for a pick. Never leaks a bare ASIN as a title —
+    listings without a real title get a clean, keyword-rich label instead."""
+    it = item or {}
+    title = str(it.get("title") or "").strip()
+    asin = str(it.get("asin") or "").strip()
+    if not title or (asin and title.lower() == asin.lower()) or _ASINISH.match(title.upper()):
+        if keyword and str(keyword).strip():
+            return "Top %s option" % str(keyword).strip()
+        return "This pick"
+    return title
 
 
 def _aff(item):
@@ -200,7 +212,7 @@ def pros_cons(item, items):
     return pros, cons
 
 
-def comparison_rows(items, start=1, top_asin=None):
+def comparison_rows(items, start=1, top_asin=None, keyword=None):
     """Rows for the scannable comparison table."""
     rows = []
     scored = score_items(items)
@@ -208,7 +220,7 @@ def comparison_rows(items, start=1, top_asin=None):
         asin = it.get("asin") or ""
         rows.append({
             "rank": "#%d" % (start + idx),
-            "title": it.get("title") or it.get("asin") or "—",
+            "title": _display(it, keyword),
             "asin": asin,
             "price": _price(it) or "—",
             "stars": ("★ %s" % it["stars"]) if isinstance(it.get("stars"), (int, float)) else "—",
@@ -245,7 +257,7 @@ _FAQS = (
 def faq(keyword, best):
     out = []
     price = _price(best) or "a live Amazon price"
-    pick = _display(best)
+    pick = _display(best, keyword)
     for q, a in _FAQS:
         out.append((q.format(kw=keyword), a.format(kw=keyword, pick=pick, price=price)))
     return out
@@ -300,7 +312,7 @@ def trust_block_html():
             'Associate we earn from qualifying purchases), which may earn us '
             'a commission if you buy — the price you pay never changes. '
             'Questions or corrections? We answer everything at '
-            '<a href="/contact">Contact</a>.</p></div>')
+            '<a href="/contact">Contact.</a></p></div>')
 
 
 def urgency_html():
@@ -392,7 +404,7 @@ def pick_html(keyword, item, idx, items):
             '<div class="pilo"><div><h4>Good to know</h4><ul class="pros">%s</ul></div>'
             '<div><h4>Watch out</h4><ul class="cons">%s</ul></div></div>'
             '<p class="starsline">%s %s</p>%s%s</div>'
-            % (" top" if idx == 0 else "", idx + 1, _clean(_display(item)), badge,
+            % (" top" if idx == 0 else "", idx + 1, _clean(_display(item, keyword)), badge,
                _clean(quick_take(item, items)), _clean(why), pros, cons,
                stars, reviews, cta, watch))
 
@@ -417,7 +429,7 @@ def upsell_block(items, keyword=""):
                 '<strong>%s</strong>'
                 '<a class="btn" href="%s" data-asin="%s" target="_blank" '
                 'rel="nofollow sponsored noopener">%s</a></div>'
-                % (_clean(tag), _clean(_display(it)), _clean(_link(it)),
+                % (_clean(tag), _clean(_display(it, keyword)), _clean(_link(it)),
                    _clean(it.get("asin") or ""), label))
     pieces = [card(pick, "Top pick")]
     pieces += [card(it, "Also consider") for it in alt]
@@ -429,8 +441,9 @@ def upsell_block(items, keyword=""):
             % (heading, "".join(pieces)))
 
 
-def comparison_html(items):
-    rows = comparison_rows(items, top_asin=(best_pick(items) or {}).get("asin"))
+def comparison_html(items, keyword=None):
+    rows = comparison_rows(items, top_asin=(best_pick(items) or {}).get("asin"),
+                           keyword=keyword)
     body = "".join(
         "<tr%s><td>%s</td><td class='ct'><a href='%s' data-asin='%s'>%s</a></td><td>%s</td>"
         "<td>%s</td><td>%s</td><td>%s</td></tr>" % (
@@ -543,7 +556,7 @@ def featured_html(saved_niches):
             '<p class="quick">%s</p>'
             '<p class="starsline">%s%s · %s</p>'
             '<p class="why">Full ranking: <a href="%s">our %s picks</a>.</p>%s</div></section>'
-            % (_clean(_display(top)), _clean(quick_take(top, [top])),
+            % (_clean(_display(top, kw)), _clean(quick_take(top, [top])),
                stars, price_txt, kw,
                "/n/" + _slug(kw), _clean(kw), cta))
 
@@ -585,7 +598,7 @@ def quick_picks_band(saved_niches, count=3):
             '<p class="quick">%s</p>'
             '<p class="why">%s</p>'
             '<p class="starsline">%s %s</p>%s</div>'
-            % (" top" if idx == 0 else "", ("#%d" % (idx + 1)), _clean(_display(top)),
+            % (" top" if idx == 0 else "", ("#%d" % (idx + 1)), _clean(_display(top, kw)),
                _clean(badge), _clean(kw), _clean(quick_take(top, [top])), _clean(why),
                stars, reviews, cta))
     return '<section class="card qband"><h2>Quick verdict — today’s top picks</h2>' \

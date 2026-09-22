@@ -204,7 +204,7 @@ def _chapters():
             "social, QR codes or emails) into subscribers and Amazon clicks. You run "
             "it entirely from the Landing Pages editor (/admin/cms) - no code.")
         doc.bullets([
-            "Pick a style template in one click: sunset (warm default), clean, forest, ocean or midnight (dark). The preset re-skins the entire page instantly.",
+            "Pick a style template in one click: premium minimal (calm teal default), sunset, clean, forest, ocean or midnight (dark). The preset re-skins the entire page instantly.",
             "Feature toggles switch the promo banner + discount code, the countdown timer, the sticky buy button and reveal animations on or off per niche.",
             "Every section has its own show/hide switch: hero, social proof, product spotlight, email gate, testimonials, urgency, guarantee, FAQ and more.",
             "Generate copy rebuilds all section text from the niche in one click; Apply preset re-skins without touching your custom copy - the two never fight.",
@@ -849,7 +849,7 @@ def render_admin_manual(nav_html, totop_html):
 <h3 id="lp">6 · The landing page — CMS sales page</h3>
 <p>Every niche gets a dedicated, fully editable <b>sales landing page at <code>/lp/&lt;slug&gt;</code></b> — the money page that turns cold traffic (Google, social, QR codes, email) into subscribers and Amazon clicks. You run it entirely from the <a class="tooltag" href="/admin/cms">🎨 Landing pages</a> editor, no code.</p>
 <ul class="step-list">
-<li><b>Style templates in one click:</b> sunset (warm default), clean, forest, ocean or midnight (dark) — the preset re-skins the entire page, including dark mode.</li>
+<li><b>Style templates in one click:</b> premium minimal (calm teal default), sunset, clean, forest, ocean or midnight (dark) — the preset re-skins the entire page, including dark mode.</li>
 <li><b>Feature toggles per niche:</b> promo banner + discount code, countdown timer, sticky buy button and reveal animations — each on/off.</li>
 <li><b>Every section has a show/hide switch:</b> hero, social proof, product spotlight, email gate, testimonials, urgency, guarantee, FAQ and more.</li>
 <li><b>Generate copy</b> rebuilds all section text from the niche in one click; <b>Apply preset</b> re-skins without touching your custom copy — the two never fight.</li>

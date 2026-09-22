@@ -9588,12 +9588,12 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
         e = seo._clean
         style = dict(page.get("style") or {})
         if not style.get("preset"):
-            style["preset"] = "sunset"
+            style["preset"] = cms_mod.DEFAULT_STYLE.get("preset", "premium")
         s = cms_mod.merge_settings(page.get("settings") or {})
         promo = s.get("promo") or {}
         sections = page.get("sections") or []
         live_url = "/lp/" + e(seo._slugify(keyword))
-        current_preset = style.get("preset", "sunset")
+        current_preset = style.get("preset", cms_mod.DEFAULT_STYLE.get("preset", "premium"))
 
         # ── one-click style templates ──────────────────────────────────────
         preset_cards = []

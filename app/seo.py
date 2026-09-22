@@ -679,7 +679,7 @@ def render_landing(saved_niches):
     for n in (top_pick_niches or []):
         if n.get("products"):
             comp_kw = n["keyword"]
-            comp_preview = editorial.comparison_html(n["products"])
+            comp_preview = editorial.comparison_html(n["products"], n["keyword"])
             break
     niche_count = len(top_pick_niches)
     pick_count = sum(len((n or {}).get("products") or []) for n in top_pick_niches)
@@ -820,7 +820,7 @@ def render_niche(keyword, niche, saved_niches=None, ab_headline=None, ab_variant
   {ranked}
   {editorial.upsell_block(items, keyword)}
   {lead_gate_html(keyword, "niche") if items else ""}
-  {editorial.comparison_html(items) if items else ""}
+  {editorial.comparison_html(items, keyword) if items else ""}
   {editorial.methodology_html()}
   {editorial.related_html(keyword, saved_niches) if saved_niches else ""}
 </div>
@@ -915,7 +915,7 @@ def render_topic(term, parent_keyword, niche, parent_slug, style_pack=None):
   {ranked}
   {editorial.upsell_block(items, term or parent_keyword)}
   {lead_gate_html(term or parent_keyword, "topic") if items else ""}
-  {editorial.comparison_html(items) if items else ""}
+  {editorial.comparison_html(items, term or parent_keyword) if items else ""}
   {editorial.methodology_html()}
   <p class="hint">This is a focused sub-topic of our <a href="{_clean(hub)}">full {_clean(parent_keyword)} guide</a>.</p>
 </div>
@@ -990,7 +990,7 @@ def render_priceband(amount, parent_keyword, parent_slug, items,
   {ranked}
   {editorial.upsell_block(band, term_label)}
   {lead_gate_html(term_label, "priceband") if band else ""}
-  {editorial.comparison_html(band) if band else ""}
+  {editorial.comparison_html(band, parent_keyword) if band else ""}
   {editorial.methodology_html()}
   <p class="hint">This is a budget slice of our <a href="{_clean(hub)}">full {_clean(parent_keyword)} guide</a>.</p>
 </div>
@@ -1055,7 +1055,7 @@ def render_vs(title_a, title_b, a_asin, b_asin, parent_keyword, parent_slug,
   <h2>The verdict</h2>
   {ranked}
   {lead_gate_html(term_label, "vs") if cand else ""}
-  {editorial.comparison_html(cand) if cand else ""}
+  {editorial.comparison_html(cand, parent_keyword) if cand else ""}
   {editorial.methodology_html()}
   <p class="hint">Part of our <a href="{_clean(hub)}">full {_clean(parent_keyword)} guide</a>.</p>
 </div>
@@ -1188,6 +1188,8 @@ def story_cards(keyword, niche, base_url=None):
     base = (base_url or BASE_URL).rstrip("/")
     slides = [{
         "kind": "cover",
+        "keyword": keyword,
+        "count": len(items),
         "title": "Best %s" % keyword,
         "sub": "Ranked from live Amazon price, rating + review data.",
         "img": base + "/og/" + _slugify(keyword) + ".png",
@@ -1199,7 +1201,7 @@ def story_cards(keyword, niche, base_url=None):
         slides.append({
             "kind": "product",
             "position": i,
-            "title": item.get("title") or "pick %d" % i,
+            "title": editorial._display(item, keyword),
             "stars": item.get("stars"),
             "reviews": item.get("reviews"),
             "price": price if have_price else None,
@@ -1211,11 +1213,24 @@ def story_cards(keyword, niche, base_url=None):
 
 def _story_slide_html(slide):
     if slide.get("kind") == "cover":
-        return ('<section class="story-slide story-cover" style="background-image:linear-gradient(-20deg,#141b31 0%%,#23365c 55%%,#3a5f8f 100%%)">'
-                '<div class="story-inner"><p class="story-kicker">STORIES</p>'
-                '<h1>{}</h1><p class="story-sub">{}</p></div></section>'
-                .format(_clean(slide.get("title", "")),
-                        _clean(slide.get("sub", "") or "")))
+        kw = (slide.get("keyword") or "").strip() or "picks"
+        count = int(slide.get("count") or 0)
+        if count:
+            sub = ("We did the homework: %d picks ranked from live Amazon price, "
+                   "rating and review signals — no guesswork, no paid placements, "
+                   "just the ones we would buy." % count)
+        else:
+            sub = ("Ranked from live Amazon price, rating and review signals — "
+                   "no guesswork, no paid placements, just the ones we would buy.")
+        return ('<section class="story-slide story-cover">'
+                '<div class="story-inner">'
+                '<p class="story-kicker">The %s story</p>'
+                '<h1>Stop scrolling — the <em>%s</em> shortlist you can actually trust.</h1>'
+                '<p class="story-sub">%s</p>'
+                '<p class="story-trust"><span>Live price data</span>'
+                '<span>Independent ranking</span><span>Verified buy links</span></p>'
+                '</div></section>'
+                % (_clean(kw.upper()), _clean(kw), _clean(sub)))
     price = ("%s" % slide["price"]) if slide.get("price") is not None else "check price"
     rating = ""
     if slide.get("stars") and slide.get("reviews"):
@@ -1267,28 +1282,36 @@ def render_story(niche, keyword=None):
 <div class="story-reel">{slides_html}
 {optin_html(keyword, "story", anchor="courier")}</div>
 </main>
-<style>.story-reel{{height:86vh;overflow-y:auto;scroll-snap-type:y proximity;border-radius:20px;margin:6px 0}}
-.story-slide{{min-height:86vh;display:flex;flex-direction:column;justify-content:flex-end;
+<style>.story-reel{{height:86vh;overflow-y:auto;scroll-snap-type:y proximity;border-radius:20px;margin:6px 0;scrollbar-width:thin}}
+.story-slide{{min-height:86vh;display:flex;flex-direction:column;justify-content:flex-start;
 scroll-snap-align:start;background:#fff;border:1px solid var(--line);border-radius:20px;margin-bottom:16px;
-overflow:hidden;padding:66px 26px 26px;box-sizing:border-box;position:relative;
+overflow:hidden;box-sizing:border-box;position:relative;
 box-shadow:0 10px 34px rgba(16,19,27,.08)}}
-.story-slide .story-img{{position:absolute;inset:0;background:linear-gradient(180deg,#eef6f8,#ffffff)}}
-.story-slide .story-img img{{width:100%;height:100%;object-fit:contain;padding:28px;box-sizing:border-box}}
-.story-slide .story-inner{{position:relative;z-index:2}}
-.story-cover .story-inner{{color:#fff;text-align:center}}
-.story-kicker{{letter-spacing:.3em;font-size:11px;font-weight:800;opacity:.85}}
-.story-cover h1{{font-size:clamp(28px,5vw,40px);line-height:1.12;margin:10px 0 8px;letter-spacing:-.02em}}
-.story-sub{{opacity:.9;max-width:480px;margin:0 auto;font-size:15px;line-height:1.55}}
+.story-slide .story-img{{position:relative;flex:1 1 auto;min-height:0;display:flex;
+align-items:center;justify-content:center;background:linear-gradient(180deg,#eef6f8,#ffffff);
+border-bottom:1px solid var(--line);box-sizing:border-box}}
+.story-slide .story-img img{{width:100%;height:100%;object-fit:contain;padding:26px;box-sizing:border-box;display:block}}
+.story-slide .story-inner{{position:relative;z-index:auto;padding:20px 26px 26px}}
+.story-cover{{justify-content:center;background-image:linear-gradient(-20deg,#0d1117 0%,#12242e 55%,#0f8b9d 100%)!important}}
+.story-cover .story-inner{{color:#fff;text-align:center;max-width:640px;margin:0 auto;padding:44px 26px}}
+.story-kicker{{letter-spacing:.3em;font-size:11px;font-weight:800;opacity:.85;text-transform:uppercase}}
+.story-cover h1{{font-size:clamp(28px,5vw,42px);line-height:1.14;margin:12px 0 10px;letter-spacing:-.02em}}
+.story-cover h1 em{{font-family:Georgia,serif;font-style:italic;font-weight:500;color:#8fe0ea}}
+.story-sub{{opacity:.92;max-width:520px;margin:0 auto;font-size:15px;line-height:1.6}}
+.story-trust{{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin:18px 0 0}}
+.story-trust span{{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+color:#dceff4;border:1px solid rgba(255,255,255,.25);background:rgba(255,255,255,.07);
+padding:6px 12px;border-radius:999px}}
 .story-rank{{font-weight:800;color:var(--accent-deep,#0a7da0);letter-spacing:.12em;font-size:12px}}
-.story-inner h2{{font-size:22px;line-height:1.25;margin:6px 0}}
+.story-inner h2{{font-size:22px;line-height:1.3;margin:6px 0}}
 .story-rating{{color:var(--muted);font-size:14px;margin:0 0 8px}}
 .story-price{{font-size:28px;font-weight:900;letter-spacing:-.02em;color:var(--ink);margin:10px 0 14px}}
 .story-cta{{display:inline-block;background:linear-gradient(135deg,var(--grad-warm-from),var(--grad-warm-to));
 color:#1c1305;font-weight:800;text-decoration:none;padding:12px 24px;border-radius:999px;
 box-shadow:0 8px 20px rgba(232,148,10,.35)}}
-.story-cover{{background-image:linear-gradient(-20deg,#0d1117 0%,#12242e 55%,#0f8b9d 100%)!important}}
 .story-slide form.courier{{position:relative;z-index:2;border-radius:18px}}
-@media (max-width:560px){{.story-slide{{padding:56px 18px 20px}}.story-slide .story-img img{{padding:18px}}}}</style>
+@media (max-width:560px){{.story-slide{{min-height:74vh}}.story-slide .story-img img{{padding:18px}}
+.story-slide .story-inner{{padding:16px 18px 20px}}.story-cover .story-inner{{padding:30px 18px}}}}</style>
 <script src="/courier.js" defer></script>
 <script src="/ui.js" defer></script>
 """.encode("utf-8")

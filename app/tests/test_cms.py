@@ -241,7 +241,23 @@ class TestCMSRenderer(unittest.TestCase):
         self.assertEqual(st["preset"], "midnight")
         self.assertIn("font_family", st)
         st2 = cms.preset_style("nope")
-        self.assertEqual(st2["preset"], "sunset")
+        self.assertEqual(st2["preset"], "premium")
+
+    def test_legacy_stock_style_upgrades_to_premium(self):
+        # A row stored before the premium update (no theme marker, legacy stock
+        # values) must render with the premium skin, while a custom field that
+        # was never a legacy stock value is preserved.
+        conn = _conn()
+        page = cms.get_or_create_page(conn, "air fryer")
+        legacy = dict(cms._LEGACY_DEFAULT_STYLE)
+        legacy["card_bg"] = "#00cc66"
+        cms.update_page(conn, page["id"], {"style": legacy})
+        ctx = cms.build_page_context(conn, "air fryer", {"products": SAMPLE_ITEMS})
+        html = cms_render.render_landing_page_page(ctx, "air-fryer")
+        self.assertIn("--accent:#0f8b9d", html)      # stock accent upgraded to premium
+        self.assertNotIn("#ff6b2c", html)            # legacy orange gone
+        self.assertIn("#00cc66", html)               # custom card_bg preserved
+        conn.close()
 
     def test_apply_preset_roundtrip(self):
         conn = _conn()
