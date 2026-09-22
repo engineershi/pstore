@@ -10941,18 +10941,39 @@ document.addEventListener("click", (e)=>{{
             '<div class="feature"><h3>%d</h3><p class="hint">fully indexable</p></div>'
             '<div class="feature"><h3>%d</h3><p class="hint">need work</p></div>'
             '<div class="feature"><h3>%d</h3><p class="hint">active subscribers</p></div>'
+            '<div class="feature"><h3>%d</h3><p class="hint">invalid structured-data nodes</p></div>'
+            '<div class="feature"><h3>%d</h3><p class="hint">products unmarked (title/price/rating)</p></div>'
             '<div class="feature"><h3>%s</h3><p class="hint">Search Console token</p></div>'
             '<div class="feature"><h3>%s</h3><p class="hint">Bing API key</p></div>'
             % (audit["count"], audit["indexable"], audit["needs_work"],
                active_subs,
+               audit["ldjson_invalid"], audit["ldjson_skipped"],
                "✓ set" if audit["google_verification"] else "—",
                "✓ set" if bing_key else "—"))
         rows = ""
         for r in audit["niches"]:
             c = r["checks"]
+            ld = r.get("ldjson") or {}
             def mark(ok):
                 return ('<span class="badge" style="background:#e6ffe8;color:#1e8e3e">ok</span>'
                         if ok else '<span class="badge" style="background:#ffe6e6;color:#c0392b">fix</span>')
+            ld_hint = ""
+            if ld.get("invalid"):
+                schema_badge = ('<span class="badge" style="background:#ffe6e6;color:#c0392b">fix</span>')
+                ld_hint = '<br><span class="hint" style="color:#c0392b">%s</span>' % (
+                    seo._clean(ld["errors"][0]))
+            elif ld.get("warnings") or ld.get("skipped_price") or ld.get("skipped_rating"):
+                schema_badge = ('<span class="badge" style="background:#fff4d6;color:#a86200">warn</span>')
+                if ld.get("skipped_price") or ld.get("skipped_rating"):
+                    ld_hint = '<br><span class="hint" style="color:#a86200">%d/%d marked · %d no price, %d no rating</span>' % (
+                        ld.get("covered", 0), r["products"] or 1,
+                        ld.get("skipped_price", 0), ld.get("skipped_rating", 0))
+                elif ld.get("warnings"):
+                    ld_hint = '<br><span class="hint" style="color:#a86200">%s</span>' % (
+                        seo._clean(ld["warnings"][0]))
+            else:
+                schema_badge = '<span class="badge" style="background:#e6ffe8;color:#1e8e3e">ok</span>'
+            schema_cell = schema_badge + ld_hint
             rows += (
                 "<tr class='%s'>"
                 "<td class='ct'><a href='%s'>%s</a><br>"
@@ -10963,7 +10984,7 @@ document.addEventListener("click", (e)=>{{
                    seo._clean(r["url"]), seo._clean(r["keyword"]), seo._clean(r["slug"]),
                    r["products"],
                    mark(c.get("title_ok", False)), mark(c.get("desc_ok", False)),
-                   mark(c.get("schema", False)), mark(c.get("og_image", False)),
+                   schema_cell, mark(c.get("og_image", False)),
                    mark(c.get("word_count", False)),
                    ("indexable" if r["indexable"] else "noindex")))
         if not rows:
@@ -11025,7 +11046,7 @@ document.addEventListener("click", (e)=>{{
 <div class="table-wrap"><table class="plain"><thead><tr><th>Engine</th><th>Console / submit</th><th>Sitemap to submit (click to copy)</th></tr></thead><tbody>{engines}</tbody></table></div></div>
 </section>
 <section class="card"><h2>📄 Per-niche checks</h2>
-<p class="hint" style="margin-top:-4px">Green = passes the live-page rule. Red = the page is served with that gap today. Titles 30–60 chars, descriptions 70–160.</p>
+<p class="hint" style="margin-top:-4px">Green = passes the live-page rule. Red = the page is served with that gap today. The <b>Schema</b> column re-serializes exactly what the page emits and validates every Product node against the same fields Google flags (<code>offers.price</code>, <code>priceCurrency</code>, <code>availability</code>, <code>aggregateRating</code>) — an on-dashboard early warning before Search Console. Titles 30–60 chars, descriptions 70–160.</p>
 <div class="table-wrap"><table class="plain"><thead><tr>
 <th>Niche</th><th>Products</th><th>Title</th><th>Desc</th><th>Schema</th><th>Share img</th><th>Word count</th><th>Status</th>
 </tr></thead><tbody>{rows}</tbody></table></div>

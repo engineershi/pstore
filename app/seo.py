@@ -1253,6 +1253,161 @@ def _story_slide_html(slide):
                _clean(price), cta))
 
 
+def story_listitem(pos, slide):
+    """One ItemList entry. A product only gets @type Product when it can be
+    marked up completely (price + rating + review count — same rule as the
+    guide pages); otherwise it stays a plain, valid ListItem."""
+    item = {}
+    price = slide.get("price")
+    have_price = price not in (None, "") and not (
+        isinstance(price, (int, float)) and float(price) <= 0)
+    stars, reviews = slide.get("stars"), slide.get("reviews")
+    title = slide.get("title") or ""
+    if have_price and stars and reviews:
+        item = {"@type": "Product", "name": title}
+        img = slide.get("img") or ""
+        if img:
+            item["image"] = img
+        item["offers"] = {
+            "@type": "Offer",
+            "price": price if isinstance(price, (int, float)) else str(price),
+            "priceCurrency": "USD",
+            "availability": "https://schema.org/InStock",
+        }
+        if slide.get("url"):
+            item["offers"]["url"] = slide["url"]
+        item["aggregateRating"] = {
+            "@type": "AggregateRating",
+            "ratingValue": round(float(stars), 1),
+            "reviewCount": int(reviews),
+            "bestRating": 5,
+            "worstRating": 1,
+        }
+    entry = {"@type": "ListItem", "position": pos}
+    if item:
+        entry["item"] = item
+    else:
+        entry["name"] = title
+    return entry
+
+
+def _ldjson_product_issues(node):
+    """Google's Product/Offer field rules, split into errors and warnings.
+    Errors = the exact diagnostics Search Console raised (an Offer serialized
+    without price, priceCurrency or availability, or a malformed rating) —
+    these make the item ineligible. Warnings = Google's enhancement notes (a
+    product with zero offers, or no aggregateRating because the source data
+    has none): valid, but no Product rich snippet is earned. Returns
+    (errors, warnings)."""
+    errors, warnings = [], []
+    name = node.get("name")
+    if not name or not str(name).strip():
+        errors.append("name missing")
+    offers = node.get("offers")
+    if isinstance(offers, dict):
+        if offers.get("price") in (None, ""):
+            errors.append("offers.price missing")
+        if not offers.get("priceCurrency"):
+            errors.append("offers.priceCurrency missing")
+        if not offers.get("availability"):
+            errors.append("offers.availability missing")
+    elif not offers:
+        warnings.append("no offers emitted (unpriced product — reviews-only snippet)")
+    else:
+        errors.append("offers empty")
+    rating = node.get("aggregateRating")
+    if not isinstance(rating, dict) or not rating.get("ratingValue"):
+        if "aggregateRating" in node:
+            errors.append("aggregateRating malformed")
+        else:
+            warnings.append("no aggregateRating (unrated product — no review snippet)")
+    return errors, warnings
+
+
+def audit_jsonld(niche):
+    """Validate the structured data the site actually emits for a niche —
+    guide page graph, landing node and story ItemList — against the exact
+    Google Product/Offer field rules, with no network. Errors are the
+    diagnostics Search Console reports (an Offer without price, priceCurrency,
+    availability, or malformed rating); warnings are Google's enhancement
+    notes (unpriced/unrated products that earn no rich snippet). Coverage
+    counters tell the operator why products go unmarked (titleless / unpriced
+    / unrated) so they can fix the data, not just the markup."""
+    kw = (niche or {}).get("keyword") or ""
+    prods = (niche or {}).get("products") or []
+    slug = _slugify(kw)
+    pages = []
+    errors, warnings = [], []
+    invalid = 0
+    covered = eligible = skipped_title = skipped_price = skipped_rating = 0
+
+    def check_page(kind, url, nodes):
+        nonlocal invalid
+        prods = [n for n in nodes
+                 if isinstance(n, dict) and n.get("@type") == "Product"]
+        for node in prods:
+            node_errors, node_warnings = _ldjson_product_issues(node)
+            prefix = "%s %s" % (kind, url)
+            for e in node_errors:
+                invalid += 1
+                errors.append("%s — %s" % (prefix, e))
+            for w in node_warnings:
+                warnings.append("%s — %s" % (prefix, w))
+        pages.append({"kind": kind, "url": url, "nodes": len(prods)})
+
+    # Guide page: the ranked list re-emitted exactly as _product_graph decides.
+    graph = _product_graph(prods)
+    check_page("guide", "/n/" + slug, graph)
+    covered = len(graph)
+    for it in (prods or [])[:10]:
+        if not it.get("title"):
+            skipped_title += 1
+            continue
+        price = it.get("price")
+        have_price = price not in (None, "") and not (
+            isinstance(price, (int, float)) and float(price) <= 0)
+        if not have_price:
+            skipped_price += 1
+        elif not it.get("stars") or not it.get("reviews"):
+            skipped_rating += 1
+        else:
+            eligible += 1
+
+    # Landing sales page (top pick) — same rule, price-gated offers.
+    best = editorial.best_pick(prods) if prods else None
+    if best:
+        landing = landing_product_jsonld(
+            best, "%s/lp/%s" % (BASE_URL, slug))
+        if isinstance(landing, dict):
+            check_page("landing", "/lp/" + slug, landing.get("@graph") or [])
+
+    # Story reel — only typed Product items need validating; plain ListItems
+    # (incomplete data) are valid by construction.
+    slides = story_cards(kw, niche)
+    story_nodes = []
+    for p, s in enumerate(slides, 1):
+        if s.get("kind") != "product":
+            continue
+        entry = story_listitem(p, s)
+        if "item" in entry:
+            story_nodes.append(entry["item"])
+    check_page("story", "/stories/" + slug, story_nodes)
+
+    return {
+        "ok": invalid == 0,
+        "pages": pages,
+        "errors": errors,
+        "warnings": warnings,
+        "node_count": sum(p["nodes"] for p in pages),
+        "invalid": invalid,
+        "covered": covered,
+        "eligible": eligible,
+        "skipped_title": skipped_title,
+        "skipped_price": skipped_price,
+        "skipped_rating": skipped_rating,
+    }
+
+
 def render_story(niche, keyword=None):
     """Full-reel /stories/<slug> page: a vertical, swipeable (scroll-snap)
     story of the niche — the same data as the ranked page, in a format built
@@ -1265,47 +1420,10 @@ def render_story(niche, keyword=None):
     slides_html = "".join(_story_slide_html(s) for s in slides)
     desc = "Swipe the %s story: ranked picks from live Amazon price, rating and review data." % keyword
 
-    def _story_listitem(pos, slide):
-        """One ItemList entry. A product only gets @type Product when it can be
-        marked up completely (price + rating + review count — same rule as the
-        guide pages); otherwise it stays a plain, valid ListItem."""
-        item = {}
-        price = slide.get("price")
-        have_price = price not in (None, "") and not (
-            isinstance(price, (int, float)) and float(price) <= 0)
-        stars, reviews = slide.get("stars"), slide.get("reviews")
-        title = slide.get("title") or ""
-        if have_price and stars and reviews:
-            item = {"@type": "Product", "name": title}
-            img = slide.get("img") or ""
-            if img:
-                item["image"] = img
-            item["offers"] = {
-                "@type": "Offer",
-                "price": price if isinstance(price, (int, float)) else str(price),
-                "priceCurrency": "USD",
-                "availability": "https://schema.org/InStock",
-            }
-            if slide.get("url"):
-                item["offers"]["url"] = slide["url"]
-            item["aggregateRating"] = {
-                "@type": "AggregateRating",
-                "ratingValue": round(float(stars), 1),
-                "reviewCount": int(reviews),
-                "bestRating": 5,
-                "worstRating": 1,
-            }
-        entry = {"@type": "ListItem", "position": pos}
-        if item:
-            entry["item"] = item
-        else:
-            entry["name"] = title
-        return entry
-
     jsonld = {"@context": "https://schema.org", "@graph": [
         {"@type": "ItemList", "name": "Best %s — story" % keyword,
          "itemListElement": [
-             _story_listitem(p, s)
+             story_listitem(p, s)
              for p, s in enumerate(slides, 1) if s.get("kind") == "product"]},
         editorial.breadcrumb_jsonld(keyword),
         _org_jsonld(),
@@ -1542,12 +1660,13 @@ def audit_niche(niche):
     best = editorial.best_pick(prods) if prods else None
     tl, dl = _meta_lengths(niche)
     wc = _words(niche)
+    ld = audit_jsonld(niche)
     checks = {
         "has_products": bool(prods),
         "title_ok": 30 <= tl <= 60,
         "desc_ok": 70 <= dl <= 160,
         "og_image": bool(best),
-        "schema": bool(prods),
+        "schema": ld["ok"],
         "word_count": wc >= 300,
     }
     return {
@@ -1558,6 +1677,7 @@ def audit_niche(niche):
         "title_len": tl, "desc_len": dl,
         "words": wc,
         "checks": checks,
+        "ldjson": ld,
         "indexable": bool(prods) and checks["title_ok"] and checks["desc_ok"],
     }
 
@@ -1566,6 +1686,12 @@ def audit_sites(niches):
     """Global audit summary for the /admin/seo header strip + config status."""
     rows = [audit_niche(n) for n in (niches or [])]
     passable = sum(1 for r in rows if r["indexable"])
+    ld_nodes = sum((r.get("ldjson") or {}).get("node_count", 0) for r in rows)
+    ld_invalid = sum((r.get("ldjson") or {}).get("invalid", 0) for r in rows)
+    ld_skipped = sum(
+        (r.get("ldjson") or {}).get("skipped_title", 0) +
+        (r.get("ldjson") or {}).get("skipped_price", 0) +
+        (r.get("ldjson") or {}).get("skipped_rating", 0) for r in rows)
     return {
         "niches": rows,
         "count": len(rows),
@@ -1577,6 +1703,9 @@ def audit_sites(niches):
         "sitemap": "/sitemap.xml",
         "robots": "/robots.txt",
         "org": {"name": ORG_NAME, "url": ORG_URL},
+        "ldjson_nodes": ld_nodes,
+        "ldjson_invalid": ld_invalid,
+        "ldjson_skipped": ld_skipped,
     }
 
 

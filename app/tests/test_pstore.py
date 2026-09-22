@@ -474,6 +474,42 @@ class TestSEO(unittest.TestCase):
                                               "availability", "url"]))
         self.assertIn("aggregateRating", node)
 
+    def test_audit_jsonld_flags_google_errors(self):
+        # The /admin/seo Schema column re-serializes what the page emits and
+        # validates every Product node against the exact Google Product/Offer
+        # rules — an on-dashboard early warning before Search Console. Errors
+        # (Offer without price/priceCurrency/availability) flip the badge red;
+        # unpriced/unrated rows are skipped (no node), so they surface as
+        # coverage counts, not errors.
+        complete = [{"asin": "B1", "title": "Good", "price": 1.0,
+                     "stars": 4, "reviews": 5, "url": "https://www.amazon.com/dp/B1"}]
+        ld = seo.audit_niche({"keyword": "yoga", "products": complete})["ldjson"]
+        self.assertTrue(ld["ok"])
+        self.assertEqual(ld["invalid"], 0)
+        self.assertEqual(ld["covered"], 1)
+        self.assertIn("guide", {p["kind"] for p in ld["pages"]})
+        self.assertIn("landing", {p["kind"] for p in ld["pages"]})
+        self.assertIn("story", {p["kind"] for p in ld["pages"]})
+        mix = [{"asin": "B2", "title": "No price", "stars": 4, "reviews": 5},
+               {"asin": "B3", "title": "No rating", "price": 2.0}]
+        ld2 = seo.audit_niche({"keyword": "yoga", "products": complete + mix})["ldjson"]
+        self.assertTrue(ld2["ok"])
+        self.assertEqual(ld2["skipped_price"], 1)
+        self.assertEqual(ld2["skipped_rating"], 1)
+        node = {"@type": "Product", "name": "X",
+                "offers": {"@type": "Offer"},
+                "aggregateRating": {"ratingValue": 4}}
+        errs, warns = seo._ldjson_product_issues(node)
+        self.assertIn("offers.price missing", errs)
+        self.assertIn("offers.priceCurrency missing", errs)
+        self.assertIn("offers.availability missing", errs)
+        self.assertFalse(warns)
+        bare = {"@type": "Product", "name": "Y",
+                "aggregateRating": {"ratingValue": 4}}
+        errs, warns = seo._ldjson_product_issues(bare)
+        self.assertEqual(errs, [])
+        self.assertTrue(any("no offers emitted" in w for w in warns))
+
     def test_sitemap(self):
         s = seo.render_sitemap([("/", "2026-08-28"), ("/n/keto-snacks", "2026-08-28")])
         self.assertIn(b"/n/keto-snacks", s)
