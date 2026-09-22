@@ -919,6 +919,35 @@ class TestRoutes(unittest.TestCase):
         self.assertIn("function tagCheck", html)
         self.assertIn('id="tgp"', html)
 
+    def test_seo_page_survives_stored_string_last_sync(self):
+        # webmasters persists engine last-sync as a human datetime string
+        # ("%Y-%m-%d %H:%M UTC"). The /admin/seo engines board must render it;
+        # regression: fromtimestamp(str, tz) raised
+        # "'str' object cannot be interpreted as an integer" once a sync existed.
+        conn = server._db()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                ("seoeng.gsc.last",
+                 json.dumps({"at": "2026-09-22 10:00 UTC",
+                             "totals": {"clicks": 3}, "rows": []})))
+            conn.commit()
+        finally:
+            conn.close()
+        try:
+            st, _, body = self._get("/admin/seo")
+            self.assertEqual(st, 200, body[:200])
+            html = body.decode("utf-8", "replace")
+            self.assertIn("Search engines", html)
+            self.assertIn("2026-09-22", html)
+        finally:
+            conn = server._db()
+            try:
+                conn.execute("DELETE FROM settings WHERE key='seoeng.gsc.last'")
+                conn.commit()
+            finally:
+                conn.close()
+
     def test_blog_landing_lists_niche_articles(self):
         st, ctype, body = self._get("/blog")
         self.assertEqual(st, 200)

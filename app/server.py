@@ -11020,8 +11020,20 @@ document.addEventListener("click", (e)=>{{
             engine_link("Yahoo (via Bing)", "https://www.bing.com/webmasters"),
         ]))
         from datetime import datetime, timezone as _tzo
-        _FMT = lambda ts: datetime.fromtimestamp(ts, _tzo.utc).strftime(
-            "%Y-%m-%d %H:%M UTC") if ts else ""
+        def _FMT(ts):
+            """Format a stored engine sync time for the board. webmasters
+            persists human datestrings ("%Y-%m-%d %H:%M UTC"); legacy rows are
+            epoch ints. Both must render — fromtimestamp on a string raises
+            'str' object cannot be interpreted as an integer."""
+            if not ts:
+                return ""
+            if isinstance(ts, (int, float)):
+                try:
+                    return datetime.fromtimestamp(ts, _tzo.utc).strftime(
+                        "%Y-%m-%d %H:%M UTC")
+                except (TypeError, ValueError, OSError):
+                    return ""
+            return str(ts)
         eng_status = webmasters.engines_status()
         eng_traffic = self._seoengines_traffic(7)["engines"]
         _live_surface_start()
