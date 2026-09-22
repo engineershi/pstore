@@ -55,6 +55,14 @@ class TestSocialSuite(unittest.TestCase):
         cls.db = "/tmp/pstore_test_social_%s.db" % uuid.uuid4().hex[:8]
         shutil.copy(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                  "..", "pstore.db"), cls.db)
+        import sqlite3 as _sqlite
+        _conn = _sqlite.connect(cls.db)
+        _conn.execute("DELETE FROM settings WHERE key LIKE 'social.key%'")
+        _conn.commit()
+        _conn.close()
+        cls._env_backup = {k: os.environ.get(k) for k in (
+            "PSTORE_DB", "PSTORE_ADMIN_EMAIL", "PSTORE_ADMIN_PASSWORD",
+            "PSTORE_URL", "SOCIAL_WEBHOOK")}
         os.environ["PSTORE_DB"] = cls.db
         os.environ["PSTORE_ADMIN_EMAIL"] = "owner@test.example"
         os.environ["PSTORE_ADMIN_PASSWORD"] = "test-pass-123"
@@ -84,6 +92,13 @@ class TestSocialSuite(unittest.TestCase):
         cls.httpd.server_close()
         if os.path.exists(cls.db):
             os.unlink(cls.db)
+        for k, v in cls._env_backup.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        import importlib
+        importlib.reload(server)
 
     @classmethod
     def _login(cls):

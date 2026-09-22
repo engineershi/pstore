@@ -494,3 +494,82 @@ class TestShortsFrame(Base):
     def test_frame_handles_empty_kit(self):
         self.assertTrue(publish._shorts_frame({"keyword": "", "body": "",
                                                "hashtags": ""}))
+
+
+class TestTestConnectionReadHelpers(Base):
+    """Hermetic read-proof levers: every per-platform /api/settings/test read
+    resolves to the exact _get call the native write path makes, is itself
+    native-posting-agnostic (pure GET + timeout, never raises), and the helper
+    functions co-exist once in publish.py. No provider hits the network here —
+    publish._get is stubbed the same way the pint board read test does."""
+
+    def _read(self, payload):
+        def fake(url, headers, timeout=15):
+            self.requests.append((url, headers))
+            return 200, payload
+        publish._get = fake
+
+    def test_telegram_getMe_hits_native_bot_endpoint(self):
+        with_payload = {"ok": True, "result": {"id": 1, "username": "mybot",
+                                               "first_name": "My"}}
+        self._read(with_payload)
+        st, data = publish._tg_me("TOKEN-ABC|@mybotchat")
+        self.assertEqual(st, 200)
+        self.assertEqual(data, with_payload)
+        url, _ = self.requests[0]
+        self.assertIn("api.telegram.org/bot", url)
+        self.assertIn("getMe", url)
+        # the folded TOKEN|@chat form is passed verbatim as the bot token
+        self.assertIn("botTOKEN-ABC|@mybotchat/getMe", url)
+
+    def test_facebook_me_hits_graph_and_sends_UA(self):
+        self._read({"id": "123", "name": "Acme Page"})
+        st, data = publish._fb_me("FBTOK")
+        self.assertEqual(st, 200)
+        url, headers = self.requests[0]
+        self.assertIn("graph.facebook.com/v19.0/me", url)
+        self.assertIn("access_token=FBTOK", url)
+        self.assertIn("pstore/1.0", headers.get("User-Agent", ""))
+
+    def test_instagram_account_reads_exact_uid(self):
+        self._read({"id": "1789x", "username": "acme", "media_count": 4})
+        st, data = publish._ig_account("IGTOK", "1789x")
+        self.assertEqual(st, 200)
+        self.assertEqual(data.get("id"), "1789x")
+        url, _ = self.requests[0]
+        self.assertIn("graph.facebook.com/v21.0", url)
+        self.assertIn("1789x", url)
+        self.assertIn("access_token=IGTOK", url)
+
+    def test_linkedin_me_sends_bearer_to_userinfo(self):
+        self._read({"sub": "li-1", "given_name": "Ada"})
+        st, data = publish._li_me("LITOK")
+        self.assertEqual(st, 200)
+        url, headers = self.requests[0]
+        self.assertIn("api.linkedin.com/v2/userinfo", url)
+        self.assertEqual(headers["Authorization"], "Bearer LITOK")
+
+    def test_youtube_channels_sends_bearer_for_mine(self):
+        self._read({"items": [{"id": "yt-1", "snippet": {"title": "Acme"}}]})
+        st, data = publish._yt_channels("YTTOK")
+        self.assertEqual(st, 200)
+        self.assertEqual(data["items"][0]["id"], "yt-1")
+        url, headers = self.requests[0]
+        self.assertIn("www.googleapis.com/youtube/v3/channels", url)
+        self.assertIn("mine=true", url)
+        self.assertEqual(headers["Authorization"], "Bearer YTTOK")
+
+    def test_read_error_shapes_never_raise(self):
+        # 401/<html> bodies on a broken _get must not raise — the parity that
+        # lets the "Connected ✓" verdict byte come from the provider, not from
+        # an exception in the test seam. (bad status + non-json body)
+        self._read("not-json")
+        for fn, args in [
+                (publish._tg_me, ("TOK",)),
+                (publish._fb_me, ("TOK",)),
+                (publish._ig_account, ("TOK", "1789x")),
+                (publish._li_me, ("TOK",)),
+                (publish._yt_channels, ("TOK",))]:
+            st, data = fn(*args)
+            self.assertIsInstance(st, int)
+            self.assertTrue(st >= 400 or isinstance(data, str))

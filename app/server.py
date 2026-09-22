@@ -6071,6 +6071,16 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             model = str(a.get("model") or "").strip() or ai.model_for(provider)
             base = str(a.get("base") or "").strip()
             return self._send(200, ai.test(provider, key, model, base))
+        if b.get("telegram"):
+            return self._settings_telegram_test()
+        if b.get("facebook"):
+            return self._settings_facebook_test()
+        if b.get("instagram"):
+            return self._settings_instagram_test()
+        if b.get("linkedin"):
+            return self._settings_linkedin_test()
+        if b.get("youtube"):
+            return self._settings_youtube_test()
         if b.get("pinterest"):
             return self._settings_pinterest_test()
         if not paapi.ready():
@@ -6138,6 +6148,147 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             "detail": ("Connected ✓ token works — account has %d board(s): %s%s"
                        % (len(names), ", ".join(names[:6]) or "none", acct)),
         })
+
+    def _settings_telegram_test(self):
+        """Verify the stored Telegram bot token via the bot's own getMe read —
+        the exact token path the native channel posting uses (env first, then
+        the /admin/apikeys token, honoring the folded `TOKEN|@chat` form)."""
+        kv = _publish_key_getter()
+        field = (kv("telegram", "token") or "").strip()
+        chat = (kv("telegram", "chat") or "").strip()
+        token = field
+        if "|" in field:
+            token, chat = (s.strip() for s in field.split("|", 1))
+        elif chat and chat == field:
+            chat = ""
+        if not token:
+            return self._send(200, {
+                "ok": False, "provider": "telegram",
+                "error": ("No Telegram bot token stored — paste it on "
+                          "/admin/apikeys or set PSTORE_TELEGRAM_TOKEN."),
+            })
+        st, data = publish._tg_me(token)
+        if st != 200 or not isinstance(data, dict) or not data.get("ok"):
+            return self._send(200, {
+                "ok": False, "provider": "telegram",
+                "error": "Telegram rejected the token: %s" % publish._api_error(st, data),
+            })
+        r = data.get("result") or {}
+        uname = str(r.get("username") or "").strip()
+        name = str(r.get("first_name") or "").strip()
+        detail = ("Connected ✓ bot @%s%s%s"
+                  % (uname, (" (" + name + ")") if name else "",
+                     (" · chat %s" % chat) if chat else ""))
+        return self._send(200, {"ok": True, "provider": "telegram", "detail": detail})
+
+    def _settings_facebook_test(self):
+        """Verify the stored Facebook page token via Graph /me — the exact token
+        path the native feed posting uses."""
+        kv = _publish_key_getter()
+        token = (kv("facebook", "token") or "").strip()
+        if not token:
+            return self._send(200, {
+                "ok": False, "provider": "facebook",
+                "error": ("No Facebook page token stored — paste it on "
+                          "/admin/apikeys or set PSTORE_FACEBOOK_TOKEN."),
+            })
+        st, data = publish._fb_me(token)
+        if st != 200 or not isinstance(data, dict) or not data.get("id"):
+            return self._send(200, {
+                "ok": False, "provider": "facebook",
+                "error": "Facebook rejected the token: %s" % publish._api_error(st, data),
+            })
+        name = str(data.get("name") or "").strip()
+        return self._send(200, {
+            "ok": True, "provider": "facebook",
+            "detail": "Connected ✓ Facebook %s %s" % (name, ("(id " + str(data.get("id")) + ")") if data.get("id") else ""),
+        })
+
+    def _settings_instagram_test(self):
+        """Verify the stored Instagram Business token + account id via the Graph
+        account read — the exact token/uid pair the native photo posting uses."""
+        kv = _publish_key_getter()
+        token = (kv("instagram", "token") or "").strip()
+        uid = (kv("instagram", "ig_user_id") or "").strip()
+        if not token:
+            return self._send(200, {
+                "ok": False, "provider": "instagram",
+                "error": ("No Instagram Graph token stored — paste it on "
+                          "/admin/apikeys or set PSTORE_INSTAGRAM_TOKEN."),
+            })
+        if not uid:
+            return self._send(200, {
+                "ok": False, "provider": "instagram",
+                "error": ("Instagram needs the Business account id "
+                          "(social.key.instagram.ig_user_id / "
+                          "PSTORE_INSTAGRAM_IG_USER_ID)."),
+            })
+        st, data = publish._ig_account(token, uid)
+        if st != 200 or not isinstance(data, dict) or not data.get("id"):
+            return self._send(200, {
+                "ok": False, "provider": "instagram",
+                "error": "Instagram rejected the token/account: %s" % publish._api_error(st, data),
+            })
+        m = (data.get("media_count") if data.get("media_count") is not None else "?")
+        u = str(data.get("username") or "").strip()
+        return self._send(200, {
+            "ok": True, "provider": "instagram",
+            "detail": ("Connected ✓ @%s · %s media (business id %s)"
+                       % (u, m, data.get("id"))),
+        })
+
+    def _settings_linkedin_test(self):
+        """Verify the stored LinkedIn token via the OpenID userinfo read — the
+        exact token the native UGC post signs with."""
+        kv = _publish_key_getter()
+        token = (kv("linkedin", "token") or "").strip()
+        if not token:
+            return self._send(200, {
+                "ok": False, "provider": "linkedin",
+                "error": ("No LinkedIn access token stored — paste it on "
+                          "/admin/apikeys or set PSTORE_LINKEDIN_TOKEN."),
+            })
+        st, data = publish._li_me(token)
+        if st != 200 or not isinstance(data, dict) or not data.get("sub"):
+            return self._send(200, {
+                "ok": False, "provider": "linkedin",
+                "error": "LinkedIn rejected the token: %s" % publish._api_error(st, data),
+            })
+        name = str(data.get("name") or "").strip()
+        return self._send(200, {
+            "ok": True, "provider": "linkedin",
+            "detail": "Connected ✓ LinkedIn %s%s" % (
+                name + " " if name else "",
+                ("(person " + str(data.get("sub")) + ")") if data.get("sub") else ""),
+        })
+
+    def _settings_youtube_test(self):
+        """Verify the stored YouTube OAuth token via the `mine=true` channel
+        read — the exact token the native Shorts upload uses."""
+        kv = _publish_key_getter()
+        token = (kv("youtube", "token") or "").strip()
+        if not token:
+            return self._send(200, {
+                "ok": False, "provider": "youtube",
+                "error": ("No YouTube Data API token stored — paste it on "
+                          "/admin/apikeys or set PSTORE_YOUTUBE_TOKEN."),
+            })
+        st, data = publish._yt_channels(token)
+        items = (data or {}).get("items") if isinstance(data, dict) else []
+        cid = (items[0].get("id") or "") if items else ""
+        if st != 200 or not cid:
+            return self._send(200, {
+                "ok": False, "provider": "youtube",
+                "error": "YouTube rejected the token: %s" % publish._api_error(st, data),
+            })
+        sn = items[0].get("snippet") if items else {}
+        stats = (items[0].get("statistics") or {}) if items else {}
+        title = str(sn.get("title") or "").strip()
+        subs = stats.get("subscriberCount")
+        detail = ("Connected ✓ %s%s%s"
+                  % (title, (" · %s subs" % subs) if subs is not None else "",
+                     (" (channel " + cid + ")") if cid else ""))
+        return self._send(200, {"ok": True, "provider": "youtube", "detail": detail})
 
     def _pint_health(self, pz):
         """API-health verdict for the console: off / err / warn / ok."""
@@ -12246,7 +12397,7 @@ fresh();
 </section>
 <section class="card" id="sec-social"><h2>📣 Social publishing keys</h2>
  <p class="hint">Per-platform {len(social.PLATFORMS)} keys power native posting. Leave blank to skip that platform. Enable native posting by pasting each platform's API key/token here; real posting also fires <code>SOCIAL_WEBHOOK</code> if set.</p>
- <p class="hint">💾 <b>Prefer env?</b> The same credentials work as host env vars and survive every redeploy — no DB edit needed: <code>PSTORE_TELEGRAM_TOKEN</code> (+ <code>PSTORE_TELEGRAM_CHAT</code>), <code>PSTORE_PINTEREST_TOKEN</code>, <code>PSTORE_INSTAGRAM_TOKEN</code> + <code>PSTORE_INSTAGRAM_IG_USER_ID</code>, <code>PSTORE_YOUTUBE_TOKEN</code>, <code>PSTORE_FACEBOOK_TOKEN</code>, <code>PSTORE_LINKEDIN_TOKEN</code>, and X's <code>PSTORE_TWITTER_CLIENT_ID/_CLIENT_SECRET/_ACCESS_TOKEN/_ACCESS_TOKEN_SECRET</code>. Env wins if both are set.</p>
+ <p class="hint">🔎 Every platform row has a <b>Test &lt;Platform&gt;</b> button shipped alongside Pinterest's — each does the exact read-proof GET (getMe / Graph /me / IG account / LinkedIn userinfo / YouTube channels) the native post itself makes, so a green ✓ is that platform's own verdict on the token, not a guess.</p><p class="hint">💾 <b>Prefer env?</b> The same credentials work as host env vars and survive every redeploy — no DB edit needed: <code>PSTORE_TELEGRAM_TOKEN</code> (+ <code>PSTORE_TELEGRAM_CHAT</code>), <code>PSTORE_PINTEREST_TOKEN</code>, <code>PSTORE_INSTAGRAM_TOKEN</code> + <code>PSTORE_INSTAGRAM_IG_USER_ID</code>, <code>PSTORE_YOUTUBE_TOKEN</code>, <code>PSTORE_FACEBOOK_TOKEN</code>, <code>PSTORE_LINKEDIN_TOKEN</code>, and X's <code>PSTORE_TWITTER_CLIENT_ID/_CLIENT_SECRET/_ACCESS_TOKEN/_ACCESS_TOKEN_SECRET</code>. Env wins if both are set.</p>
 <form class="cols-form" id="fsoc" onsubmit="return soc_save();">
   <label>Webhook URL <input type="url" name="webhook" value="{webhook_val}" placeholder="https://hook.example/hook (Zapier/Make)"></label>
 {key_rows}
@@ -12257,7 +12408,14 @@ fresh();
     <label>YouTube channel id <input type="text" name="key_youtube.channel_id" value="{yt_cid}" placeholder="UC… channel id (optional)" autocomplete="off" data-masked="1"></label>
   </div>
   <p class="hint">📸 <b>Instagram</b> posts natively as a photo (your share card) on the Business account whose <code>ig_user_id</code> is above — paste a long-lived Graph token in the <code>Instagram</code> row. ▶️ <b>YouTube</b> renders each kit into a 9:16 Short and uploads it <i>private</i> when an OAuth access token (scope <code>youtube.upload</code>) is in the <code>YouTube</code> row and ffmpeg is present; otherwise both fall back to the webhook.</p>
-  <div class="row"><button class="btn">Save social keys</button><span id="socout" class="msg"></span></div>
+  <div class="row">
+    <button type="button" class="btn" onclick="soc_test('telegram')">Test Telegram</button>
+    <button type="button" class="btn" onclick="soc_test('facebook')">Test Facebook</button>
+    <button type="button" class="btn" onclick="soc_test('instagram')">Test Instagram</button>
+    <button type="button" class="btn" onclick="soc_test('linkedin')">Test LinkedIn</button>
+    <button type="button" class="btn" onclick="soc_test('youtube')">Test YouTube</button>
+    <button class="btn">Save social keys</button><span id="socout" class="msg"></span>
+  </div>
 </form>
 </section>
 <section class="card" id="pint-card"><h2>📌 Pinterest app (OAuth connect)</h2>
@@ -12317,6 +12475,13 @@ async function pint_test(){{
   out.textContent = "Testing Pinterest…";
   const d = await post("/api/settings/test", {{pinterest: true}});
   out.textContent = d && d.ok ? ("Pinterest ✓ " + (d.detail || "")) : ((d && d.error) || "Test failed");
+}}
+async function soc_test(provider){{
+  $("socout").textContent = "Testing " + provider + "…";
+  const d = await post("/api/settings/test", {{[provider]: true}});
+  $("socout").textContent = d && d.ok
+      ? (provider + " ✓ " + (d.detail || ""))
+      : ((d && d.detail) || (d && d.error) || "Test failed");
 }}
 async function soc_save(){{
    $("socout").textContent = "Saving…";

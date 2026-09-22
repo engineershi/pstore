@@ -323,8 +323,15 @@ def _chapters():
             "pstore's own webhook outlet at POST /api/social/webhook: it accepts any "
             "kit payload (copy + tracked link + platform + share cards), posts it "
             "natively with one retry and records every attempt, so nothing is silently "
-            "dropped. Set the SOCIAL_WEBHOOK env var to that URL (or any "
-            "Make/Zapier URL) and the whole publishing loop runs in-house for free.")
+"dropped. Set the SOCIAL_WEBHOOK env var to that URL (or any "
+             "Make/Zapier URL) and the whole publishing loop runs in-house for free. "
+             "Prove a credential instead of guessing: on the Keys page every "
+             "platform row ships a 'Test connection' button that performs the exact "
+             "same read the live publisher does — Telegram getMe, Facebook Graph "
+             "me, Instagram Graph business id, LinkedIn /me and YouTube channels "
+             "list — and names the site the key controls (or the failing HTTP "
+             "status), so you see the delivery claim is real before any post goes "
+             "out, exactly like the Pinterest drip check.")
         doc.paragraph(
             "The Telegram broadcast page (/admin/telegram) is the messenger "
             "equivalent of Email Studio. Paste a BotFather bot token, a webhook "

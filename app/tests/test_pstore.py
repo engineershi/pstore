@@ -1442,6 +1442,66 @@ class TestRoutes(unittest.TestCase):
         self.assertNotIn("zk-super-secret", html2)
         server._set_setting("ai.key.opencode", "")
 
+    def test_settings_test_levers_for_each_platform(self):
+        # Tier-1 parity: every platform's /api/settings/test lever performs that
+        # platform's OWN account-identity READ (never a client-side guess) via
+        # the exact token path the native write uses. Put keys in the DB, stub
+        # publish._get so each provider answers like its real API, and assert
+        # the 200 JSON verdict. Fully hermetic — nothing leaves the box.
+        import importlib
+        import publish
+        saved_get = publish._get
+        ok_shapes = {
+            "telegram": {"ok": True, "result": {"id": 1, "username": "paritybot"}},
+            "facebook": {"id": "fb-1", "name": "Acme Page"},
+            "instagram": {"id": "ig-1", "username": "acme", "media_count": 3},
+            "linkedin": {"sub": "li-1", "given_name": "Ada", "email": "a@b.c"},
+            "youtube": {"items": [{"id": "yt-1", "snippet": {"title": "Acme"}}]},
+        }
+        saved = {}
+        for ns, fid in (("telegram", "token"), ("facebook", "token"),
+                        ("instagram", "token"), ("instagram", "ig_user_id"),
+                        ("linkedin", "token"), ("youtube", "token")):
+            saved[ns + "." + fid] = server._get_setting("social.key." + ns + "." + fid)
+            server._set_setting("social.key." + ns + "." + fid, "TOK" if fid == "token" else "ig-1")
+        def fake_read(url, headers, timeout=15):
+            if "graph.facebook.com" in url and "/me?" in url:
+                key = "facebook"
+            elif "graph.facebook.com" in url:
+                key = "instagram"
+            elif "api.linkedin.com" in url:
+                key = "linkedin"
+            elif "www.googleapis.com" in url:
+                key = "youtube"
+            else:
+                key = "telegram"
+            return 200, ok_shapes[key]
+        publish._get = fake_read
+        try:
+            for platform in ("telegram", "facebook", "instagram",
+                             "linkedin", "youtube"):
+                st, body = self._raw_json("/api/settings/test",
+                                          {platform: True},
+                                          cookie=self.cookie)
+                self.assertEqual(st, 200, platform)
+                d = json.loads(body)
+                self.assertEqual(d.get("provider"), platform)
+                self.assertTrue(d.get("ok"), (platform, d))
+                self.assertIn("✓", d.get("detail", ""))
+            # a platform with no stored key answers "no token" without any read
+            for ns in ("telegram", "facebook", "instagram", "linkedin", "youtube"):
+                server._set_setting("social.key." + ns + ".token", "")
+            st, body = self._raw_json("/api/settings/test", {"telegram": True},
+                                      cookie=self.cookie)
+            self.assertEqual(st, 200)
+            d = json.loads(body)
+            self.assertFalse(d.get("ok"))
+            self.assertIn("No", d.get("error", ""))
+        finally:
+            publish._get = saved_get
+            for k, v in saved.items():
+                server._set_setting("social.key." + k, v)
+
     def test_ai_settings_save_test_and_clear_roundtrip(self):
         # The /admin/apikeys 'AI writing' section persists keys via /api/settings
         # (survives restarts, applies immediately) and lets the operator test a

@@ -541,6 +541,70 @@ def _pint_api_error(status, data):
     return "HTTP %s" % status
 
 
+def _api_error(status, data):
+    """Human error string from a typical platform read response. Handles the
+    shapes the native backends actually receive: graph ``error`` dicts
+    (Facebook/Instagram), Telegram's ``description``, LinkedIn's ``message``
+    and YouTube's ``error.message``. Falls back to the raw status."""
+    d = data if isinstance(data, dict) else None
+    err = (d or {}).get("error")
+    if isinstance(err, dict):
+        msg = err.get("message") or err.get("description") or ""
+        if msg:
+            return "%s (%s)" % (msg, status)
+    if d:
+        for k in ("message", "description", "reason"):
+            msg = d.get(k)
+            if msg:
+                return "%s (%s)" % (msg, status)
+    return "HTTP %s" % status
+
+
+# ------------------------------------------------------------------ test-read
+# "Test connection" levers (the Pinterest parity surface). Each posts nothing —
+# it performs the platform's own account/identity READ, so the "Connected" byte
+# in /admin/apikeys is that platform's answer, never a client-side guess. The
+# token/uid paths mirror the native write functions exactly.
+
+def _tg_me(token):
+    """Telegram getMe — the bot's own identity read (the exact token the native
+    channel posts with). Returns (status, json); never raises."""
+    return _get("https://api.telegram.org/bot%s/getMe" % (token or ""),
+                {}, timeout=10)
+
+
+def _fb_me(token):
+    """Facebook Graph /me read (the exact Page/Business token the native feed
+    post uses). Returns (status, json); never raises."""
+    url = ("https://graph.facebook.com/v19.0/me?fields=id,name&access_token=%s"
+           % urllib.parse.quote(token or "", safe=""))
+    return _get(url, {"User-Agent": "pstore/1.0"}, timeout=10)
+
+
+def _ig_account(token, uid):
+    """Instagram Business account read (the exact ig_user_id the native photo
+    post publishes to). Returns (status, json); never raises."""
+    url = ("%s/%s?fields=id,username,media_count&access_token=%s"
+           % (_IG_GRAPH, urllib.parse.quote(str(uid or ""), safe=""),
+              urllib.parse.quote(token or "", safe="")))
+    return _get(url, {"User-Agent": "pstore/1.0"}, timeout=10)
+
+
+def _li_me(token):
+    """LinkedIn OpenID userinfo read (the same token the UGC post signs with).
+    Returns (status, json); never raises."""
+    return _get("https://api.linkedin.com/v2/userinfo",
+                {"Authorization": "Bearer " + str(token or "")}, timeout=10)
+
+
+def _yt_channels(token):
+    """YouTube `mine=true` channel read (the same OAuth token the Shorts upload
+    uses). Returns (status, json); never raises."""
+    url = ("https://www.googleapis.com/youtube/v3/channels"
+           "?part=snippet,statistics&mine=true")
+    return _get(url, {"Authorization": "Bearer " + str(token or "")}, timeout=10)
+
+
 def _pint_resolve_board(kv, requested="", auto=True):
     """Best-effort Pinterest board id for the token's account. Resolution order:
     an explicit board NAME from `kv("pinterest", "board")` (settings key

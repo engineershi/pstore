@@ -317,6 +317,8 @@ One click generates a ready-to-post kit for X, Facebook, LinkedIn, Instagram, Pi
 
 Each post's clicks are tracked individually — you can see in `/admin/analytics` exactly which platform and post performs.
 
+Paste each platform's key on the **Keys page** (or set the `PSTORE_*` env vars in the table below) and pstore posts natively with no router. Every key row ships a **Test connection** button that runs the exact read the live publisher makes (Telegram `getMe`, Facebook/Instagram Graph, LinkedIn `/me`, YouTube channels list) and names the site the key controls — so you see the claim is real before any post goes out.
+
 For brand-new niches that Google hasn't indexed yet, hit **📌 Pin fresh niches (Pinterest)** on the bulk-publishing toolbar: it builds and publishes a Pinterest kit (with the share card) for the newest saved niches — the fastest way to put eyeballs on pages still invisible to search engines.
 
 **⚡ Launch a Social Blitz:** posts can be scheduled to future peak slots ("Schedule post kits"). **"Flush due scheduled posts"** pushes out only the ones that are due now (what the timer does on its own), but **"⚡ Launch blitz (publish ALL queued now)"** ignores the schedule and publishes every queued post across all platforms at once — the one-click "sell it now" move right before a launch, a promo or a deadline, so the funnel gets its whole social send immediately instead of trickling out.
