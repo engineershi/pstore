@@ -1276,7 +1276,7 @@ def render_story(niche, keyword=None):
                  jsonld=jsonld,
                  og_image=BASE_URL + "/og/" + slug + ".png")
     body = f"""
-{_masthead([("All stories", "/stories", False), ("Full guide", "/n/{_clean(slug)}", False)],
+{_masthead([("All stories", "/stories", False), ("Full guide", "/n/" + _clean(slug), False)],
            cta=("/stories", "All stories"))}
 <main data-niche="{_clean(slug)}" data-source="story" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
 <div class="story-reel">{slides_html}
