@@ -1264,11 +1264,48 @@ def render_story(niche, keyword=None):
     slides = story_cards(keyword, niche)
     slides_html = "".join(_story_slide_html(s) for s in slides)
     desc = "Swipe the %s story: ranked picks from live Amazon price, rating and review data." % keyword
+
+    def _story_listitem(pos, slide):
+        """One ItemList entry. A product only gets @type Product when it can be
+        marked up completely (price + rating + review count — same rule as the
+        guide pages); otherwise it stays a plain, valid ListItem."""
+        item = {}
+        price = slide.get("price")
+        have_price = price not in (None, "") and not (
+            isinstance(price, (int, float)) and float(price) <= 0)
+        stars, reviews = slide.get("stars"), slide.get("reviews")
+        title = slide.get("title") or ""
+        if have_price and stars and reviews:
+            item = {"@type": "Product", "name": title}
+            img = slide.get("img") or ""
+            if img:
+                item["image"] = img
+            item["offers"] = {
+                "@type": "Offer",
+                "price": price if isinstance(price, (int, float)) else str(price),
+                "priceCurrency": "USD",
+                "availability": "https://schema.org/InStock",
+            }
+            if slide.get("url"):
+                item["offers"]["url"] = slide["url"]
+            item["aggregateRating"] = {
+                "@type": "AggregateRating",
+                "ratingValue": round(float(stars), 1),
+                "reviewCount": int(reviews),
+                "bestRating": 5,
+                "worstRating": 1,
+            }
+        entry = {"@type": "ListItem", "position": pos}
+        if item:
+            entry["item"] = item
+        else:
+            entry["name"] = title
+        return entry
+
     jsonld = {"@context": "https://schema.org", "@graph": [
         {"@type": "ItemList", "name": "Best %s — story" % keyword,
          "itemListElement": [
-             {"@type": "ListItem", "position": p,
-              "item": {"@type": "Product", "name": s.get("title", "")}}
+             _story_listitem(p, s)
              for p, s in enumerate(slides, 1) if s.get("kind") == "product"]},
         editorial.breadcrumb_jsonld(keyword),
         _org_jsonld(),
