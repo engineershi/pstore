@@ -510,6 +510,41 @@ class TestSEO(unittest.TestCase):
         self.assertEqual(errs, [])
         self.assertTrue(any("no offers emitted" in w for w in warns))
 
+    def test_audit_jsonld_covers_all_emitted_types(self):
+        # The /admin/seo Schema column validates every schema.org type the
+        # site ships — not just Product — against Google's required fields, so
+        # a regression in ItemList / FAQPage / BreadcrumbList / Organization
+        # shows up on the dashboard before Search Console reports it.
+        niche = {"keyword": "keto", "products": [
+            {"asin": "B1", "title": "Good", "price": 1.0,
+             "stars": 4, "reviews": 5, "url": "https://www.amazon.com/dp/B1"}]}
+        ld = seo.audit_niche(niche)["ldjson"]
+        self.assertTrue(ld["ok"])
+        self.assertEqual({p["kind"] for p in ld["pages"]},
+                         {"guide", "landing", "story"})
+        types = {}
+        for p in ld["pages"]:
+            types.update(p["types"])
+        for t in ("Product", "ItemList", "FAQPage",
+                  "BreadcrumbList", "Organization"):
+            self.assertIn(t, types, t)
+        self.assertEqual(
+            seo._ldjson_node_issues({"@type": "FAQPage"})[0],
+            ["FAQPage.mainEntity missing or empty"])
+        self.assertEqual(
+            seo._ldjson_node_issues(
+                {"@type": "BreadcrumbList", "itemListElement": []})[0],
+            ["BreadcrumbList.itemListElement missing or empty"])
+        self.assertEqual(
+            seo._ldjson_node_issues({"@type": "Organization",
+                                     "url": "https://x"})[0],
+            ["Organization.name missing"])
+        self.assertEqual(
+            seo._ldjson_node_issues(
+                {"@type": "ItemList", "itemListElement": [
+                    {"@type": "ListItem", "position": 1,
+                     "item": {"@type": "Product", "name": "X"}}]})[0], [])
+
     def test_sitemap(self):
         s = seo.render_sitemap([("/", "2026-08-28"), ("/n/keto-snacks", "2026-08-28")])
         self.assertIn(b"/n/keto-snacks", s)

@@ -11019,6 +11019,91 @@ document.addEventListener("click", (e)=>{{
                         "https://duckduckgo.com/?q=site%3A" + urllib.parse.quote(audit['site_url'], safe="")),
             engine_link("Yahoo (via Bing)", "https://www.bing.com/webmasters"),
         ]))
+        from datetime import datetime, timezone as _tzo
+        _FMT = lambda ts: datetime.fromtimestamp(ts, _tzo.utc).strftime(
+            "%Y-%m-%d %H:%M UTC") if ts else ""
+        eng_status = webmasters.engines_status()
+        eng_traffic = self._seoengines_traffic(7)["engines"]
+        _live_surface_start()
+        with _FEED_LOCK:
+            surface = {"rss": _FEED_CHECK.get("rss", ""),
+                       "sitemap": _FEED_CHECK.get("sitemap", ""),
+                       "robots": _FEED_CHECK.get("robots", "")}
+        def _ebadge(state):
+            if state == "ready":
+                return ('<span class="badge" style="background:#e6ffe8;'
+                        'color:#1e8e3e">ready</span>')
+            if str(state or "").startswith("needs"):
+                return ('<span class="badge" style="background:#ffe6e6;'
+                        'color:#c0392b">%s</span>' % (state or "needs-setup"))
+            return ('<span class="badge" style="background:#fff4d6;'
+                    'color:#a86200">%s</span>' % (state or "setup"))
+        _ENG_NOTES = {
+            "gsc": "console API (Inspect URL, clicks/impressions)",
+            "bing": "Webmaster API (sitemap submit, Inspect URL)",
+            "yandex": "Webmaster API (Recrawl URL)",
+        }
+        eng_rows = ""
+        for e in eng_status:
+            eng, name = e.get("engine"), e.get("name")
+            tr = (eng_traffic.get(eng) or {})
+            if eng == "duckduckgo":
+                eng_rows += ("<tr><td>%s</td><td>%s</td><td>via IndexNow</td>"
+                             "<td>%d</td><td>%d</td><td class='hint'>%s</td></tr>"
+                             % (name, _ebadge(e.get("state")),
+                                tr.get("views", 0), tr.get("clicks", 0),
+                                e.get("via") or "no own console — IndexNow-covered"))
+                continue
+            if eng == "yahoo":
+                eng_rows += ("<tr><td>%s</td><td>%s</td><td>via Bing</td>"
+                             "<td>%d</td><td>%d</td><td class='hint'>%s</td></tr>"
+                             % (name, _ebadge(e.get("state")),
+                                tr.get("views", 0), tr.get("clicks", 0),
+                                e.get("via") or "no own console — served by Bing"))
+                continue
+            last = _FMT(e.get("last_sync")) or "never synced"
+            note = _ENG_NOTES.get(eng) or e.get("state")
+            eng_rows += ("<tr><td>%s</td><td>%s</td><td>%s</td>"
+                         "<td>%d</td><td>%d</td><td class='hint'>%s</td></tr>"
+                         % (name, _ebadge(e.get("state")), last,
+                            tr.get("views", 0), tr.get("clicks", 0), note))
+        inow_key_ok = bool(indexnow.key())
+        inow_state = ('<span class="badge" style="background:#e6ffe8;'
+                      'color:#1e8e3e">ready</span>'
+                      if inow_key_ok else
+                      '<span class="badge" style="background:#ffe6e6;'
+                      'color:#c0392b">needs-key</span>')
+        inow_last = _FMT(_INDEXNOW_LAST.get("last") or 0) or "not yet submitted"
+        inow_err = _INDEXNOW_LAST.get("err", "")
+        inow_note = ("<span class='hint' style='color:#c0392b'>last fail: %s</span>"
+                     % seo._clean(inow_err) if inow_err else
+                     "submissions land at api.indexnow.org; DuckDuckGo + Bing/Yahoo consume them")
+        surface_cells = ""
+        for path, key in (("/sitemap.xml", "sitemap"),
+                          ("/robots.txt", "robots"), ("/rss.xml", "rss")):
+            st = surface.get(key) or "pending"
+            cell = ('<span class="badge" style="background:#e6ffe8;color:#1e8e3e">%s</span>'
+                    % st if st == "200" else
+                    '<span class="badge" style="background:#ffe6e6;color:#c0392b">%s</span>'
+                    % st)
+            surface_cells += ("<tr><td class='key'>%s</td><td>%s</td></tr>"
+                              % (path, cell))
+        engines_board = f"""
+<section class="card"><h2>🌐 Search engines — live status</h2>
+<p class="hint" style="margin-top:-4px">Self-hosted, no console visit needed. Console engines show their <b>connected</b> state + last sync; DuckDuckGo/Yahoo show coverage via IndexNow/Bing; visits/clicks come from your own referrer beacon over 7 days.</p>
+<div class="table-wrap"><table class="plain">
+<thead><tr><th>Engine</th><th>Status</th><th>Last sync</th><th>Visits 7d</th><th>Clicks 7d</th><th>Notes</th></tr></thead>
+<tbody>{eng_rows}</tbody></table></div>
+<div class="row" style="align-items:stretch;margin-top:12px">
+ <div class="feature"><h3>{inow_state}</h3><p class="hint">IndexNow key<br>{inow_note}</p></div>
+ <div class="feature"><h3>{_FMT(_INDEXNOW_LAST.get('last') or 0) or '—'}</h3><p class="hint">last submit</p></div>
+ <div class="feature"><h3>{_INDEXNOW_LAST.get('urls', 0)}</h3><p class="hint">URLs submitted</p></div>
+</div>
+<h3 style="margin-top:14px">Public surface — fetched like a crawler (60s cache)</h3>
+<div class="table-wrap"><table class="plain">
+<thead><tr><th>URL</th><th>Crawler status</th></tr></thead><tbody>{surface_cells}</tbody></table></div>
+</section>
+"""
         body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SEO audit — pstore</title><link rel="stylesheet" href="/style.css">
@@ -11045,6 +11130,7 @@ document.addEventListener("click", (e)=>{{
 <p id="inmsg" class="msg"></p>
 <div class="table-wrap"><table class="plain"><thead><tr><th>Engine</th><th>Console / submit</th><th>Sitemap to submit (click to copy)</th></tr></thead><tbody>{engines}</tbody></table></div></div>
 </section>
+{engines_board}
 <section class="card"><h2>📄 Per-niche checks</h2>
 <p class="hint" style="margin-top:-4px">Green = passes the live-page rule. Red = the page is served with that gap today. The <b>Schema</b> column re-serializes exactly what the page emits and validates every Product node against the same fields Google flags (<code>offers.price</code>, <code>priceCurrency</code>, <code>availability</code>, <code>aggregateRating</code>) — an on-dashboard early warning before Search Console. Titles 30–60 chars, descriptions 70–160.</p>
 <div class="table-wrap"><table class="plain"><thead><tr>

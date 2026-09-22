@@ -1324,15 +1324,57 @@ def _ldjson_product_issues(node):
     return errors, warnings
 
 
+def _ldjson_node_issues(node):
+    """Validate any JSON-LD node the site emits against Google's minimal
+    required fields for its @type, split into errors (invalid / not eligible)
+    and warnings (enhancement notes). Product nodes use the Offer/rating rules
+    above; the supporting types the site ships (ItemList, FAQPage,
+    BreadcrumbList, WebSite, Organization) get their own required-field checks
+    so a regression in ANY structured data shows up on the dashboard before
+    Search Console reports it."""
+    t = (node or {}).get("@type")
+    if t == "Product":
+        return _ldjson_product_issues(node)
+    errors, warnings = [], []
+    if t in ("ItemList", "BreadcrumbList"):
+        items = node.get("itemListElement")
+        if not isinstance(items, list) or not items:
+            errors.append("%s.itemListElement missing or empty" % t)
+        else:
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                nm = str(it.get("name") or "").strip()
+                if not nm and isinstance(it.get("item"), dict):
+                    nm = str(it["item"].get("name") or "").strip()
+                if not nm:
+                    errors.append("%s item without name" % t)
+    elif t == "FAQPage":
+        main = node.get("mainEntity")
+        if not isinstance(main, list) or not main:
+            errors.append("FAQPage.mainEntity missing or empty")
+        else:
+            for q in main:
+                if not str(q.get("name") or "").strip():
+                    errors.append("FAQPage question without name")
+    elif t in ("Organization", "WebSite"):
+        if not str(node.get("name") or "").strip():
+            errors.append("%s.name missing" % t)
+        if not node.get("url"):
+            errors.append("%s.url missing" % t)
+    return errors, warnings
+
+
 def audit_jsonld(niche):
     """Validate the structured data the site actually emits for a niche —
-    guide page graph, landing node and story ItemList — against the exact
-    Google Product/Offer field rules, with no network. Errors are the
-    diagnostics Search Console reports (an Offer without price, priceCurrency,
-    availability, or malformed rating); warnings are Google's enhancement
-    notes (unpriced/unrated products that earn no rich snippet). Coverage
-    counters tell the operator why products go unmarked (titleless / unpriced
-    / unrated) so they can fix the data, not just the markup."""
+    guide page graph, landing node and story reel — against Google's required
+    fields for every schema type the site ships, with no network. Product
+    nodes are checked against the Offer/price/rating rules Search Console
+    raised; ItemList / FAQPage / BreadcrumbList / Organization / WebSite get
+    their own required-field checks. Errors = what the console reports;
+    warnings = Google's enhancement notes. Coverage counters tell the operator
+    why products go unmarked (titleless / unpriced / unrated) so they can fix
+    the data, not just the markup."""
     kw = (niche or {}).get("keyword") or ""
     prods = (niche or {}).get("products") or []
     slug = _slugify(kw)
@@ -1343,22 +1385,36 @@ def audit_jsonld(niche):
 
     def check_page(kind, url, nodes):
         nonlocal invalid
-        prods = [n for n in nodes
-                 if isinstance(n, dict) and n.get("@type") == "Product"]
-        for node in prods:
-            node_errors, node_warnings = _ldjson_product_issues(node)
-            prefix = "%s %s" % (kind, url)
+        prod_nodes = [n for n in nodes
+                      if isinstance(n, dict) and n.get("@type") == "Product"]
+        types = {}
+        for node in (n for n in nodes if isinstance(n, dict)):
+            t = node.get("@type")
+            types[t] = types.get(t, 0) + 1
+            node_errors, node_warnings = _ldjson_node_issues(node)
+            prefix = "%s %s (%s)" % (kind, url, t)
             for e in node_errors:
                 invalid += 1
                 errors.append("%s — %s" % (prefix, e))
             for w in node_warnings:
                 warnings.append("%s — %s" % (prefix, w))
-        pages.append({"kind": kind, "url": url, "nodes": len(prods)})
+        pages.append({"kind": kind, "url": url,
+                      "nodes": len(prod_nodes), "types": types})
 
-    # Guide page: the ranked list re-emitted exactly as _product_graph decides.
+    # Guide page: the full graph exactly as render_niche assembles it —
+    # ranked Products, an ItemList of ranked picks, FAQ, breadcrumb, org.
     graph = _product_graph(prods)
+    il = editorial.item_list_jsonld(prods, kw)
+    if il:
+        graph.append(il)
+    best = editorial.best_pick(prods) if prods else None
+    if best:
+        graph.append(editorial.faq_jsonld(kw, best))
+        graph.append(editorial.breadcrumb_jsonld(kw))
+    graph.append(_org_jsonld())
     check_page("guide", "/n/" + slug, graph)
-    covered = len(graph)
+    covered = len([n for n in graph if isinstance(n, dict)
+                   and n.get("@type") == "Product"])
     for it in (prods or [])[:10]:
         if not it.get("title"):
             skipped_title += 1
@@ -1374,24 +1430,23 @@ def audit_jsonld(niche):
             eligible += 1
 
     # Landing sales page (top pick) — same rule, price-gated offers.
-    best = editorial.best_pick(prods) if prods else None
     if best:
         landing = landing_product_jsonld(
             best, "%s/lp/%s" % (BASE_URL, slug))
         if isinstance(landing, dict):
             check_page("landing", "/lp/" + slug, landing.get("@graph") or [])
 
-    # Story reel — only typed Product items need validating; plain ListItems
-    # (incomplete data) are valid by construction.
+    # Story reel — the ItemList of story_listitem entries (incomplete picks
+    # stay plain ListItems), tracked by its breadcrumb + org nodes.
     slides = story_cards(kw, niche)
-    story_nodes = []
-    for p, s in enumerate(slides, 1):
-        if s.get("kind") != "product":
-            continue
-        entry = story_listitem(p, s)
-        if "item" in entry:
-            story_nodes.append(entry["item"])
-    check_page("story", "/stories/" + slug, story_nodes)
+    story_entries = [story_listitem(p, s)
+                     for p, s in enumerate(slides, 1)
+                     if s.get("kind") == "product"]
+    check_page("story", "/stories/" + slug,
+               [{"@type": "ItemList",
+                 "name": "Best %s — story" % kw,
+                 "itemListElement": story_entries},
+                editorial.breadcrumb_jsonld(kw), _org_jsonld()])
 
     return {
         "ok": invalid == 0,
