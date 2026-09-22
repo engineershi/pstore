@@ -57,8 +57,12 @@ class TestSocialSuite(unittest.TestCase):
                                  "..", "pstore.db"), cls.db)
         import sqlite3 as _sqlite
         _conn = _sqlite.connect(cls.db)
-        _conn.execute("DELETE FROM settings WHERE key LIKE 'social.key%'")
-        _conn.commit()
+        has_settings = _conn.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='settings'"
+        ).fetchone()[0]
+        if has_settings:
+            _conn.execute("DELETE FROM settings WHERE key LIKE 'social.key%'")
+            _conn.commit()
         _conn.close()
         cls._env_backup = {k: os.environ.get(k) for k in (
             "PSTORE_DB", "PSTORE_ADMIN_EMAIL", "PSTORE_ADMIN_PASSWORD",

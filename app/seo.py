@@ -323,19 +323,74 @@ def _head(title, desc, canonical, path, jsonld=None, og_image=None, noindex=Fals
     if jsonld:
         payload = json.dumps(jsonld).replace("</", "<\\/")
         head += ("<script type=\"application/ld+json\">%s</script>\n" % payload).encode("utf-8")
-    head += b"</head>\n<body>\n"
+    head += b"</head>\n<body class=\"pub\">\n"
     return head
 
 
+def _masthead(links, cta=("/#top-picks", "Today's top picks")):
+    """Premium sticky masthead for every public page. `links` is a list of
+    (label, href, active) triples rendered as the nav row; `cta` is the
+    (href, label) pair for the highlight action. Keeps the marketplace
+    switcher when more than one market is enabled."""
+    items = "".join(
+        ('<a href="%s"%s>%s</a>' % (_clean(href), " class=\"on\"" if active else "",
+                                    _clean(label)))
+        for label, href, active in links)
+    cta_html = ""
+    if cta and cta[0] and cta[1]:
+        cta_html = '<a class="btn mast-cta" href="%s">%s</a>' \
+            % (_clean(cta[0]), _clean(cta[1]))
+    return ("<header id=\"top\" class=\"mast\"><div class=\"mast-inner\">"
+            "<a class=\"logo\" href=\"/\" aria-label=\"%s home\">"
+            "<span class=\"mark\">P</span><span class=\"word\">%s</span></a>"
+            "<nav class=\"mast-nav\">%s</nav>%s%s</div></header>"
+            % (_clean(SITE_NAME), _clean(SITE_NAME), items, cta_html,
+               market_switcher_html()))
+
+
 def _footer():
-    return f"""<footer style="padding:24px;border-top:1px solid var(--border);color:var(--muted);font-size:13px">
-  <p>pstore — comparison picks. Prices are indicative; check Amazon for the live price.</p>
-  <p>As an Amazon Associate we earn from qualifying purchases.</p>
-  <p>
-    <a href="/">Home</a> · <a href="/blog">Blog</a> · <a href="/about">About</a> · <a href="/contact">Contact</a> ·
-    <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a> · <a href="/disclosure">Disclosure</a> ·
-    <a href="/sitemap.xml">Sitemap</a>
-  </p>
+    return f"""<footer>
+  <div class="foot-wrap">
+    <div class="foot-grid">
+      <div class="foot-brand">
+        <a class="logo" href="/" aria-label="{_clean(SITE_NAME)} home">
+          <span class="mark">P</span><span class="word">{_clean(SITE_NAME)}</span></a>
+        <p>{_clean(SITE_DESC)}</p>
+        <p>Prices are indicative — always confirm the live price on Amazon before ordering.</p>
+      </div>
+      <div class="fcol">
+        <h4>Browse</h4>
+        <div class="foot-links">
+          <a href="/#top-picks">Today's top picks</a>
+          <a href="/#niches">All niches</a>
+          <a href="/blog">Blog</a>
+          <a href="/stories">Stories</a>
+        </div>
+      </div>
+      <div class="fcol">
+        <h4>Company</h4>
+        <div class="foot-links">
+          <a href="/about">About</a>
+          <a href="/contact">Contact</a>
+          <a href="/#method">How we pick</a>
+          <a href="/#notify">Stay updated</a>
+        </div>
+      </div>
+      <div class="fcol">
+        <h4>Legal</h4>
+        <div class="foot-links">
+          <a href="/disclosure">Disclosure</a>
+          <a href="/privacy">Privacy</a>
+          <a href="/terms">Terms</a>
+          <a href="/sitemap.xml">Sitemap</a>
+        </div>
+      </div>
+    </div>
+    <div class="foot-legal">
+      <span>© {datetime.now().year} {_clean(SITE_NAME)} — comparison picks from live Amazon data.</span>
+      <span>As an Amazon Associate we earn from qualifying purchases.</span>
+    </div>
+  </div>
 </footer>
 <div class="totop" aria-hidden="false">
   <a href="#top" aria-label="Back to top">&uarr;</a>
@@ -352,10 +407,9 @@ CONTACT_EMAIL = os.environ.get("PSTORE_CONTACT", "hello@trypstore.com")
 
 
 def _page_header():
-    return f"""<header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
-<p class="tagline">{_clean(SITE_DESC)}</p>
-<nav><a href="/">🏠 Home</a><a href="/about">About</a><a href="/contact">Contact</a></nav></header>
-"""
+    return _masthead([("Home", "/", True), ("Blog", "/blog", False),
+                      ("Stories", "/stories", False)],
+                     cta=("/#top-picks", "Today's top picks"))
 
 
 def render_page(slug, title, desc, content_html):
@@ -364,8 +418,11 @@ def render_page(slug, title, desc, content_html):
     jsonld = {"@context": "https://schema.org", "@type": "WebPage",
               "name": SITE_NAME, "description": desc, "url": BASE_URL + canonical}
     head = _head(title, desc, canonical, canonical, jsonld=jsonld)
-    body = ("%s\n<main><div class=\"card\"><h1>%s</h1>%s</div></main>\n"
-            % (_page_header(), _clean(title), content_html)).encode("utf-8")
+    crumbs = ('<nav class="crumbs"><a href="/">Home</a>'
+              '<span class="sep">›</span><span>%s</span></nav>' % _clean(title))
+    body = ("%s\n<main class=\"page\">%s<article class=\"card\"><h1>%s</h1>"
+            "%s</article></main>\n"
+            % (_page_header(), crumbs, _clean(title), content_html)).encode("utf-8")
     return head + body + _footer()
 
 
@@ -375,10 +432,15 @@ def render_404():
     title = "Page not found"
     desc = "The page you were looking for doesn't exist on %s anymore — or never did." % SITE_NAME
     head = _head(title, desc, "/404", "/", noindex=True)
-    body = ("%s\n<main><div class=\"card\"><h1>%s</h1>"
-            "<p>The address you opened isn't a page on %s.</p>"
-            "<p><a href=\"/\">Back to the homepage</a> · <a href=\"/blog\">Browse the blog</a></p>"
-            "</div></main>\n" % (_page_header(), _clean(title), _clean(SITE_NAME))).encode("utf-8")
+    body = ("%s\n<main class=\"page\"><article class=\"card\">"
+            "<p class=\"eyebrow\">404</p>"
+            "<h1>%s</h1>"
+            "<p class=\"lede\">The address you opened isn't a page on %s.</p>"
+            "<div class=\"hero-ctas\">"
+            "<a class=\"btn\" href=\"/\">Back to the homepage</a>"
+            "<a class=\"btn ghost\" href=\"/blog\">Browse the blog</a>"
+            "</div></article></main>\n"
+            % (_page_header(), _clean(title), _clean(SITE_NAME))).encode("utf-8")
     return head + body + _footer()
 
 
@@ -527,17 +589,18 @@ def optin_html(keyword, source="niche", anchor=""):
 
 
 _LEAD_GATE_CSS = """
-.gate{box-sizing:border-box;max-width:560px;margin:26px auto 0;padding:22px 20px;border:1.5px solid var(--accent,#c8560b);border-radius:14px;background:var(--card,#fff);text-align:center;box-shadow:0 8px 30px rgba(0,0,0,.08)}
-.gate .gift{font-size:40px;line-height:1;margin-bottom:6px}
-.gate h2{margin:0 0 4px;font-size:20px}
-.gate .muted{color:var(--muted,#5f6470);font-size:13.5px;margin:4px auto 10px;line-height:1.5;max-width:420px}
-.gate form{display:flex;flex-wrap:wrap;gap:8px;max-width:430px;margin:12px auto 0}
-.gate form input{flex:1 1 180px;min-width:0;padding:12px 14px;border:1px solid var(--inputs-bd,#c8cbcf);border-radius:10px;font-size:15px;font-family:inherit}
-.gate form button{flex:1 1 150px;padding:12px 14px;border:0;border-radius:999px;font-size:15px;font-weight:800;color:#fff;background:var(--cta,#c8560b);cursor:pointer}
-.gate form button:hover{filter:brightness(1.07)}
-.gate .courier-msg{color:#159a4b;font-size:13px;min-height:18px;margin:8px 0 0}
-.gate .cta{display:inline-block;margin-top:14px;padding:12px 22px;border-radius:999px;background:var(--cta,#c8560b);color:#fff;font-weight:800;text-decoration:none;font-size:15px}
-.gate .hint{font-size:12px;color:var(--muted,#8a93a2);margin-top:10px}
+.gate{box-sizing:border-box;max-width:600px;margin:26px auto 0;padding:30px 28px;border:1px solid var(--line,#e6e9ee);border-radius:20px;background:linear-gradient(180deg,#ffffff,#f7fafb);text-align:center;box-shadow:0 20px 48px rgba(18,22,33,.08)}
+.gate .gift{font-size:34px;line-height:1;margin-bottom:10px}
+.gate h2{margin:0 0 6px;font-size:23px;color:var(--ink,#10131b);letter-spacing:-.015em}
+.gate .muted{color:var(--muted,#66707f);font-size:14.5px;margin:4px auto 12px;line-height:1.6;max-width:440px}
+.gate form{display:flex;flex-wrap:wrap;gap:10px;max-width:460px;margin:14px auto 0}
+.gate form input{flex:1 1 190px;min-width:0;padding:14px 16px;border:1.5px solid var(--border,#dfe4ea);border-radius:12px;font-size:15px;font-family:inherit;background:#fff}
+.gate form input:focus{outline:none;border-color:var(--accent,#0f8b9d);box-shadow:0 0 0 4px rgba(15,139,157,.14)}
+.gate form button{flex:1 1 150px;padding:14px 16px;border:0;border-radius:999px;font-size:15px;font-weight:800;color:#1c1305;background:linear-gradient(135deg,var(--grad-warm-from,#f59e0b),var(--grad-warm-to,#f7c048));cursor:pointer;box-shadow:0 8px 20px rgba(232,148,10,.3)}
+.gate form button:hover{filter:brightness(1.05);transform:translateY(-1px)}
+.gate .courier-msg{color:#159a4b;font-size:13px;min-height:18px;margin:10px 0 0}
+.gate .cta{display:inline-block;margin-top:14px;padding:14px 26px;border-radius:999px;background:linear-gradient(135deg,var(--grad-from,#0f8b9d),var(--grad-to,#14afb6));color:#fff;font-weight:800;text-decoration:none;font-size:15px;box-shadow:0 8px 20px rgba(15,139,157,.3)}
+.gate .hint{font-size:12px;color:var(--muted,#8a93a2);margin-top:12px}
 """
 
 
@@ -618,40 +681,53 @@ def render_landing(saved_niches):
             comp_kw = n["keyword"]
             comp_preview = editorial.comparison_html(n["products"])
             break
+    niche_count = len(top_pick_niches)
+    pick_count = sum(len((n or {}).get("products") or []) for n in top_pick_niches)
+    masthead = _masthead([("Home", "/", True), ("Niches", "/#niches", False),
+                          ("Blog", "/blog", False), ("Stories", "/stories", False)],
+                         cta=("/#top-picks", "Today's top picks"))
+    jumps = ('<nav class="sec-jumps" aria-label="On this page">'
+             '<a class="chip" href="#top-picks">Top picks today</a>'
+             '<a class="chip" href="#niches">All niches</a>'
+             '<a class="chip" href="#method">How we pick</a>'
+             '<a class="chip" href="#faq">Quick questions</a></nav>')
     body = f"""
-<header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
-<p class="tagline">{_clean(SITE_DESC)}</p>
-<nav style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-<a class="chip" href="#top-picks">🏆 Top picks</a>
-<a class="chip" href="#niches">🗂 Niches</a>
-<a class="chip" href="#method">🔬 How we pick</a>
-<a class="chip" href="#notify">✉️ Stay updated</a>
-<a class="chip" href="#faq">❓ FAQ</a>
-<a class="chip" href="/blog">📝 Blog</a>
- <a class="chip" href="/stories">🎞 Stories</a>
-  </nav>{market_switcher_html()}</header>
+{masthead}
 <main data-niche="home" data-source="home" data-keyword="best amazon niche picks" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
-<section class="card hero-home" id="top-picks">
-  <h1 style="font-size:30px;line-height:1.15">Find the best <span style="color:var(--accent)">Amazon picks</span>, by niche — before you scroll once.</h1>
-  <p style="font-size:16px;color:var(--muted);max-width:720px">Each niche page ranks the strongest products on Amazon for a topic — using live price, rating
-  and review signals — so the verdict and the price are above the fold, and the proof is right below it.
-  No endless listicles. No guesswork.</p>
-  <p class="hint">Honest picks. Live data. Affiliate-tagged links (see our <a href="/disclosure">Disclosure</a>).</p>
+<section class="hero-home">
+  <p class="eyebrow">Ranked from live Amazon data</p>
+  <h1>Find the best <em>Amazon picks</em>, by niche — before you scroll once.</h1>
+  <p class="hero-sub">Every niche page ranks the strongest products on Amazon right now — live price,
+  rating and review signals decide the verdict, and the proof is below the fold. No endless
+  listicles, no guesswork: pick, price, reason.</p>
+  <div class="hero-ctas">
+    <a class="btn lg" href="#top-picks">See today's top picks</a>
+    <a class="btn ghost lg" href="#notify">Get the free picks guide</a>
+  </div>
+  <div class="hero-stats">
+    <div><b>{niche_count}</b><span>niches ranked</span></div>
+    <div><b>{pick_count}</b><span>live product picks</span></div>
+    <div><b>Live</b><span>prices pulled from Amazon</span></div>
+    <div><b>Honest</b><span>no paid placement, ever</span></div>
+  </div>
 </section>
+{jumps}
+<section id="top-picks">
 {editorial.quick_picks_band(saved_niches)}
 {comp_preview and ("<section class='card'><h2>Compare the shortlist — {0}</h2><p class='hint'>Scannable table of the live picks for {1}. Swipe or scroll sideways if it overflows.</p>{2}</section>".format(_clean(comp_kw.title()), _clean(comp_kw), comp_preview)) or ""}
+</section>
 {editorial.home_trust_strip()}
 {optin_html(comp_kw, "home", anchor="notify")}
 
 {editorial.niche_grid(saved_niches, anchor="niches")}
 
-<section class="card" id="method"><h2>🌱 How we pick</h2>
+<section class="card" id="method"><h2>How we pick</h2>
 <div class="features">
-  <div class="feature"><h3>⛏️ Niche mining</h3>
+  <div class="feature"><h3>Niche mining</h3>
   <p>We expand each topic through Amazon's own autosuggest index to find the terms real shoppers use.</p></div>
-  <div class="feature"><h3>📊 Real signals</h3>
+  <div class="feature"><h3>Real signals</h3>
   <p>Products are ranked on demand and saturation from live listings — price, rating and review volume.</p></div>
-  <div class="feature"><h3>🛒 Shop on Amazon</h3>
+  <div class="feature"><h3>Shop on Amazon</h3>
   <p>Every pick links straight to the product on Amazon. Purchases may earn us a commission at no cost to you.</p></div>
 </div>
 <div class="trust">
@@ -661,7 +737,7 @@ def render_landing(saved_niches):
   page says it reflects <b>current Amazon listings</b> — prices move, so we re-pull rather than guess.</p>
 </div></section>
 
-<section class="card" id="faq"><h2>❓ Quick questions</h2>
+<section class="card" id="faq"><h2>Quick questions</h2>
 <div class="sub">
 <h3>Do your links cost me anything?</h3>
 <p>No. If you buy after clicking a link, the price is the same — we may earn a small commission
@@ -723,9 +799,13 @@ def render_niche(keyword, niche, saved_niches=None, ab_headline=None, ab_variant
     ab_attr = (' data-variant="%s"' % ab_variant) if ab_variant else ""
     banner_slot = (style_pack or {}).get("banner") or ""
     style_slot = (style_pack or {}).get("css") or ""
+    masthead = _masthead([("Home", "/", False), ("Blog", "/blog", False),
+                          ("Stories", "/stories", False),
+                          ("One-pager", "/lp/" + _slugify(keyword), False),
+                          ("Disclosure", "/disclosure", False)],
+                         cta=("#courier", "Get the free guide"))
     body = f"""
-<header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
-<nav><a href="/">🏠 Home</a><a href="/about">About</a><a href="/disclosure">Disclosure</a><a href="/lp/{_clean(_slugify(keyword))}">One-pager →</a><a href="/stories/{_clean(_slugify(keyword))}">Story</a></nav>{market_switcher_html()}</header>
+{masthead}
 {banner_slot}{style_slot}
 <main data-niche="{_clean(_slugify(keyword))}" data-source="niche" data-keyword="{_clean(keyword)}"{ab_attr} data-tag="{_clean(amazon.AFFILIATE_TAG)}">
 <div class="card">
@@ -817,9 +897,12 @@ def render_topic(term, parent_keyword, niche, parent_slug, style_pack=None):
     hub = "/n/%s" % _slugify(parent_keyword)
     banner_slot = (style_pack or {}).get("banner") or ""
     style_slot = (style_pack or {}).get("css") or ""
+    masthead = _masthead([("Home", "/", False), ("Blog", "/blog", False),
+                          (_clean(parent_keyword.title()), hub, False),
+                          ("Disclosure", "/disclosure", False)],
+                         cta=("#courier", "Get the free guide"))
     body = f"""
-<header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
-<nav><a href="/">🏠 Home</a><a href="{_clean(hub)}">{_clean(parent_keyword.title())}: hub →</a><a href="/disclosure">Disclosure</a><a href="/stories/{_clean(_slugify(parent_keyword))}">Story</a></nav>{market_switcher_html()}</header>
+{masthead}
 {banner_slot}{style_slot}
 <main data-niche="{_clean(term_slug)}" data-source="topic" data-keyword="{_clean(term or parent_keyword)}" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
 <div class="card">
@@ -836,7 +919,7 @@ def render_topic(term, parent_keyword, niche, parent_slug, style_pack=None):
   {editorial.methodology_html()}
   <p class="hint">This is a focused sub-topic of our <a href="{_clean(hub)}">full {_clean(parent_keyword)} guide</a>.</p>
 </div>
-{optin_html(term or parent_keyword, "niche")}
+{optin_html(term or parent_keyword, "niche", anchor="courier")}
 <script src="/courier.js" defer></script>
 <script src="/table-flow.js" defer></script>
 </main>
@@ -889,9 +972,12 @@ def render_priceband(amount, parent_keyword, parent_slug, items,
     ranked = "".join(editorial.pick_html(term_label, it, idx, band)
                      for idx, it in enumerate(score_order(band)))
     hub = "/n/%s" % (parent_slug or _slugify(parent_keyword))
+    masthead = _masthead([("Home", "/", False), ("Blog", "/blog", False),
+                          (_clean(parent_keyword.title()), hub, False),
+                          ("Disclosure", "/disclosure", False)],
+                         cta=("#courier", "Get the free guide"))
     body = f"""
-<header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
-<nav><a href="/">🏠 Home</a><a href="{_clean(hub)}">{_clean(parent_keyword.title())}: full guide →</a><a href="/disclosure">Disclosure</a></nav>{market_switcher_html()}</header>
+{masthead}
 <main data-niche="{_clean(_slugify(parent_keyword))}" data-source="topic" data-keyword="{_clean(term_label)}" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
 <div class="card">
   {editorial.breadcrumbs_html(term_label)}
@@ -908,7 +994,7 @@ def render_priceband(amount, parent_keyword, parent_slug, items,
   {editorial.methodology_html()}
   <p class="hint">This is a budget slice of our <a href="{_clean(hub)}">full {_clean(parent_keyword)} guide</a>.</p>
 </div>
-{optin_html(term_label, "topic")}
+{optin_html(term_label, "topic", anchor="courier")}
 <script src="/courier.js" defer></script>
 <script src="/table-flow.js" defer></script>
 </main>
@@ -953,9 +1039,12 @@ def render_vs(title_a, title_b, a_asin, b_asin, parent_keyword, parent_slug,
     ranked = "".join(editorial.pick_html(term_label, it, idx, cand)
                      for idx, it in enumerate(score_order(cand)))
     hub = "/n/%s" % (parent_slug or _slugify(parent_keyword))
+    masthead = _masthead([("Home", "/", False), ("Blog", "/blog", False),
+                          (_clean(parent_keyword.title()), hub, False),
+                          ("Disclosure", "/disclosure", False)],
+                         cta=("#courier", "Get the free guide"))
     body = f"""
-<header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
-<nav><a href="/">🏠 Home</a><a href="{_clean(hub)}">{_clean(parent_keyword.title())}: full guide →</a><a href="/disclosure">Disclosure</a></nav>{market_switcher_html()}</header>
+{masthead}
 <main data-niche="{_clean(_slugify(parent_keyword))}" data-source="topic" data-keyword="{_clean(term_label)}" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
 <div class="card">
   {editorial.breadcrumbs_html(term_label)}
@@ -970,7 +1059,7 @@ def render_vs(title_a, title_b, a_asin, b_asin, parent_keyword, parent_slug,
   {editorial.methodology_html()}
   <p class="hint">Part of our <a href="{_clean(hub)}">full {_clean(parent_keyword)} guide</a>.</p>
 </div>
-{optin_html(term_label, "topic")}
+{optin_html(term_label, "topic", anchor="courier")}
 <script src="/courier.js" defer></script>
 <script src="/table-flow.js" defer></script>
 </main>
@@ -1054,9 +1143,12 @@ def render_blog(saved_niches, page=1, per_page=BLOG_PAGE_SIZE):
         synopsis = (best or {}).get("title") or n["keyword"]
         cards += f"""
 <article class="card">
-  <a class="blog-title" href="/n/{_clean(slug)}"><h2>{_clean(title)}</h2></a>
-  <p class="hint">Top pick · {_clean(synopsis[:90])}{"…" if len(synopsis) > 90 else ""}</p>
-  <p class="muted">{editorial.reading_minutes(n["keyword"], n["products"], best)} read · {len(n["products"] or 0)} products ranked from live Amazon data</p>
+  <img class="card-img" src="{_clean(BASE_URL)}/og/{_clean(slug)}.png" alt="{_clean(n['keyword'])} picks" loading="lazy">
+  <div class="blog-body">
+    <a class="blog-title" href="/n/{_clean(slug)}"><h2>{_clean(title)}</h2></a>
+    <p class="hint">Top pick · {_clean(synopsis[:90])}{"…" if len(synopsis) > 90 else ""}</p>
+    <p class="muted">{editorial.reading_minutes(n["keyword"], n["products"], best)} read · {len(n["products"] or 0)} products ranked from live Amazon data</p>
+  </div>
 </article>"""
     if not cards:
         cards = '<section class="card"><h2>Fresh guides on the way</h2><p class="hint">We\'re ranking new niches now. Check back soon or <a href="/">browse the picks</a>.</p></section>'
@@ -1069,14 +1161,16 @@ def render_blog(saved_niches, page=1, per_page=BLOG_PAGE_SIZE):
         nav = ('<nav class="blog-pager" style="display:flex;gap:16px;margin:24px 0">'
                "%s<span class=\"pager-page\" style=\"flex:1;text-align:center\">Page %d of %d</span>%s</nav>"
                % (prev_link, page, total_pages, next_link))
-    body = f"""<header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
-<p class="tagline">{_clean(SITE_DESC)}</p>
-<nav><a href="/">🏠 Home</a><a href="/blog">📝 Blog</a><a href="/disclosure">Disclosure</a></nav></header>
+    masthead = _masthead([("Home", "/", False), ("Niches", "/#niches", False),
+                          ("Blog", "/blog", True), ("Stories", "/stories", False)],
+                         cta=("/#top-picks", "Today's top picks"))
+    body = f"""{masthead}
 <main data-niche="blog" data-source="blog" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
-<section class="hero-home card">
-  <h1 style="font-size:30px;line-height:1.15">The <span style="color:var(--accent)">blog</span>.</h1>
-  <p style="font-size:16px;color:var(--muted);max-width:720px">Every guide is a data-backed ranking of the best Amazon pick for that niche —
-  live price, rating and review signals, honest methodology. No filler.</p>
+<section class="hero-home">
+  <p class="eyebrow">The blog</p>
+  <h1>Every guide is a <em>data-backed ranking</em>.</h1>
+  <p class="hero-sub">Live price, rating and review signals decide the pick for each niche — honest
+  methodology, verified before you click, and no filler anywhere.</p>
 </section>
 {cards}
 {nav}</main>
@@ -1167,32 +1261,34 @@ def render_story(niche, keyword=None):
                  jsonld=jsonld,
                  og_image=BASE_URL + "/og/" + slug + ".png")
     body = f"""
-<header id="top" class="story-top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
-<nav><a href="/stories">All stories</a><a href="/n/{_clean(slug)}">Full guide \u2192</a></nav></header>
+{_masthead([("All stories", "/stories", False), ("Full guide", "/n/{_clean(slug)}", False)],
+           cta=("/stories", "All stories"))}
 <main data-niche="{_clean(slug)}" data-source="story" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
 <div class="story-reel">{slides_html}
 {optin_html(keyword, "story", anchor="courier")}</div>
 </main>
-<style>.story-reel{{height:86vh;overflow-y:auto;scroll-snap-type:y proximity;border-radius:18px;margin:6px 0}}
+<style>.story-reel{{height:86vh;overflow-y:auto;scroll-snap-type:y proximity;border-radius:20px;margin:6px 0}}
 .story-slide{{min-height:86vh;display:flex;flex-direction:column;justify-content:flex-end;
-scroll-snap-align:start;background:#fff;border-radius:18px;margin-bottom:14px;
-overflow:hidden;padding:66px 22px 24px;box-sizing:border-box;position:relative;
-box-shadow:0 8px 30px rgba(0,0,0,.08)}}
-.story-slide .story-img{{position:absolute;inset:0;background:linear-gradient(180deg,#f3e8ff,#fff)}}
-.story-slide .story-img img{{width:100%;height:100%;object-fit:contain;padding:26px;box-sizing:border-box}}
+scroll-snap-align:start;background:#fff;border:1px solid var(--line);border-radius:20px;margin-bottom:16px;
+overflow:hidden;padding:66px 26px 26px;box-sizing:border-box;position:relative;
+box-shadow:0 10px 34px rgba(16,19,27,.08)}}
+.story-slide .story-img{{position:absolute;inset:0;background:linear-gradient(180deg,#eef6f8,#ffffff)}}
+.story-slide .story-img img{{width:100%;height:100%;object-fit:contain;padding:28px;box-sizing:border-box}}
 .story-slide .story-inner{{position:relative;z-index:2}}
 .story-cover .story-inner{{color:#fff;text-align:center}}
-.story-kicker{{letter-spacing:.3em;font-size:11px;font-weight:800;opacity:.8}}
-.story-cover h1{{font-size:30px;line-height:1.15;margin:8px 0 6px}}
-.story-sub{{opacity:.9;max-width:480px;margin:0 auto;font-size:15px;line-height:1.5}}
-.story-rank{{font-weight:800;color:var(--accent,#2a6fd6);letter-spacing:.1em;font-size:12px}}
+.story-kicker{{letter-spacing:.3em;font-size:11px;font-weight:800;opacity:.85}}
+.story-cover h1{{font-size:clamp(28px,5vw,40px);line-height:1.12;margin:10px 0 8px;letter-spacing:-.02em}}
+.story-sub{{opacity:.9;max-width:480px;margin:0 auto;font-size:15px;line-height:1.55}}
+.story-rank{{font-weight:800;color:var(--accent-deep,#0a7da0);letter-spacing:.12em;font-size:12px}}
 .story-inner h2{{font-size:22px;line-height:1.25;margin:6px 0}}
-.story-rating{{color:#7a6a3c;font-size:14px;margin:0 0 8px}}
-.story-price{{font-size:26px;font-weight:900;margin:8px 0 12px}}
-.story-cta{{display:inline-block;background:#f0a41a;background-image:linear-gradient(180deg,#ffd75e,#f0a41a);
-color:#111;font-weight:800;text-decoration:none;padding:10px 22px;border-radius:999px}}
-.story-slide form.courier{{position:relative;z-index:2;border-radius:16px}}
-.story-top{{margin-bottom:8px}}</style>
+.story-rating{{color:var(--muted);font-size:14px;margin:0 0 8px}}
+.story-price{{font-size:28px;font-weight:900;letter-spacing:-.02em;color:var(--ink);margin:10px 0 14px}}
+.story-cta{{display:inline-block;background:linear-gradient(135deg,var(--grad-warm-from),var(--grad-warm-to));
+color:#1c1305;font-weight:800;text-decoration:none;padding:12px 24px;border-radius:999px;
+box-shadow:0 8px 20px rgba(232,148,10,.35)}}
+.story-cover{{background-image:linear-gradient(-20deg,#0d1117 0%,#12242e 55%,#0f8b9d 100%)!important}}
+.story-slide form.courier{{position:relative;z-index:2;border-radius:18px}}
+@media (max-width:560px){{.story-slide{{padding:56px 18px 20px}}.story-slide .story-img img{{padding:18px}}}}</style>
 <script src="/courier.js" defer></script>
 <script src="/ui.js" defer></script>
 """.encode("utf-8")
@@ -1217,20 +1313,22 @@ def render_stories_gallery(saved_niches):
         slug = _slugify(n["keyword"])
         cnt = len(n.get("products") or [])
         cards += (f'<a class="card story-card" href="/stories/{_clean(slug)}">'
-                  f'<h2>Best {_clean(n["keyword"])} <span class="hint">\u00b7 {cnt} picks</span></h2>'
+                  f'<div class="blog-body"><h2>Best {_clean(n["keyword"])} <span class="hint">· {cnt} picks</span></h2>'
+                  f'</div>'
                   f'<img src="{_clean(BASE_URL)}/og/{_clean(slug)}.png" alt="{_clean(n["keyword"])}" loading="lazy">'
                   f'</a>')
     if not cards:
         cards = ('<section class="card"><h2>Fresh stories on the way</h2>'
                  '<p class="hint">We are ranking new niches now — the reel fills up as guides ship. '
                  '<a href="/">Browse the picks</a>.</p></section>')
-    body = f"""<header id="top"><p class="logo"><a href="/" style="color:var(--accent);text-decoration:none">{SITE_NAME}</a></p>
-<p class="tagline">{_clean(SITE_DESC)}</p>
-<nav><a href="/">🏠 Home</a><a href="/blog">📝 Blog</a><a href="/stories">🎞 Stories</a></nav></header>
+    masthead = _masthead([("Home", "/", False), ("Niches", "/#niches", False),
+                          ("Blog", "/blog", False), ("Stories", "/stories", True)],
+                         cta=("/#top-picks", "Today's top picks"))
+    body = f"""{masthead}
 <main data-niche="stories" data-source="stories" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
-<section class="hero-home card"><h1>The <span style="color:var(--accent)">stories</span> reel.</h1>
-<p style="font-size:16px;color:var(--muted);max-width:720px">Every ranked guide as a swipeable story —
-verdict up top, live price per pick, honest takes. Fast to share, easy to read.</p></section>
+<section class="hero-home"><p class="eyebrow">The stories reel</p>
+<h1>Every ranked guide, <em>made swipeable</em>.</h1>
+<p class="hero-sub">Verdict up top, live price per pick, honest takes. Fast to share, easy to read.</p></section>
 <div class="features" style="align-items:stretch">{cards}</div>
 </main>
 """.encode("utf-8")
