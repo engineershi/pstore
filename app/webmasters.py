@@ -754,6 +754,29 @@ def yandex_hosts(uid):
     return (data.get("hosts") or []), None
 
 
+def yandex_host_urls(hosts):
+    """Display URLs for a hosts-list payload (unicode_host_url, falling
+    back to ascii_host_url then host_id — Yandex's /hosts/ shapes these
+    differently across API versions)."""
+    out = []
+    for h in hosts or []:
+        u = (h.get("unicode_host_url") or h.get("ascii_host_url")
+             or h.get("host_url") or "")
+        if not u:
+            continue
+        out.append(u)
+    return out
+
+
+def _host_url_matches(url, bare):
+    """True if a host URL (with scheme) refers to the bare hostname."""
+    try:
+        host = urllib.parse.urlsplit(url).hostname or ""
+    except (TypeError, ValueError):
+        host = ""
+    return host.rstrip(".").lower() == bare
+
+
 def yandex_pick_host():
     uid, err = yandex_user_id()
     if err:
@@ -763,8 +786,12 @@ def yandex_pick_host():
         return None, None, err
     host = host_of()
     for h in hosts:
-        if (h.get("host_name") or "").lower().strip("/") == host:
-            return uid, h.get("host_id"), None
+        if not isinstance(h, dict):
+            continue
+        u = (h.get("unicode_host_url") or h.get("ascii_host_url")
+             or h.get("host_url") or "")
+        if u and _host_url_matches(u, host):
+            return uid, h.get("host_id") or u, None
     return uid, None, "host not in your Yandex account yet"
 
 
@@ -797,8 +824,8 @@ def yandex_user_hosts():
     if err:
         return False, {"error": err, "user": uid, "hosts": [],
                        "registered": False}
-    names = [h.get("host_name", "") for h in hosts]
-    normalized = {str(h).lower().strip("/") for h in names}
+    names = yandex_host_urls(hosts)
+    normalized = {_strip_site_url(u) for u in names}
     return True, {"user": uid, "hosts": names,
                   "registered": host_of() in normalized}
 
@@ -814,14 +841,30 @@ def yandex_add_host():
     if err:
         return False, {"error": err}
     host = host_of()
+    host_url = site_url()
     status, data = _req("POST", YANDEX_API + "/user/%s/hosts/" % uid,
                         {"Authorization": "OAuth " + bearer,
                          "Content-Type": "application/json"},
-                        {"host_name": host})
-    if status != 200 or not isinstance(data, dict):
-        return False, {"error": str(data)[:200]}
+                        {"host_url": host_url})
+    if status != 200 and status != 201:
+        # 409 = the host was already added (a no-op from our point of view)
+        if status == 409:
+            data = data or {}
+            verified = bool(data.get("verified") or data.get("verified_date"))
+            return True, {"host": host_url, "registered": True,
+                          "verified": verified,
+                          "message": ("host already registered and verified ✓"
+                                      if verified else
+                                      "host already registered — verify "
+                                      "ownership in Yandex to unlock "
+                                      "indexing data")}
+        if not isinstance(data, dict):
+            return False, {"error": str(data)[:200]}
+        return False, {"error": "%s %s" % (data.get("error_code", ""),
+                                           data.get("error_message", ""))
+                       or str(data)[:200]}
     verified = bool(data.get("verified") or data.get("verified_date"))
-    return True, {"host": data.get("host_name") or host,
+    return True, {"host": data.get("host_url") or host_url,
                   "verified": verified,
                   "message": ("host added and verified ✓" if verified else
                               "host added — verify ownership in Yandex to "

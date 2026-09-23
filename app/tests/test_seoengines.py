@@ -129,11 +129,14 @@ class FakeWm:
         if "user-added-sitemaps" in url:
             return 201, {"sitemap_id": "sm-1"}
         if url.endswith("/hosts/") and method == "POST":
-            return 200, {"host_name": webmasters.host_of(),
+            return 201, {"host_id": "http:%s:80" % webmasters.host_of(),
+                          "unicode_host_url": webmasters.site_url() + "/",
                           "verified": False}
         if "/hosts/" in url and "search-queries" not in url:
             return 200, {"hosts": [{"host_id": "h1",
-                                    "host_name": "trypstore.com"}]}
+                                    "ascii_host_url": "https://trypstore.com/",
+                                    "unicode_host_url": "https://trypstore.com/",
+                                    "verified": True}]}
         if "/indexing/" in url:
             return 201, {}
         if "search-queries/summary" in url:
@@ -367,7 +370,7 @@ class TestWebmastersClients(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(data["user"], "uid-1")
         self.assertTrue(data["registered"])
-        self.assertIn("trypstore.com", data["hosts"])
+        self.assertIn("https://trypstore.com/", data["hosts"])
 
     def test_yandex_add_host(self):
         self.wm.store["seoeng.yandex.token"] = json.dumps(YANDEX_TOK)
@@ -376,6 +379,25 @@ class TestWebmastersClients(unittest.TestCase):
         self.assertIn("host", d)
         self.assertFalse(d["verified"])
         self.assertIn("verify", d["message"].lower())
+
+    def test_yandex_add_host_already_registered(self):
+        self.wm.store["seoeng.yandex.token"] = json.dumps(YANDEX_TOK)
+        orig = webmasters._req
+        def _already(method, url, headers=None, body=None, timeout=25):
+            if url.endswith("/hosts/") and method == "POST":
+                return 409, {"error_code": "HOST_ALREADY_ADDED",
+                             "host_id": "http:trypstore.com:80",
+                             "verified": False,
+                             "error_message": "already there"}
+            return orig(method, url, headers=headers, body=body, timeout=timeout)
+        webmasters._set_transport(_already)
+        try:
+            ok, d = webmasters.yandex_add_host()
+            self.assertTrue(ok)
+            self.assertTrue(d["registered"])
+            self.assertIn("already", d["message"].lower())
+        finally:
+            webmasters._set_transport(orig)
 
     def test_yandex_submit_url(self):
         self.wm.store["seoeng.yandex.token"] = json.dumps(YANDEX_TOK)
