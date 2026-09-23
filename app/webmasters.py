@@ -828,6 +828,31 @@ def yandex_add_host():
                               "unlock indexing data")}
 
 
+def yandex_submit_sitemap(sitemap=None):
+    """Add /sitemap.xml to a registered + verified Yandex host (POST to
+    user-added-sitemaps — the SubmitSitemap analog). 201 means added; 409
+    (SITEMAP_ALREADY_ADDED) is a no-op success since Yandex re-crawls the
+    feed on a schedule anyway. Returns (ok, msg)."""
+    bearer = yandex_bearer()
+    if not bearer:
+        return False, "yandex not connected"
+    uid, hid, err = yandex_pick_host()
+    if err:
+        return False, err
+    sitemap = (sitemap or site_url() + "/sitemap.xml").strip()
+    status, data = _req(
+        "POST", YANDEX_API + "/user/%s/hosts/%s/user-added-sitemaps"
+        % (uid, hid),
+        {"Authorization": "OAuth " + bearer,
+         "Content-Type": "application/json"},
+        {"url": sitemap})
+    if status == 201:
+        return True, "sitemap added"
+    if status == 409:
+        return True, "already added"
+    return False, str(data)[:200]
+
+
 def yandex_submit_url(page=None):
     """Force Yandex to re-crawl one page (POST indexing/{url} — the SubmitUrl
     analog). `page` is a path; the root is crawled when omitted. The host must

@@ -7793,9 +7793,11 @@ document.addEventListener("click", function (e) {{
                 "totals": {"clicks": clicks, "impressions": 0, "position": 0,
                            "ctr": round(clicks * 100.0 / views, 1) if views else 0},
                 "rows": []})
-        if action == "submit" and engine in ("gsc", "bing"):
+        if action == "submit" and engine in ("gsc", "bing", "yandex"):
             if engine == "gsc":
                 ok, msg = webmasters.gsc_submit_sitemap()
+            elif engine == "yandex":
+                ok, msg = webmasters.yandex_submit_sitemap()
             else:
                 key = webmasters.BING_API_KEY or \
                     webmasters.store_get("seoeng.bing.apikey", "")
@@ -8443,7 +8445,7 @@ function act(a,e){const o=$("out-"+e);if(o){o.style.display="block";o.textConten
  fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:a,engine:e,days:28})}).then(r=>r.json().catch(()=>({ok:false,error:"bad response ("+r.status+")"}))).then(d=>{
   if(a==="connect"){ if(d.ok&&d.url){ if(e==="yandex"){window.open(d.url,"_blank","noopener");} else {window.location=d.url;} } else {out(e,"Connect unavailable: "+ (d.error||""));} return;}
    if(o)o.textContent="";
-  if(a==="submit")o.textContent=e==="gsc"?"Simple sitemap PUT → "+ (d.ok?("ok: "+d.message):"err: "+d.error):(d.ok?"submitted ✓":"err: "+d.error);
+  if(a==="submit")o.textContent=d.ok?("submitted ✓ · "+d.message):("err: "+(d.error||""));
   else if(a==="sync")o.textContent=formatStats(d);
   else if(a==="bingtest")o.textContent=(d.ok?(d.registered?"✓ key ok — site already registered in Bing":"✓ key ok — press Add this site to register"):"✗ key invalid: "+(d.error||""))+(d.sites&&d.sites.length?("\\n\\nsites on this key:\\n"+d.sites.join("\\n")):"");
   else if(a==="bingadd")o.textContent=d.ok?("site registered ✓"+(d.message?" · "+d.message:"")):("add failed: "+(d.error||""));

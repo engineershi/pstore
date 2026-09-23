@@ -126,6 +126,8 @@ class FakeWm:
             return 200, {"d": None}
         if url.endswith("/user/"):
             return 200, {"user_id": "uid-1"}
+        if "user-added-sitemaps" in url:
+            return 201, {"sitemap_id": "sm-1"}
         if url.endswith("/hosts/") and method == "POST":
             return 200, {"host_name": webmasters.host_of(),
                           "verified": False}
@@ -381,6 +383,31 @@ class TestWebmastersClients(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("url", d)
         self.assertIn("keto", d["url"])
+
+    def test_yandex_submit_sitemap(self):
+        self.wm.store["seoeng.yandex.token"] = json.dumps(YANDEX_TOK)
+        ok, msg = webmasters.yandex_submit_sitemap()
+        self.assertTrue(ok)
+        self.assertIn("sitemap", msg)
+        call = self.wm.calls[-1]
+        self.assertIn("user-added-sitemaps", call[1])
+        self.assertEqual(call[0], "POST")
+        self.assertTrue((call[2] or {}).get("url", "").endswith("/sitemap.xml"))
+
+    def test_yandex_submit_sitemap_no_host(self):
+        self.wm.store["seoeng.yandex.token"] = json.dumps(YANDEX_TOK)
+        orig = webmasters._req
+        def _no_host_req(method, url, headers=None, body=None, timeout=25):
+            if url.endswith("/hosts/") and method != "POST":
+                return 200, {"hosts": []}
+            return orig(method, url, headers=headers, body=body, timeout=timeout)
+        webmasters._set_transport(_no_host_req)
+        try:
+            ok, msg = webmasters.yandex_submit_sitemap()
+            self.assertFalse(ok)
+            self.assertIn("host", str(msg).lower())
+        finally:
+            webmasters._set_transport(orig)
 
     def test_yandex_submit_url_no_host(self):
         self.wm.store["seoeng.yandex.token"] = json.dumps(YANDEX_TOK)
@@ -896,6 +923,17 @@ class TestSeoengineServer(unittest.TestCase):
         self.assertEqual(st, 200)
         self.assertEqual(d.get("ok"), True)
         self.assertEqual(d.get("message"), "submitted")
+
+    def test_submit_sitemap_yandex(self):
+        self.server._set_setting("seoeng.yandex.token", json.dumps(YANDEX_TOK))
+        st, _, body = self._raw(
+            "POST", "/api/seoengines", cookie=self.cookie,
+            body=json.dumps({"action": "submit", "engine": "yandex"}),
+            ctype="application/json")
+        d = json.loads(body)
+        self.assertEqual(st, 200)
+        self.assertEqual(d.get("ok"), True)
+        self.assertIn("sitemap", d.get("message", ""))
 
     def test_gsc_console_actions_over_http(self):
         self.server._set_setting("seoeng.gsc.token", json.dumps(GSC_TOK))
