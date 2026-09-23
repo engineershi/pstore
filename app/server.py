@@ -7897,9 +7897,36 @@ document.addEventListener("click", function (e) {{
                 else webmasters.yandex_auth_url(state)
             if not url:
                 return self._send(200, {"ok": False,
-                                        "error": "client id/secret not set (env)"})
+                                        "error": "client id/secret not set — "
+                                                 "paste them on the engines board "
+                                                 "(or set PSTORE_YANDEX_CLIENT_ID)"
+                                                 if engine == "yandex" else
+                                        "client id/secret not set (env)"})
             self._set_cookie(state, max_age=600, cookie=_OAUTH_COOKIE, path="/admin")
             return self._send(200, {"ok": True, "url": url})
+        if action == "yacreds":
+            """Persist the Yandex OAuth client id/secret without a redeploy
+            (env PSTORE_YANDEX_CLIENT_ID/_SECRET still win at read time)."""
+            webmasters.set_yandex_client_creds(
+                (body.get("client_id") or "").strip(),
+                (body.get("client_secret") or "").strip())
+            return self._send(200, {"ok": True})
+        if action == "yacode":
+            """Exchange a one-time code Yandex shows on its verification_code
+            page after the operator authorizes (the app's config UI guides
+            this: Connect opens the authorize page, the code comes back here)."""
+            code = (body.get("code") or "").strip()
+            if not webmasters._yandex_client_id() or \
+                    not webmasters._yandex_client_secret():
+                return self._send(200, {"ok": False,
+                                        "error": "client id/secret not set"})
+            ok, msg = webmasters.yandex_exchange(code)
+            if not ok:
+                return self._send(200, {"ok": False,
+                                        "error": "code rejected: %s"
+                                                 % (msg or "try again")[:200]})
+            return self._send(200, {"ok": True, "engine": "yandex",
+                                    "message": msg})
         if action == "tagcheck":
             """Verify every social + search-engine <head> tag on a live public
             page, crawler-style: fetch the page through the caller's own origin,
@@ -8211,8 +8238,8 @@ color:#fff;background:#b8bcc8}}
             "gsc": "Create a Google Cloud OAuth2 web client + enable the Search Console API. Set PSTORE_GSC_CLIENT_ID / PSTORE_GSC_CLIENT_SECRET on the host and add redirect URI %s/admin/oauth/seoengines/cb/gsc. Then Connect to approve it. After connecting: Test connection lists every property the token can see, Add this site registers this URL-prefix property, and Inspect URL pushes any page through the URL Inspection API (daily quota ~200)."
                    % seo.BASE_URL,
             "bing": "Add this exact site in Bing Webmaster, then paste your Bing API key (also settable via PSTORE_BING_API_KEY). No OAuth needed.",
-            "yandex": "Create a Yandex OAuth app (PSTORE_YANDEX_CLIENT_ID / PSTORE_YANDEX_CLIENT_SECRET) with redirect URI %s/admin/oauth/seoengines/cb/yandex, add this host in Yandex Webmaster, then Connect. After connecting: Test connection lists every host the token controls, Add this site registers this host, and Recrawl URL forces Yandex to re-crawl any page."
-                   % seo.BASE_URL,
+            "yandex": "Create a Yandex OAuth app (ClientID/secret, set as PSTORE_YANDEX_CLIENT_ID / PSTORE_YANDEX_CLIENT_SECRET or paste below). Yandex locks the redirect to %s, so after Connect opens the authorize page, Yandex shows a one-time code — paste it into the box and press Exchange code. Then: Test connection lists every host the token controls, Add this site registers this host, Recrawl URL forces Yandex to re-crawl any page."
+                   % webmasters.YANDEX_VERIFY_REDIRECT,
         }
         via = {
             "duckduckgo": "No console to connect. DuckDuckGo's crawler consumes "
@@ -8280,6 +8307,27 @@ color:#fff;background:#b8bcc8}}
                          '%s</button></div>'
                          % (eng, "inspect" if eng == "gsc" else "recrawl",
                             eng, push_label))
+                if eng == "yandex":
+                    extra = ('<div class="row" '
+                             'style="flex-wrap:wrap;gap:8px;align-items:center">'
+                             '<input id="yacid" placeholder="Yandex client id" '
+                             'style="width:200px;max-width:100%%">'
+                             '<input id="yacsec" type="password" '
+                             'placeholder="Yandex client secret" '
+                             'style="width:200px;max-width:100%%">'
+                             '<button class="btn ghost" onclick="yaCreds()">'
+                             'Save client</button></div>'
+                             '<div class="row" style="margin-top:8px;'
+                             'flex-wrap:wrap;gap:8px;align-items:center">'
+                             '<input id="yacode" placeholder="paste the code '
+                             'Yandex showed" style="width:260px;max-width:100%%">'
+                             '<button class="warm" onclick="yaCode()">'
+                             'Exchange code</button>'
+                             '<input id="su-yandex" placeholder="/page to recrawl" '
+                             'style="width:190px;max-width:100%%">'
+                             '<button class="btn ghost" onclick="pushUrl(\'yandex\')">'
+                             'Recrawl URL</button>'
+                             '</div>')
             cards.append("""
         <div class="card" style="margin:0">
          <h2>%s</h2>
@@ -8384,7 +8432,7 @@ pre.preview{white-space:pre-wrap;word-break:break-word;background:#f8fafc;border
 const $=id=>document.getElementById(id);
 const ENG={gsc:["Google Search Console","Google","so you need a Google Cloud OAuth client (PSTORE_GSC_CLIENT_ID / PSTORE_GSC_CLIENT_SECRET). Enable the Search Console API, add redirect URI {base}/admin/oauth/seoengines/cb/gsc, then Connect."],
    bing:["Bing Webmaster","Microsoft-Bing Webmaster, key-based","create a Bing Webmaster account, add this exact site, then grab the API key (PSTORE_BING_API_KEY or paste it here). No OAuth — the key is the token."],
-   yandex:["Yandex Webmaster","Yandex Webmaster OAuth (PSTORE_YANDEX_CLIENT_ID / _SECRET)","create a Yandex OAuth app, redirect URI {base}/admin/oauth/seoengines/cb/yandex, then Connect."]};
+   yandex:["Yandex Webmaster","Yandex Webmaster OAuth (client id + secret, paste below)","create a Yandex OAuth app, redirect locked to https://oauth.yandex.ru/verification_code, then Connect; paste the one-time code Yandex shows and press Exchange code."]};
 function esc(s){return (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
 function badge(state){return state==="ready"?'<span class="badg" style="background:#e6ffe8;color:#1e8e3e">ready</span>'
   :state==="consent-given"?'<span class="badg" style="background:#ffeedb;color:#a05a00">consent given</span>'
@@ -8393,8 +8441,8 @@ function badge(state){return state==="ready"?'<span class="badg" style="backgrou
   :'<span class="badg" style="background:#ffe6e6;color:#c0392b">'+(state||"?")+'</span>';}
 function act(a,e){const o=$("out-"+e);if(o){o.style.display="block";o.textContent="working…";}
  fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:a,engine:e,days:28})}).then(r=>r.json().catch(()=>({ok:false,error:"bad response ("+r.status+")"}))).then(d=>{
-  if(a==="connect"){ if(d.ok&&d.url){window.location=d.url;} else {out(e,"Connect unavailable: "+ (d.error||""));} return;}
-  if(o)o.textContent="";
+  if(a==="connect"){ if(d.ok&&d.url){ if(e==="yandex"){window.open(d.url,"_blank","noopener");} else {window.location=d.url;} } else {out(e,"Connect unavailable: "+ (d.error||""));} return;}
+   if(o)o.textContent="";
   if(a==="submit")o.textContent=e==="gsc"?"Simple sitemap PUT → "+ (d.ok?("ok: "+d.message):"err: "+d.error):(d.ok?"submitted ✓":"err: "+d.error);
   else if(a==="sync")o.textContent=formatStats(d);
   else if(a==="bingtest")o.textContent=(d.ok?(d.registered?"✓ key ok — site already registered in Bing":"✓ key ok — press Add this site to register"):"✗ key invalid: "+(d.error||""))+(d.sites&&d.sites.length?("\\n\\nsites on this key:\\n"+d.sites.join("\\n")):"");
@@ -8410,6 +8458,8 @@ function out(e,t){const o=$("out-"+e);if(o){o.style.display="block";o.textConten
 function pushUrl(e){const p=($("su-"+e)||{}).value||"";const a=e==="gsc"?"gscurl":e==="yandex"?"yaurl":"bingurl";const o=$("out-"+e);if(o){o.style.display="block";o.textContent="working…";}fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:a,engine:e,page:p.trim()})}).then(r=>r.json().catch(()=>({ok:false,error:"bad response ("+r.status+")"}))).then(d=>out(e,d.ok?("submitted ✓ "+esc(d.url||"")):("submit failed: "+(d.error||"")))).catch(err=>{if(o)o.textContent="request failed: "+err.message;});}
 function bingPush(){const p=($("su-bing")||{}).value||"";const o=$("out-bing");if(o){o.style.display="block";o.textContent="working…";}fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"bingurl",engine:"bing",page:p.trim()})}).then(r=>r.json().catch(()=>({ok:false,error:"bad response ("+r.status+")"}))).then(d=>out("bing",d.ok?("submitted ✓ "+esc(d.url)):("submit failed: "+(d.error||"")))).catch(err=>{if(o)o.textContent="request failed: "+err.message;});}
 function saveKey(e){const k=$("vk-"+e).value;const o=$("out-"+e);if(!k){out(e,"paste a key first");return;}if(o){o.style.display="block";o.textContent="working…";}fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"bingkey",key:k})}).then(r=>r.json().catch(()=>({ok:false}))).then(d=>{out(e,d.ok?"bing key saved ✓":"bing key save failed");load();}).catch(err=>{if(o)o.textContent="request failed: "+err.message;});}
+function yaCreds(){const o=$("out-yandex");if(o){o.style.display="block";o.textContent="working…";}const id=($("yacid")||{}).value||"";const sec=($("yacsec")||{}).value||"";fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"yacreds",client_id:id,client_secret:sec})}).then(r=>r.json().catch(()=>({ok:false,error:"bad response ("+r.status+")"}))).then(d=>{if(o)o.textContent=d.ok?"yandex client saved ✓":"yandex client save failed"+(d.error?": "+d.error:"");load();}).catch(err=>{if(o)o.textContent="request failed: "+err.message;});}
+function yaCode(){const o=$("out-yandex");if(o){o.style.display="block";o.textContent="working…";}const code=($("yacode")||{}).value||"";if(!code){out("yandex","paste the code Yandex showed first");return;}fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"yacode",code:code.trim()})}).then(r=>r.json().catch(()=>({ok:false,error:"bad response ("+r.status+")"}))).then(d=>{if(o)o.textContent=d.ok?"✓ yandex connected — token saved":(d.error?"exchange failed: "+d.error:"exchange failed");load();}).catch(err=>{if(o)o.textContent="request failed: "+err.message;});}
 function verifyTok(e){const t=$("vt-"+e).value;const o=$("out-"+e);if(o){o.style.display="block";o.textContent="working…";}fetch("/api/seoengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"verify",engine:e,token:t})}).then(r=>r.json().catch(()=>({ok:false}))).then(()=>{out(e,t?"verification meta saved ✓":"verification meta cleared");load();}).catch(err=>{if(o)o.textContent="request failed: "+err.message;});}
 function chip(ok){return ok===false?'<span class="badg" style="background:#ffe6e6;color:#c0392b">✗</span>':ok===true?'<span class="badg" style="background:#e6ffe8;color:#1e8e3e">✓</span>':'<span class="badg" style="background:#eceff3;color:#667">◦</span>';}
 function tagCheck(){const $o=$("tagout");if(!$o)return;const p=$("tgp").value;

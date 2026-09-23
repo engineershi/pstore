@@ -11,6 +11,7 @@ import os
 import shutil
 import threading
 import unittest
+import urllib.parse
 import uuid
 from http.server import ThreadingHTTPServer
 
@@ -463,7 +464,9 @@ class TestWebmastersClients(unittest.TestCase):
         self.assertIn("oauth.yandex.ru/authorize", url)
         self.assertIn("client_id=yid-test", url)
         self.assertIn("webmaster%3Ahost%3Aall", url)
-        self.assertIn("cb%2Fyandex", url)
+        self.assertIn("redirect_uri=https%3A%2F%2Foauth.yandex.ru"
+                      "%2Fverification_code", url)
+        self.assertNotIn("cb%2Fyandex", url)
 
     def test_yandex_exchange(self):
         ok, msg = webmasters.yandex_exchange("y-code")
@@ -569,6 +572,48 @@ class TestWebmastersClients(unittest.TestCase):
             (webmasters.GSC_CLIENT_ID, webmasters.GSC_CLIENT_SECRET,
              webmasters.YANDEX_CLIENT_ID, webmasters.YANDEX_CLIENT_SECRET,
              webmasters.BING_API_KEY) = saved
+
+    def test_yandex_runtime_creds_from_store(self):
+        """Pasted client id/secret survive redeploys: with env cleared, the
+        runtime override read from the settings store still marks yandex
+        configured and builds an authorize URL."""
+        id_saved = (webmasters.YANDEX_CLIENT_ID,
+                    webmasters._YANDEX_CLIENT_ID_RUNTIME,
+                    self.wm.store.get("seoeng.yandex.clientid"))
+        sec_saved = (webmasters.YANDEX_CLIENT_SECRET,
+                     webmasters._YANDEX_CLIENT_SECRET_RUNTIME,
+                     self.wm.store.get("seoeng.yandex.clientsecret"))
+        try:
+            webmasters.YANDEX_CLIENT_ID = ""
+            webmasters.YANDEX_CLIENT_SECRET = ""
+            webmasters.set_yandex_client_creds("rt-id", "rt-secret")
+            self.assertEqual(webmasters._yandex_client_id(), "rt-id")
+            self.assertEqual(webmasters._yandex_client_secret(), "rt-secret")
+            self.assertEqual(self.wm.store["seoeng.yandex.clientid"], "rt-id")
+            self.assertEqual(self.wm.store["seoeng.yandex.clientsecret"],
+                             "rt-secret")
+            st = {r["engine"]: r for r in webmasters.engines_status()}
+            self.assertTrue(st["yandex"]["client"])
+            url = webmasters.yandex_auth_url("y-st")
+            self.assertIn("client_id=rt-id", url)
+            self.assertIn("oauth.yandex.ru%2Fverification_code", url)
+        finally:
+            webmasters.YANDEX_CLIENT_ID, webmasters._YANDEX_CLIENT_ID_RUNTIME, \
+                store_id = id_saved
+            webmasters.YANDEX_CLIENT_SECRET, \
+                webmasters._YANDEX_CLIENT_SECRET_RUNTIME, store_sec = sec_saved
+            self.wm.store["seoeng.yandex.clientid"] = store_id
+            self.wm.store["seoeng.yandex.clientsecret"] = store_sec
+
+    def test_yandex_exchange_uses_locked_redirect(self):
+        ok, msg = webmasters.yandex_exchange("y-code")
+        self.assertTrue(ok)
+        call = self.wm.calls[-1]
+        self.assertIn("/token", call[1])
+        self.assertEqual(call[0], "POST")
+        body = urllib.parse.parse_qs(call[2].decode())
+        self.assertEqual(body["redirect_uri"][0],
+                         "https://oauth.yandex.ru/verification_code")
 
 
 class TestSeoengineServer(unittest.TestCase):
@@ -909,6 +954,35 @@ class TestSeoengineServer(unittest.TestCase):
         self.assertEqual(st, 200)
         self.assertTrue(d["ok"])
         self.assertIn("url", d)
+
+    def test_yandex_pasted_creds_and_code_over_http(self):
+        """The verification_code flow: client id/secret saved from the UI
+        (persists to store) and the one-time code Yandex showed exchanged for
+        a token through the API."""
+        st, _, body = self._raw(
+            "POST", "/api/seoengines", cookie=self.cookie,
+            body=json.dumps({"action": "yacreds", "engine": "yandex",
+                             "client_id": "rt-id",
+                             "client_secret": "rt-secret"}),
+            ctype="application/json")
+        d = json.loads(body)
+        self.assertEqual(st, 200)
+        self.assertTrue(d["ok"])
+        st, _, body = self._raw(
+            "POST", "/api/seoengines", cookie=self.cookie,
+            body=json.dumps({"action": "yacode", "engine": "yandex",
+                             "code": "one-time-code"}),
+            ctype="application/json")
+        d = json.loads(body)
+        self.assertEqual(st, 200)
+        self.assertTrue(d["ok"])
+        tok = json.loads(self.server._get_setting("seoeng.yandex.token"))
+        self.assertEqual(tok["access_token"], "yandex-at")
+        # the pasted client id/secret survive redeploys via the store
+        self.assertEqual(webmasters.store_get("seoeng.yandex.clientid"),
+                         "rt-id")
+        self.assertEqual(webmasters.store_get("seoeng.yandex.clientsecret"),
+                         "rt-secret")
 
     def test_crawl_post_and_paid_set(self):
         self.server._set_setting("seoeng.gsc.token", json.dumps(GSC_TOK))

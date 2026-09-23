@@ -115,11 +115,15 @@ def _chapters():
             "niche page in the rankings.")
         doc.paragraph(
             "To reach Google, Bing and Yandex at full speed, open the Search "
-            "Engines hub (/admin/seoengines): connect Google Search Console and "
-            "Yandex via OAuth, paste your Bing API key, then Fetch stats pulls real "
-            "clicks and impressions per engine and Submit sitemap re-pings it. Until "
-            "a console is connected, the Traffic panel shows referral-attributed page "
-            "views and clicks from your own on-site beacon.")
+            "Engines hub (/admin/seoengines): connect Google Search Console, "
+            "then Yandex — Yandex locks its redirect, so save your app's client "
+            "id/secret there, press Connect console, and after approving, paste "
+            "the one-time code Yandex shows back into the Yandex card and press "
+            "Exchange code — plus paste your Bing API key. Then Fetch stats pulls "
+            "real clicks and impressions per engine and Submit sitemap re-pings "
+            "it. Until a console is connected, the Traffic panel shows "
+            "referral-attributed page views and clicks from your own on-site "
+            "beacon.")
         doc.paragraph(
             "Bing setup is key-based: paste your API key (or set PSTORE_BING_API_KEY) "
             "and press Test connection to see which sites that key already owns, then "

@@ -96,6 +96,36 @@ GSC_CLIENT_SECRET = os.environ.get("PSTORE_GSC_CLIENT_SECRET", "")
 BING_API_KEY = os.environ.get("PSTORE_BING_API_KEY", "")
 YANDEX_CLIENT_ID = os.environ.get("PSTORE_YANDEX_CLIENT_ID", "")
 YANDEX_CLIENT_SECRET = os.environ.get("PSTORE_YANDEX_CLIENT_SECRET", "")
+# Yandex now locks redirection for Web-service OAuth apps to this verification
+# callback ("verification_code" flow): the authorize page shows a one-time code
+# which the operator pastes back into the app, and the token exchange must use
+# that same locked URI as its redirect_uri.
+YANDEX_VERIFY_REDIRECT = "https://oauth.yandex.ru/verification_code"
+# PSTORE_YANDEX_CLIENT_ID/_SECRET are only read at boot; these runtime overrides
+# (persisted by the /admin/keys "site" hub as seoeng.yandex.clientid/.clientsecret)
+# let the pasted credentials survive redeploys while the env var still wins.
+_YANDEX_CLIENT_ID_RUNTIME = ""
+_YANDEX_CLIENT_SECRET_RUNTIME = ""
+
+
+def set_yandex_client_creds(client_id, client_secret):
+    """Apply + persist Yandex OAuth client credentials for this process so they
+    survive redeploys. The env vars still win at read time."""
+    global _YANDEX_CLIENT_ID_RUNTIME, _YANDEX_CLIENT_SECRET_RUNTIME
+    _YANDEX_CLIENT_ID_RUNTIME = (client_id or "").strip()
+    _YANDEX_CLIENT_SECRET_RUNTIME = (client_secret or "").strip()
+    store_set("seoeng.yandex.clientid", _YANDEX_CLIENT_ID_RUNTIME)
+    store_set("seoeng.yandex.clientsecret", _YANDEX_CLIENT_SECRET_RUNTIME)
+
+
+def _yandex_client_id():
+    return YANDEX_CLIENT_ID or _YANDEX_CLIENT_ID_RUNTIME or \
+        store_get("seoeng.yandex.clientid", "")
+
+
+def _yandex_client_secret():
+    return YANDEX_CLIENT_SECRET or _YANDEX_CLIENT_SECRET_RUNTIME or \
+        store_get("seoeng.yandex.clientsecret", "")
 
 GSC_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GSC_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -154,14 +184,15 @@ def engines_status():
         "state": "ready" if bkey else "needs-key",
     })
     ytok = _json_get(TOKEN_SETTINGS["yandex"])
+    ycid, ycsec = _yandex_client_id(), _yandex_client_secret()
     rows.append({
         "engine": "yandex", "name": "Yandex Webmaster",
-        "client": bool(YANDEX_CLIENT_ID and YANDEX_CLIENT_SECRET),
+        "client": bool(ycid and ycsec),
         "token": bool(ytok and ytok.get("access_token")),
         "site": host_of(),
-        "state": ("ready" if (YANDEX_CLIENT_ID and YANDEX_CLIENT_SECRET
+        "state": ("ready" if (ycid and ycsec
                               and ytok and ytok.get("access_token")) else
-                  ("needs-client" if not (YANDEX_CLIENT_ID and YANDEX_CLIENT_SECRET)
+                  ("needs-client" if not (ycid and ycsec)
                    else "needs-consent")),
     })
     for r in rows:
@@ -667,23 +698,23 @@ def bing_submit_url(key, url, page=None):
 
 # ------------------------------------------------------------------ Yandex
 def yandex_auth_url(state):
-    if not (YANDEX_CLIENT_ID and YANDEX_CLIENT_SECRET):
+    cid, csec = _yandex_client_id(), _yandex_client_secret()
+    if not (cid and csec):
         return ""
-    redir = seo.BASE_URL.rstrip("/") + "/admin/oauth/seoengines/cb/yandex"
     return ("%s/authorize?response_type=code&client_id=%s&redirect_uri=%s"
             "&scope=%s&state=%s"
-            % (YANDEX_OAUTH, urllib.parse.quote(YANDEX_CLIENT_ID, safe=""),
-               urllib.parse.quote(redir, safe=""),
+            % (YANDEX_OAUTH, urllib.parse.quote(cid, safe=""),
+               urllib.parse.quote(YANDEX_VERIFY_REDIRECT, safe=""),
                urllib.parse.quote("webmaster:host:all", safe=""),
                urllib.parse.quote(state, safe="")))
 
 
 def yandex_exchange(code):
-    redir = seo.BASE_URL.rstrip("/") + "/admin/oauth/seoengines/cb/yandex"
+    cid, csec = _yandex_client_id(), _yandex_client_secret()
     body = urllib.parse.urlencode({
         "grant_type": "authorization_code", "code": code,
-        "client_id": YANDEX_CLIENT_ID, "client_secret": YANDEX_CLIENT_SECRET,
-        "redirect_uri": redir}).encode()
+        "client_id": cid, "client_secret": csec,
+        "redirect_uri": YANDEX_VERIFY_REDIRECT}).encode()
     status, data = _req("POST", YANDEX_OAUTH + "/token",
                         {"Content-Type": "application/x-www-form-urlencoded",
                          "Content-Length": str(len(body))}, body)
