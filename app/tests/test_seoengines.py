@@ -138,8 +138,8 @@ class FakeWm:
                                     "ascii_host_url": "https://trypstore.com/",
                                     "unicode_host_url": "https://trypstore.com/",
                                     "verified": True}]}
-        if "/indexing/" in url:
-            return 201, {}
+        if "/recrawl/queue" in url:
+            return 200, {"task_id": "task-1", "quota_remainder": 100}
         if "search-queries/summary" in url:
             return 200, {"totals": {"clicks": 11, "shows": 400, "position": 4.2}}
         return 404, {}
@@ -406,11 +406,12 @@ class TestWebmastersClients(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("url", d)
         self.assertIn("keto", d["url"])
-        call_url = self.wm.calls[-1][1]
-        self.assertIn("/indexing/", call_url)
-        target = webmasters.site_url() + "/n/keto"
-        self.assertIn(urllib.parse.quote(target, safe=""), call_url)
-        self.assertNotIn("://", call_url.split("/indexing/")[1])
+        call = self.wm.calls[-1]
+        method, url, body = call[0], call[1], call[2]
+        self.assertEqual(method, "POST")
+        self.assertIn("/recrawl/queue", url)
+        self.assertNotIn("/indexing/", url)
+        self.assertEqual(body, {"url": webmasters.site_url() + "/n/keto"})
 
     def test_yandex_submit_sitemap(self):
         self.wm.store["seoeng.yandex.token"] = json.dumps(YANDEX_TOK)

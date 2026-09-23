@@ -897,9 +897,10 @@ def yandex_submit_sitemap(sitemap=None):
 
 
 def yandex_submit_url(page=None):
-    """Force Yandex to re-crawl one page (POST indexing/{url} — the SubmitUrl
-    analog). `page` is a path; the root is crawled when omitted. The host must
-    already be registered + verified in Yandex. Returns (ok, {"url"})."""
+    """Force Yandex to re-crawl one page (POST user/{uid}/hosts/{hid}/recrawl/
+    queue with the URL in the JSON body — Yandex's Send-for-reindexing
+    resource). `page` is a path; the root is crawled when omitted. The host
+    must already be registered + verified in Yandex. Returns (ok, {"url"})."""
     bearer = yandex_bearer()
     if not bearer:
         return False, {"error": "yandex not connected"}
@@ -908,10 +909,13 @@ def yandex_submit_url(page=None):
         return False, {"error": err}
     target = site_url().rstrip("/") + (("/" + page.lstrip("/")) if page else "")
     status, data = _req(
-        "POST", YANDEX_API + "/user/%s/hosts/%s/indexing/%s"
-        % (uid, hid, urllib.parse.quote(target, safe="")),
+        "POST", "https://api.webmaster.yandex.net/v4/user/%s/hosts/%s/recrawl/queue"
+        % (uid, hid),
         {"Authorization": "OAuth " + bearer,
-         "Content-Type": "application/json"}, {})
+         "Content-Type": "application/json"}, {"url": target.rstrip("/")})
+    if status == 200 and (isinstance(data, dict) and data.get("task_id")
+                          or data is None or data == {}):
+        return True, {"url": target, "task_id": (data or {}).get("task_id", "")}
     if status in (200, 201):
         return True, {"url": target}
     return False, {"url": target, "error": str(data)[:200]}
