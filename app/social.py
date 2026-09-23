@@ -43,6 +43,11 @@ def _key(name):
         (name or "social").lower().replace(" ", "-")
 
 
+# Reverse lookup: engine key -> canonical display platform (used by the social
+# engines hub and any endpoint that receives a platform key from the UI).
+PLATFORM_BY_KEY = {_key(p): p for p in PLATFORMS}
+
+
 def track_link(base_url, slug, platform, content):
     """Public, tracked link back to the niche landing page (UTM-tagged)."""
     base = (base_url or "").rstrip("/")

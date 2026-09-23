@@ -573,3 +573,102 @@ class TestTestConnectionReadHelpers(Base):
             st, data = fn(*args)
             self.assertIsInstance(st, int)
             self.assertTrue(st >= 400 or isinstance(data, str))
+
+
+class TestConnection(Base):
+    """test_connection() — per-platform identity reads, the parity surface the
+    social engines hub renders as the "Connected as …" byte."""
+
+    def _ident(self, platform, body, mapping=None):
+        publish._get = lambda url, headers, timeout=15: (200, body)
+        publish._post = lambda url, payload, headers, timeout=15: (200, body)
+        publish.og_image = lambda url: "https://example.com/og.png"
+        return publish.test_connection(platform, self._keys(mapping or {}))
+
+    def test_x_identity_read(self):
+        r = self._ident("Twitter / X", {"data": {"username": "acme",
+                                                  "name": "Acme"},
+                                         "errors": []},
+                        {("twitter", "client_id"): "K",
+                         ("twitter", "client_secret"): "S",
+                         ("twitter", "token"): "T",
+                         ("twitter", "token_secret"): "TS"})
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["account"], "@acme")
+        self.assertEqual(r["name"], "Acme")
+
+    def test_x_missing_keys(self):
+        r = publish.test_connection("Twitter / X", self._keys())
+        self.assertFalse(r["ok"])
+        self.assertIn("configured", r["message"])
+
+    def test_pinterest_identity_read(self):
+        r = self._ident("Pinterest", {"username": "pinner",
+                                       "business_name": "Pinner Co"},
+                        {("pinterest", "token"): "PT"})
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["account"], "@pinner")
+        self.assertEqual(r["name"], "Pinner Co")
+
+    def test_facebook_identity_read(self):
+        r = self._ident("Facebook", {"id": "123", "name": "Acme Page"},
+                        {("facebook", "token"): "FT"})
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["account"], "page:123")
+        self.assertEqual(r["name"], "Acme Page")
+
+    def test_linkedin_identity_read(self):
+        r = self._ident("LinkedIn", {"sub": "urn-1", "preferred_username": "jdoe",
+                                     "name": "Jane Doe"},
+                        {("linkedin", "token"): "LT"})
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["account"], "jdoe")
+        self.assertEqual(r["name"], "Jane Doe")
+
+    def test_instagram_identity_read(self):
+        r = self._ident("Instagram", {"id": "ig-1", "username": "photobiz"},
+                        {("instagram", "token"): "IGT",
+                         ("instagram", "ig_user_id"): "ig-1"})
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["account"], "@photobiz")
+
+    def test_instagram_missing_uid(self):
+        r = self._ident("Instagram", {"username": "photobiz"},
+                        {("instagram", "token"): "IGT"})
+        self.assertFalse(r["ok"])
+        self.assertIn("ig_user_id", r["message"])
+
+    def test_telegram_identity_read(self):
+        r = self._ident("Telegram", {"ok": True,
+                                      "result": {"username": "acmepricebot",
+                                                 "first_name": "Acme"}},
+                        {("telegram", "token"): "TG"})
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["account"], "@acmepricebot")
+        self.assertEqual(r["name"], "Acme")
+
+    def test_telegram_folded_token(self):
+        r = self._ident("Telegram", {"ok": True,
+                                      "result": {"username": "acmepricebot"}},
+                        {("telegram", "token"): "TG|@acmebot"})
+        self.assertTrue(r["ok"])
+
+    def test_youtube_identity_read(self):
+        r = self._ident("YouTube",
+                        {"items": [{"id": "yt-1",
+                                    "snippet": {"title": "Acme Channel"}}]},
+                        {("youtube", "token"): "YT"})
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["account"], "channel:yt-1")
+        self.assertEqual(r["name"], "Acme Channel")
+
+    def test_unknown_platform(self):
+        r = publish.test_connection("Threads", self._keys())
+        self.assertFalse(r["ok"])
+
+    def test_bad_identity_is_not_ok(self):
+        publish._get = lambda url, headers, timeout=15: (
+            401, {"error": {"message": "denied", "code": 100}})
+        r = publish.test_connection("Facebook", self._keys({("facebook", "token"): "F"}))
+        self.assertFalse(r["ok"])
+        self.assertIn("denied", r["message"])

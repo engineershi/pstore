@@ -277,8 +277,21 @@ def _chapters():
              "or a full YouTube title + description for video), hashtags and a "
              "tracked link with its own code, so every "
              "post's clicks are counted individually in Analytics. Video "
-             "platforms need no native key: they publish through the webhook "
-             "alongside every other platform without credentials.")
+"platforms need no native key: they publish through the webhook "
+              "alongside every other platform without credentials.")
+        doc.paragraph(
+            "The Social engines hub (/admin/socialengines) is social's answer to "
+            "the search-engine consoles. Each platform that has a native backend "
+            "(X, Pinterest, Facebook, LinkedIn, Instagram, Telegram, YouTube) gets "
+            "a card: paste the token (or tokens) straight on the card, press 'Test "
+            "connection' to prove — with a real identity read, posting nothing — "
+            "which account those credentials control, and 'Publish test post' to "
+            "push one tracked post for a keyword (blank = newest niche) natively, "
+            "in one click. The card shows the connected-as handle and the total "
+            "native posts that platform has driven. Platforms without tokens still "
+            "route through your SOCIAL_WEBHOOK router from /admin/social; this "
+            "board is the native, first-class path that works with no n8n/Zapier "
+            "in the middle.")
         doc.paragraph(
             "Posts can be scheduled to future peak slots under 'Schedule post kits', "
             "then pushed out two ways from the 'Bulk publishing' toolbar: 'Flush due "
@@ -410,6 +423,7 @@ def _chapters():
             ("Ebooks /admin/ebooks", "PDF lead magnet"),
             ("Analytics /admin/analytics", "clicks, views, sources"),
             ("Social /admin/social", "tracked kits, 6 platforms"),
+            ("Social engines /admin/socialengines", "native test + publish"),
             ("SEM /admin/sem", "long-tails + briefs"),
             ("SEO audit /admin/seo", "indexability strip"),
             ("Link authority /admin/linkauthority", "guest posts, HARO, PR"),
@@ -685,6 +699,7 @@ def render_admin_manual(nav_html, totop_html):
         a("/admin/ebooks", "📕 Ebooks", "PDF lead magnet"),
         a("/admin/analytics", "📊 Analytics", "clicks + sources"),
         a("/admin/social", "📣 Social", "tracked posts"),
+        a("/admin/socialengines", "🔌 Social engines", "native test + publish"),
         a("/admin/sem", "🎯 SEM", "keywords + funnel"),
         a("/admin/seo", "🔍 SEO audit", "indexability"),
         a("/admin/linkauthority", "🔗 Link authority", "off-page votes"),

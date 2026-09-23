@@ -605,6 +605,167 @@ def _yt_channels(token):
     return _get(url, {"Authorization": "Bearer " + str(token or "")}, timeout=10)
 
 
+def _twt_param(key, secret, token, token_secret, url, method="GET"):
+    """OAuth 1.0a header for an arbitrary URL (the POST variant in :func:`_post_twitter`
+    is hard-coded to /2/tweets). Used by the X identity read (users/me)."""
+    u = urllib.parse.urlsplit(url)
+    ts = str(int(datetime.datetime.now().timestamp()))
+    nonce = _oauth_nonce()
+    qs = urllib.parse.urlsplit(url).query
+    base_params = {}
+    for pair in qs.split("&"):
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            base_params[urllib.parse.unquote_plus(k)] = urllib.parse.unquote_plus(v)
+    oauth_params = {
+        "oauth_consumer_key": key or "",
+        "oauth_nonce": nonce,
+        "oauth_signature_method": "HMAC-SHA1",
+        "oauth_timestamp": ts,
+        "oauth_token": token or "",
+        "oauth_version": "1.0",
+    }
+    merged = {k: v for k, v in base_params.items()}
+    merged.update(oauth_params)
+    enc = ";".join("%s=%s" % (urllib.parse.quote(k, safe="~"),
+                              urllib.parse.quote(v, safe="~"))
+                   for k, v in sorted(merged.items()) if v)
+    base = "%s&%s&%s" % (method, urllib.parse.quote(u.scheme + "://" + u.netloc + u.path, safe="~"),
+                          urllib.parse.quote(enc, safe="~"))
+    sig = _oauth_sign(key, secret, token_secret, ts, base)
+    oauth_params["oauth_signature"] = sig
+    header = ", ".join('%s="%s"' % (k, urllib.parse.quote(v, safe=""))
+                       for k, v in oauth_params.items())
+    return {"Authorization": "OAuth " + header}
+
+
+def _twt_me(key, secret, token, token_secret):
+    """X users/me read (the exact OAuth 1.0a creds the native tweet posts with).
+    Returns (status, json); never raises."""
+    url = ("https://api.twitter.com/2/users/me?user.fields=username,name")
+    headers = _twt_param(key, secret, token, token_secret, url, method="GET")
+    headers["User-Agent"] = "pstore/1.0"
+    return _get(url, headers, timeout=10)
+
+
+def test_connection(platform, kv):
+    """Per-platform identity read (posts nothing). Mirrors the exact credential
+    paths the native write functions use, so a green Test connection means the
+    same creds would post. Returns a dict:
+       {"ok": bool, "platform": display, "account": str, "name": str,
+        "message": str}
+    ``account`` is the @handle / page name the post would come from."""
+    if not kv:
+        return {"ok": False, "platform": platform, "account": "",
+                "name": "", "message": "no key getter"}
+    p = (platform or "").strip()
+    if p == "Twitter / X":
+        key, secret, token, token_secret = _twt_cred(kv)
+        if not (key and token):
+            return {"ok": False, "platform": p, "account": "", "name": "",
+                    "message": "No X consumer + access keys configured."}
+        st, data = _twt_me(key, secret, token, token_secret)
+        d = (data or {}).get("data") if isinstance(data, dict) else None
+        if st == 200 and isinstance(d, dict):
+            return {"ok": True, "platform": p,
+                    "account": "@" + str(d.get("username") or ""),
+                    "name": str(d.get("name") or ""),
+                    "message": "X identity verified"}
+        return {"ok": False, "platform": p, "account": "", "name": "",
+                "message": _api_error(st, data)}
+    if p == "Pinterest":
+        tok = _pint_cred(kv)[0] or ""
+        if not tok:
+            return {"ok": False, "platform": p, "account": "", "name": "",
+                    "message": "No Pinterest board token configured."}
+        st, data = _get_user_account(tok)
+        if st != 200 or not isinstance(data, dict) or not data.get("username"):
+            return {"ok": False, "platform": p, "account": "", "name": "",
+                    "message": _pint_api_error(st, data)}
+        return {"ok": True, "platform": p,
+                "account": "@" + str(data.get("username") or ""),
+                "name": str(data.get("business_name") or ""),
+                "message": "Pinterest identity verified"}
+    if p == "Facebook":
+        tok = _fb_cred(kv)[0] or ""
+        if not tok:
+            return {"ok": False, "platform": p, "account": "", "name": "",
+                    "message": "No Facebook page token configured."}
+        st, data = _fb_me(tok)
+        if st != 200 or not isinstance(data, dict) or not data.get("id"):
+            return {"ok": False, "platform": p, "account": "", "name": "",
+                    "message": _api_error(st, data)}
+        return {"ok": True, "platform": p,
+                "account": "page:" + str(data.get("id") or ""),
+                "name": str(data.get("name") or ""),
+                "message": "Facebook identity verified"}
+    if p == "LinkedIn":
+        tok = _li_cred(kv)[0] or ""
+        if not tok:
+            return {"ok": False, "platform": p, "account": "", "name": "",
+                    "message": "No LinkedIn access token configured."}
+        st, data = _li_me(tok)
+        if st != 200 or not isinstance(data, dict) or not data.get("sub"):
+            return {"ok": False, "platform": p, "account": "", "name": "",
+                    "message": _api_error(st, data)}
+        return {"ok": True, "platform": p,
+                "account": data.get("preferred_username")
+                or ("@n/" + str(data.get("sub") or "")[:8]),
+                "name": str(data.get("name") or ""),
+                "message": "LinkedIn identity verified"}
+    if p == "Instagram":
+        tok = kv("instagram", "access_token") or kv("instagram", "token")
+        uid = kv("instagram", "ig_user_id")
+        if not tok:
+            return {"ok": False, "platform": p, "account": "", "name": "",
+                    "message": "No Instagram Graph token configured."}
+        if not uid:
+            return {"ok": False, "platform": p, "account": "", "name": "",
+                    "message": "Instagram needs the Business account id "
+                               "(social.key.instagram.ig_user_id)."}
+        st, data = _ig_account(tok, uid)
+        if st != 200 or not isinstance(data, dict) or not data.get("username"):
+            return {"ok": False, "platform": p, "account": "", "name": "",
+                    "message": _api_error(st, data)}
+        return {"ok": True, "platform": p,
+                "account": "@" + str(data.get("username") or ""),
+                "name": "IG business id " + str(uid),
+                "message": "Instagram identity verified"}
+    if p == "Telegram":
+        tok = (kv("telegram", "token") or "").strip()
+        if "|" in tok:
+            tok = tok.split("|", 1)[0].strip()
+        if not tok:
+            return {"ok": False, "platform": p, "account": "", "name": "",
+                    "message": "No Telegram bot token configured."}
+        st, data = _tg_me(tok)
+        if st != 200 or not isinstance(data, dict) or not data.get("ok"):
+            return {"ok": False, "platform": p, "account": "", "name": "",
+                    "message": _api_error(st, data)}
+        info = (data or {}).get("result") or {}
+        return {"ok": True, "platform": p,
+                "account": "@" + str((info.get("username") or "")).lower(),
+                "name": str(info.get("first_name") or ""),
+                "message": "Telegram identity verified"}
+    if p == "YouTube":
+        tok = kv("youtube", "access_token") or kv("youtube", "token")
+        if not tok:
+            return {"ok": False, "platform": p, "account": "", "name": "",
+                    "message": "No YouTube OAuth token configured."}
+        st, data = _yt_channels(tok)
+        items = (data or {}).get("items") if isinstance(data, dict) else None
+        if st == 200 and items:
+            sn = (items[0] or {}).get("snippet") or {}
+            return {"ok": True, "platform": p,
+                    "account": "channel:" + str((items[0] or {}).get("id") or ""),
+                    "name": str(sn.get("title") or ""),
+                    "message": "YouTube identity verified"}
+        return {"ok": False, "platform": p, "account": "", "name": "",
+                "message": _api_error(st, data)}
+    return {"ok": False, "platform": p, "account": "", "name": "",
+            "message": "No identity read for %s" % p}
+
+
 def _pint_resolve_board(kv, requested="", auto=True):
     """Best-effort Pinterest board id for the token's account. Resolution order:
     an explicit board NAME from `kv("pinterest", "board")` (settings key

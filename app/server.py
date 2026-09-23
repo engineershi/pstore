@@ -393,7 +393,8 @@ FUNCTION_PATHS = {
                   "/api/autosuggest", "/api/niches", "/api/opportunities",
                   "/api/content"),
     "email": ("/admin/emails", "/api/mail", "/api/sequence/", "/api/subscribers"),
-    "social": ("/admin/social", "/api/social"),
+    "social": ("/admin/social", "/admin/socialengines", "/api/social",
+               "/api/socialengines"),
     "telegram": ("/admin/telegram", "/api/telegram/hook", "/api/telegram/state", "/api/telegram/config", "/api/telegram/broadcast", "/api/telegram/feed"),
 "seo": ("/admin/seo", "/admin/seoengines", "/admin/rss", "/admin/sem",
             "/admin/linkauthority", "/seo/snippet/", "/api/sem", "/api/seo-audit",
@@ -426,6 +427,7 @@ NAV_FN = {
     "refresh": "content",
     "funnel": "marketing", "marketing": "marketing", "emails": "email",
     "social": "social", "variants": "marketing", "segments": "marketing",
+    "socialengines": "social",
     "telegram": "telegram", "variants": "marketing", "segments": "marketing",
     "pricedrop": "marketing", "template": "marketing", "keys": "keys", "apikeys": "keys",
     "weeklydigest": "marketing",
@@ -5112,6 +5114,7 @@ for (const id of ["me-name","me-pw","me-pw2"])
               ("/admin/marketing", "📊 ROI", "marketing"),
               ("/admin/emails", "📨 Email Studio", "emails"),
               ("/admin/social", "📣 Social", "social"),
+              ("/admin/socialengines", "🔌 Social engines", "socialengines"),
               ("/admin/telegram", "✈️ Telegram", "telegram"),
               ("/admin/variants", "⚗️ A/B", "variants"),
               ("/admin/segments", "🎚 Lead segments", "segments"),
@@ -5194,6 +5197,7 @@ for (const id of ["me-name","me-pw","me-pw2"])
             ("/admin/marketing", "📊 Marketing ROI", "email + social + traffic"),
             ("/admin/emails", "📨 Email Studio", "compose, switches & scheduling"),
             ("/admin/social", "📣 Social publishing", "tracked posts"),
+            ("/admin/socialengines", "🔌 Social engines", "test + publish natively"),
             ("/admin/telegram", "✈️ Telegram broadcast", "subscriber opt-in + admin send"),
             ("/admin/variants", "⚗️ A/B headline tests", "per-niche split test"),
             ("/admin/segments", "🎚 Lead lifecycle segments", "hot / warm / cold"),
@@ -5553,6 +5557,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._admin_priority(q)
             if path == "/admin/social":
                 return self._admin_social(q)
+            if path == "/admin/socialengines":
+                return self._admin_socialengines(q)
             if path == "/admin/telegram":
                 return self._admin_telegram(q)
             if path == "/admin/system":
@@ -5608,6 +5614,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._seo_snippet(path[len("/seo/snippet/"):])
             if path == "/api/social":
                 return self._social_api(q)
+            if path == "/api/socialengines":
+                return self._socialengines_api(q)
             if path == "/api/social/drip":
                 return self._drip_api()
             if path == "/keys":
@@ -5788,6 +5796,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             if parsed.path == "/api/mail":
                 return self._studio_api(
                     {k: v[-1] for k, v in urllib.parse.parse_qs(parsed.query).items()})
+            if parsed.path == "/api/socialengines":
+                return self._socialengines_post()
             if parsed.path == "/api/social/publish":
                 return self._social_publish()
             if parsed.path == "/api/social/publish-all":
@@ -11021,6 +11031,293 @@ document.addEventListener("click", (e)=>{{
 </script>
 </body></html>"""
         return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
+
+
+# ------------------------------------------------------------------ social engines
+    def _socialengines_status(self):
+        """Per-platform engine status: platform key, natively-posted counts and
+        whether its posting credentials are present (env or the /admin/apikeys
+        settings). Mirrors webmasters.engines_status for the social side."""
+        kv = _publish_key_getter()
+        ready = _native_platform_status()
+        posted = {}
+        try:
+            with _lock:
+                conn = _db()
+                try:
+                    for r in conn.execute(
+                            "SELECT platform, COUNT(*) c FROM social_posts "
+                            "WHERE status='published' "
+                            "GROUP BY platform").fetchall():
+                        posted[str(r["platform"] or "")] = int(r["c"] or 0)
+                finally:
+                    conn.close()
+        except Exception:
+            posted = {}
+        out = []
+        shown = [p for p in social.PLATFORMS if social._key(p) in
+                 ("twitter", "pinterest", "facebook", "linkedin", "instagram",
+                  "telegram", "youtube")]
+        for platform in shown:
+            ns = social._key(platform)
+            out.append({
+                "engine": ns, "platform": platform,
+                "name": {"twitter": "X / Twitter", "youtube": "YouTube"}.get(
+                    ns, platform),
+                "ready": bool(ready.get(platform)),
+                "chat": bool(_env_key("telegram", "chat")
+                             or _get_setting("social.key.telegram.chat", "")),
+                "account": self._socialengines_account(ns),
+                "native_posts": int(posted.get(platform, 0)),
+            })
+        return out
+
+    def _socialengines_account(self, ns):
+        """Cached identity for a platform (stored when Test connection succeeds),
+        so the board renders who a token belongs to without hammering APIs."""
+        return _get_setting("social.id.%s" % ns, "")
+
+    def _socialengines_api(self, q):
+        return self._send(200, {
+            "host": seo.BASE_URL,
+            "apikeys": seo.BASE_URL.rstrip("/") + "/admin/apikeys",
+            "webhook": bool(self._webhook_url()),
+            "engines": self._socialengines_status()})
+
+    def _socialengines_test(self, platform_key):
+        """Run a real identity read for one platform (posts nothing). Persists
+        the verified identity so the board can show it without re-testing."""
+        platform = social.PLATFORM_BY_KEY.get(platform_key)
+        if not platform:
+            return {"ok": False, "error": "unknown platform"}
+        kv = _publish_key_getter()
+        r = publish.test_connection(platform, kv)
+        if r.get("ok") and platform_key:
+            acct = r.get("account") or ""
+            name = r.get("name") or ""
+            label = (acct + (" · " + name if name else "")).strip()
+            _set_setting("social.id.%s" % platform_key, label)
+        return r
+
+    def _socialengines_save_key(self, body):
+        """Persist one platform's posting key from the engine card (the same
+        settings keys /admin/apikeys writes). Returns ok + a hint."""
+        ns = (body.get("engine") or "").strip().lower()
+        known = ("twitter", "pinterest", "facebook", "linkedin", "instagram",
+                 "telegram", "youtube")
+        if ns not in known:
+            return {"ok": False, "error": "unknown engine %r" % ns}
+        token = (body.get("token") or "").strip()
+        if not token and ns != "twitter":
+            return {"ok": False, "error": "engine + token required"}
+        if ns == "twitter":
+            # The X card has four OAuth1 fields; the API receives them as
+            # separate entries or the token box holds the classic line.
+            fields = ("client_id", "client_secret", "access_token",
+                      "access_token_secret")
+            got = 0
+            for f in fields:
+                v = (body.get(f) or "").strip()
+                if v:
+                    _set_setting("social.key.twitter.%s" % f, v)
+                    got += 1
+            return {"ok": got > 0,
+                    "error": ("paste at least the consumer key + access token"
+                              if not got else ""),
+                    "note": "%d X fields saved" % got}
+        chat = (body.get("chat") or "").strip()
+        if chat:
+            _set_setting("social.key.%s.chat" % ns, chat)
+        if ns in ("instagram", "youtube"):
+            uid = (body.get("account_id") or "").strip()
+            if uid:
+                f = "ig_user_id" if ns == "instagram" else "channel_id"
+                _set_setting("social.key.%s.%s" % (ns, f), uid)
+        _set_setting("social.key.%s" % ns, token)
+        return {"ok": True, "note": "%s token saved" % ns}
+
+    def _socialengines_post(self):
+        body = self._body()
+        action = (body.get("action") or "").strip()
+        if action == "test":
+            return self._send(200, self._socialengines_test(
+                (body.get("engine") or "").strip().lower()))
+        if action == "save":
+            return self._send(200, self._socialengines_save_key(body))
+        if action == "publish":
+            engine = (body.get("engine") or "").strip().lower()
+            platform = social.PLATFORM_BY_KEY.get(engine)
+            if not platform:
+                return self._send(200, {"ok": False, "error": "unknown platform"})
+            keyword = (body.get("keyword") or "").strip() or self._socialengines_pick_keyword()
+            kits = self._social_kits(keyword)
+            kit = next((k for k in kits if k.get("platform") == platform), None)
+            if not kit:
+                return self._send(200, {"ok": False, "error": "no kit for %s" % platform})
+            kv = _publish_key_getter()
+            res = publish.post_to(platform, kit, kv)
+            res["slug"] = kit.get("slug")
+            return self._send(200, {"ok": bool(res.get("ok")),
+                                    "platform": platform,
+                                    "via": res.get("via") or "?",
+                                    "message": res.get("message") or "",
+                                    "slug": kit.get("slug")})
+        return self._send(200, {"ok": False, "error": "unknown action"})
+
+    def _socialengines_pick_keyword(self):
+        """Newest keyword for the engines-board test publish (mirrors the social
+        page's default pick so the button is always one click from a post)."""
+        for n in reversed(self._all_niches()):
+            kw = (n.get("keyword") or "").strip()
+            if kw:
+                return kw
+        return ""
+
+    def _admin_socialengines(self, q):
+        """Social engines hub: per-platform cards in the same shape as the
+        search-engine consoles — paste the token, Test connection (identity
+        read), Publish one tracked test post live, and see who is verified +
+        how many posts each has driven natively."""
+        nav = self._admin_nav('socialengines')
+        how = {
+            "twitter": ("X posts via the API v2 /tweets endpoint. Needs an X "
+                        "developer app (paid tier for posting) — paste the four "
+                        "OAuth 1.0a credentials (consumer key/secret + access "
+                        "token/secret)."),
+            "pinterest": ("Pinterest pins via the v5 API. Paste a board/app "
+                          "token with boards:read and pins:read + boards:write, "
+                          "pins:write scopes (the board override and auto-create "
+                          "settings on /admin/apikeys still apply)."),
+            "facebook": ("Facebook posts via the Graph API. Needs a Meta app "
+                         "with a Page/User access token that has "
+                         "pages_show_list + pages_manage_posts."),
+            "linkedin": ("LinkedIn UGC posts. Needs a w_member_social access "
+                         "token; the person URN is guessed from the token"
+                         " (set social.key.linkedin.urn to override)."),
+            "instagram": ("Instagram photo/carousel via the Graph API. Needs a "
+                          "Meta Business/Creator token + the Instagram Business "
+                          "account id (social.key.instagram.ig_user_id)."),
+            "telegram": ("Posts to a channel via a free BotFather bot. Paste "
+                         "the bot token and a chat target (a channel @username, "
+                         "a chat id, or fold both as TOKEN|@channel). Zero budget, "
+                         "zero review queue."),
+            "youtube": ("Uploads a 9:16 Shorts video (rendered locally, ~6s) "
+                        "via the Data API. Needs a youtube.upload OAuth access "
+                        "token; ffmpeg is used when available."),
+        }
+        extra = {
+            "twitter": ('<div class="row" style="flex-wrap:wrap;gap:8px;align-items:center">'
+                        '<input id="sc-twitter" placeholder="consumer key" style="width:170px">'
+                        '<input id="sc-twitter-secret" type="password" placeholder="consumer secret" style="width:170px">'
+                        '<input id="sc-twitter-token" placeholder="access token" style="width:170px">'
+                        '<input id="sc-twitter-tokensec" type="password" placeholder="access token secret" style="width:170px">'
+                        '<button class="btn ghost" onclick="saveKey(\'twitter\')">Save keys</button></div>'),
+            "telegram": ('<div class="row" style="flex-wrap:wrap;gap:8px;align-items:center">'
+                         '<input id="sc-telegram" placeholder="bot token (or TOKEN|@channel)" style="width:260px">'
+                         '<input id="sc-telegram-chat" placeholder="@channel or chat id" style="width:170px">'
+                         '<button class="btn ghost" onclick="saveKey(\'telegram\')">Save</button></div>'),
+            "instagram": ('<div class="row" style="flex-wrap:wrap;gap:8px;align-items:center">'
+                          '<input id="sc-instagram" placeholder="graph access token" style="width:240px">'
+                          '<input id="sc-instagram-uid" placeholder="IG business account id" style="width:180px">'
+                          '<button class="btn ghost" onclick="saveKey(\'instagram\')">Save</button></div>'),
+            "youtube": ('<div class="row" style="flex-wrap:wrap;gap:8px;align-items:center">'
+                        '<input id="sc-youtube" placeholder="OAuth access token" style="width:280px">'
+                        '<button class="btn ghost" onclick="saveKey(\'youtube\')">Save</button></div>'),
+        }
+        cards = []
+        for e in self._socialengines_status():
+            ns = e["engine"]
+            kf = extra.get(ns, '<div class="row" style="flex-wrap:wrap;gap:8px;align-items:center">'
+                              '<input id="sc-%s" placeholder="platform access token" '
+                              'style="width:280px;max-width:100%%">'
+                              '<button class="btn ghost" onclick="saveKey(\'%s\')">Save</button></div>'
+                              % (ns, ns))
+            cards.append("""
+        <div class="card" style="margin:0">
+         <h2>%s</h2>
+         <div class="row">
+          <div class="feature"><h3 id="st-%s">…</h3><p class="hint">state</p></div>
+          <div class="feature"><h3 id="acct-%s">—</h3><p class="hint">connected as</p></div>
+          <div class="feature"><h3 id="posts-%s">0</h3><p class="hint">native posts</p></div>
+         </div>
+         <div class="row" style="margin-top:8px;flex-wrap:wrap;gap:8px">
+          <button class="warm" onclick="act('test','%s')">Test connection</button>
+          <button class="btn" onclick="act('publish','%s')">Publish test post</button>
+         </div>
+         <div class="row" style="margin-top:8px;flex-wrap:wrap;gap:8px;align-items:center">
+          <input id="sc-kw-%s" placeholder="keyword (leave empty for newest)" style="width:230px;max-width:100%%">
+         </div>
+         %s
+         <details class="bump" style="margin-top:10px"><summary>Setup guide</summary>
+           <p class="hint" style="margin-top:6px">%s</p></details>
+         <pre class="preview" id="out-%s" style="display:none"></pre>
+        </div>""" % (e["name"], ns, ns, ns, ns, ns, ns, kf, how[ns], ns))
+        engines_rows = "".join(cards)
+        page = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Social engines — pstore</title><link rel="stylesheet" href="/style.css">
+<meta name="robots" content="noindex,nofollow">
+<style>
+.stengx{display:grid;grid-template-columns:minmax(0,1fr);gap:18px}
+.stengx>.card,.eng-grid,.eng-grid>.card,.stengx .feature{min-width:0}
+.eng-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;min-width:0}
+pre.preview{white-space:pre-wrap;word-break:break-word;background:#f8fafc;border:1px solid var(--line,#eee);border-radius:12px;padding:12px;font-size:12.5px;margin-top:8px}
+.badg{display:inline-block;padding:2px 10px;border-radius:999px;font-size:11.5px;font-weight:700}
+.stengx .eng-grid h2{font-size:17px}
+.stengx .features{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+.stengx .feature h3{overflow-wrap:anywhere;word-break:break-word;font-size:15px;line-height:1.35}
+.stengx .hero h1{font-size:clamp(24px,6vw,40px)}
+@media (max-width: 620px){
+ .stengx .row{gap:8px}
+ .eng-grid{grid-template-columns:1fr}
+ main{padding:12px 12px 48px}
+ .eng-grid input{min-width:0}
+ .stengx .card{padding:16px 14px}
+ .stengx .feature{flex:1 1 46%}
+}
+</style>
+</head><body>
+<header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
+<div class="hero"><h1>Social <span>engines.</span></h1>
+<p class="tagline">Paste a platform token, prove who it belongs to with a real identity read, and publish one tracked test post straight from the console — or rely on the <b>webhook router</b> for the platforms you handle outside. Native posts are counted per engine.</p></div>
+{nav}
+</header>
+<main class="stengx">
+ <section class="card"><h2>🌐 Platforms</h2>
+  <div class="eng-grid" id="engines">{engines_rows}</div>
+ </section>
+ <section class="card"><h2>⚡ Webhook fallback</h2>
+  <p class="hint">Any platform without native credentials still routes through your <b>SOCIAL_WEBHOOK</b> router (n8n / Zapier / Make) when you publish from <a href="/admin/social">📣 Social</a>. This board is the native, first-class path.</p>
+ </section>
+</main>
+<footer><p>Native posts are counted from the same social_posts table that powers /admin/social and the analytics boards. Test connection posts nothing — it only reads the account identity that the saved token controls.</p></footer>
+{totop}
+<script>
+const $=id=>document.getElementById(id);
+function esc(s){return (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+function badge(ok){return ok?'<span class="badg" style="background:#e6ffe8;color:#1e8e3e">ready</span>':'<span class="badg" style="background:#ffe6e6;color:#c0392b">not connected</span>';}
+function out(e,t){const o=$("out-"+e);if(o){o.style.display="block";o.textContent=t;if(o.scrollIntoView)o.scrollIntoView({block:"nearest",behavior:"smooth"});return 1;}return 0;}
+function act(a,e){const kwe=$(("sc-kw-"+e))||{};const kw=(kwe.value||"").trim();const o=$("out-"+e);if(o){o.style.display="block";o.textContent="working…";}
+ fetch("/api/socialengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:a,engine:e,keyword:kw})}).then(r=>r.json().catch(()=>({ok:false,error:"bad response ("+r.status+")"}))).then(d=>{
+  if(o)o.textContent="";
+  if(a==="test")o.textContent=d.ok?("✓ connected as "+esc(d.account||"")+(d.name?(" · "+esc(d.name)):"")):("✗ "+esc(d.message||d.error||"failed"));
+  else if(a==="publish")o.textContent=d.ok?("posted natively ✓ "+esc(d.message||"")):(d.via==="skipped"?("note: "+esc(d.message||"no creds")):("✗ "+esc(d.message||d.error||"")));
+  load();if(o){o.scrollIntoView({block:"nearest",behavior:"smooth"});}
+ }).catch(err=>{if(o)o.textContent="request failed: "+err.message;});}
+function saveKey(e){const kv={action:"save",engine:e,token:($("sc-"+e)||{}).value||""};
+ if(e==="twitter"){kv["client_id"]=($("sc-twitter")||{}).value||"";kv["client_secret"]=($("sc-twitter-secret")||{}).value||"";kv["access_token"]=($("sc-twitter-token")||{}).value||"";kv["access_token_secret"]=($("sc-twitter-tokensec")||{}).value||"";}
+ if(e==="telegram"){kv["chat"]=($("sc-telegram-chat")||{}).value||"";}
+ if(e==="instagram"){kv["account_id"]=($("sc-instagram-uid")||{}).value||"";}
+ const o=$("out-"+e);if(o){o.style.display="block";o.textContent="working…";}
+ fetch("/api/socialengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(kv)}).then(r=>r.json().catch(()=>({ok:false}))).then(d=>{if(o)o.textContent=d.ok?("saved ✓"+(d.note?" · "+d.note:"")):("save failed: "+(d.error||""));load();}).catch(err=>{if(o)o.textContent="request failed: "+err.message;});}
+function load(){fetch("/api/socialengines").then(r=>r.json()).then(d=>{
+  for(const e of d.engines){$("st-"+e.engine).innerHTML=badge(e.ready);$("acct-"+e.engine).textContent=e.account||"—";$("posts-"+e.engine).textContent=e.native_posts||0;}
+ }).catch(e=>{});}
+document.addEventListener("DOMContentLoaded",load);
+</script>
+</body></html>""".replace("{nav}", nav).replace("{engines_rows}", engines_rows).replace(
+            "{totop}", _TOTOP)
+        return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
 
 
 # ------------------------------------------------------------------ SEM / SEO suite
