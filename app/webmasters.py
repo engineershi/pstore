@@ -913,11 +913,9 @@ def yandex_submit_url(page=None):
         % (uid, hid),
         {"Authorization": "OAuth " + bearer,
          "Content-Type": "application/json"}, {"url": target.rstrip("/")})
-    if status == 200 and (isinstance(data, dict) and data.get("task_id")
-                          or data is None or data == {}):
+    ok = isinstance(status, int) and 200 <= status < 300
+    if ok:
         return True, {"url": target, "task_id": (data or {}).get("task_id", "")}
-    if status in (200, 201):
-        return True, {"url": target}
     return False, {"url": target, "error": str(data)[:200]}
 
 
