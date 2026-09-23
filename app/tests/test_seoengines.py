@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import threading
+import urllib.parse
 import unittest
 import urllib.parse
 import uuid
@@ -405,6 +406,11 @@ class TestWebmastersClients(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("url", d)
         self.assertIn("keto", d["url"])
+        call_url = self.wm.calls[-1][1]
+        self.assertIn("/indexing/", call_url)
+        target = webmasters.site_url() + "/n/keto"
+        self.assertIn(urllib.parse.quote(target, safe=""), call_url)
+        self.assertNotIn("://", call_url.split("/indexing/")[1])
 
     def test_yandex_submit_sitemap(self):
         self.wm.store["seoeng.yandex.token"] = json.dumps(YANDEX_TOK)

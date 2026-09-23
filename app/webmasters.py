@@ -909,7 +909,7 @@ def yandex_submit_url(page=None):
     target = site_url().rstrip("/") + (("/" + page.lstrip("/")) if page else "")
     status, data = _req(
         "POST", YANDEX_API + "/user/%s/hosts/%s/indexing/%s"
-        % (uid, hid, urllib.parse.quote(target, safe=":/-")),
+        % (uid, hid, urllib.parse.quote(target, safe="")),
         {"Authorization": "OAuth " + bearer,
          "Content-Type": "application/json"}, {})
     if status in (200, 201):
