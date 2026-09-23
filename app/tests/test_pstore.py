@@ -834,6 +834,28 @@ class TestRoutes(unittest.TestCase):
             [u for u in urls if "/back-pain" in u].count(
                 "https://pstore.example/n/back-pain"), 1)
 
+    def test_trailing_slash_redirects_to_canonical(self):
+        # /n/keto/ must 301 to /n/keto — never serve a crawlable duplicate of
+        # the same content (Google merges; Bing flags duplicates). Disable
+        # urlopen's automatic redirect-follow so the 301 itself is observable.
+        import urllib.error
+        no_redirect = urllib.request.build_opener(
+            urllib.request.HTTPRedirectHandler)
+        for handler in list(no_redirect.handlers):
+            if isinstance(handler, urllib.request.HTTPRedirectHandler):
+                handler.redirect_request = lambda *a, **k: None
+        req = urllib.request.Request("http://127.0.0.1:%d/n/keto/" % self.PORT)
+        try:
+            resp = no_redirect.open(req, timeout=30)
+            status, loc = resp.status, resp.headers.get("Location")
+            resp.read()
+        except urllib.error.HTTPError as e:
+            status, loc = e.code, e.headers.get("Location")
+        self.assertEqual(status, 301)
+        self.assertEqual(loc, "/n/keto")
+        st, _, _ = self._get("/")
+        self.assertEqual(st, 200)
+
     # ------------------------------------------------ live header-tag checker
 
     def test_head_emits_social_and_search_engine_tags(self):

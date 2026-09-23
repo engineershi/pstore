@@ -5391,6 +5391,19 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path
         q = urllib.parse.parse_qs(parsed.query)
+        # Canonical-URL hygiene: every page lives at its slash-less URL. A
+        # trailing-slash copy (/n/keto/) is 301'd to the canonical form so
+        # crawlers never bisect indexation between two URLs of the same page
+        # (Google) and Bing cleanly merges signals. "/" stays put.
+        if len(path) > 1 and path.endswith("/"):
+            clean = path.rstrip("/")
+            if parsed.query:
+                clean += "?" + parsed.query
+            self.send_response(301)
+            self.send_header("Location", clean)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return None
         try:
             # public auth flow — login/logout/register/verify/reset never need a session
             if path == "/admin/login":

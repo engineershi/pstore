@@ -607,15 +607,21 @@ class TestSemSeoSite(unittest.TestCase):
     def test_sitemap_and_robots_tolerate_slash_and_case(self):
         kw = self._pick_niche()
         slug = seo._slugify(kw)
-        for path in ("/sitemap.xml/", "/Sitemap.xml", "/SITEMAP.XML/",
-                     "/robots.txt/", "/Robots.TXT"):
-            st, _, ct, body = self._raw("GET", path)
-            self.assertEqual(st, 200, "%s -> %s %s" % (path, st, ct))
+        # Canonical-URL hygiene: a trailing-slash copy is 301'd to the exact
+        # canonical URL (never two crawlable URLs for one resource).
+        for path, target in (("/sitemap.xml/", "/sitemap.xml"),
+                             ("/robots.txt/", "/robots.txt"),
+                             ("/SITEMAP.XML/", "/SITEMAP.XML"),
+                             ("/n/%s/" % slug, "/n/%s" % slug)):
+            st, loc, ct, _ = self._raw("GET", path)
+            self.assertEqual(st, 301, "%s -> %s" % (path, st))
+            self.assertEqual(loc, target)
+        # Case variants still normalize to the same resource with 200.
+        for path in ("/Sitemap.xml", "/Robots.TXT"):
+            st, _, ct, _ = self._raw("GET", path)
+            self.assertEqual(st, 200, "%s -> %s" % (path, st))
             self.assertIn("text/plain" if "robots" in path.lower()
                           else "application/xml", ct)
-        # page URLs keep their own semantics; only robots/sitemap normalize
-        st, _, _, _ = self._raw("GET", "/n/%s/" % slug)
-        self.assertEqual(st, 200)
 
     def test_head_requests_supported_on_seo_routes(self):
         kw = self._pick_niche()
