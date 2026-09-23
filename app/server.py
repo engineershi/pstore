@@ -11035,7 +11035,7 @@ document.addEventListener("click", (e)=>{{
 
 # ------------------------------------------------------------------ social engines
     def _socialengines_status(self):
-        """Per-platform engine status: platform key, natively-posted counts and
+        """Per-platform engine status: platform key, published-post counts and
         whether its posting credentials are present (env or the /admin/apikeys
         settings). Mirrors webmasters.engines_status for the social side."""
         kv = _publish_key_getter()
@@ -11068,7 +11068,7 @@ document.addEventListener("click", (e)=>{{
                 "chat": bool(_env_key("telegram", "chat")
                              or _get_setting("social.key.telegram.chat", "")),
                 "account": self._socialengines_account(ns),
-                "native_posts": int(posted.get(platform, 0)),
+                "published": int(posted.get(platform, 0)),
             })
         return out
 
@@ -11238,7 +11238,7 @@ document.addEventListener("click", (e)=>{{
          <div class="row">
           <div class="feature"><h3 id="st-%s">…</h3><p class="hint">state</p></div>
           <div class="feature"><h3 id="acct-%s">—</h3><p class="hint">connected as</p></div>
-          <div class="feature"><h3 id="posts-%s">0</h3><p class="hint">native posts</p></div>
+          <div class="feature"><h3 id="posts-%s">0</h3><p class="hint">published</p></div>
          </div>
          <div class="row" style="margin-top:8px;flex-wrap:wrap;gap:8px">
           <button class="warm" onclick="act('test','%s')">Test connection</button>
@@ -11279,7 +11279,7 @@ pre.preview{white-space:pre-wrap;word-break:break-word;background:#f8fafc;border
 </head><body>
 <header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
 <div class="hero"><h1>Social <span>engines.</span></h1>
-<p class="tagline">Paste a platform token, prove who it belongs to with a real identity read, and publish one tracked test post straight from the console — or rely on the <b>webhook router</b> for the platforms you handle outside. Native posts are counted per engine.</p></div>
+<p class="tagline">Paste a platform token, prove who it belongs to with a real identity read, and publish one tracked test post straight from the console — or rely on the <b>webhook router</b> for the platforms you handle outside. Published posts are counted per engine.</p></div>
 {nav}
 </header>
 <main class="stengx">
@@ -11290,7 +11290,7 @@ pre.preview{white-space:pre-wrap;word-break:break-word;background:#f8fafc;border
   <p class="hint">Any platform without native credentials still routes through your <b>SOCIAL_WEBHOOK</b> router (n8n / Zapier / Make) when you publish from <a href="/admin/social">📣 Social</a>. This board is the native, first-class path.</p>
  </section>
 </main>
-<footer><p>Native posts are counted from the same social_posts table that powers /admin/social and the analytics boards. Test connection posts nothing — it only reads the account identity that the saved token controls.</p></footer>
+<footer><p>Published-post counts come from the same social_posts table that powers /admin/social and the analytics boards (they include webhook-delivered and native rows — delivery split shows in the 'via' returned by each publish). Test connection posts nothing — it only reads the account identity that the saved token controls.</p></footer>
 {totop}
 <script>
 const $=id=>document.getElementById(id);
@@ -11311,7 +11311,7 @@ function saveKey(e){const kv={action:"save",engine:e,token:($("sc-"+e)||{}).valu
  const o=$("out-"+e);if(o){o.style.display="block";o.textContent="working…";}
  fetch("/api/socialengines",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(kv)}).then(r=>r.json().catch(()=>({ok:false}))).then(d=>{if(o)o.textContent=d.ok?("saved ✓"+(d.note?" · "+d.note:"")):("save failed: "+(d.error||""));load();}).catch(err=>{if(o)o.textContent="request failed: "+err.message;});}
 function load(){fetch("/api/socialengines").then(r=>r.json()).then(d=>{
-  for(const e of d.engines){$("st-"+e.engine).innerHTML=badge(e.ready);$("acct-"+e.engine).textContent=e.account||"—";$("posts-"+e.engine).textContent=e.native_posts||0;}
+  for(const e of d.engines){$("st-"+e.engine).innerHTML=badge(e.ready);$("acct-"+e.engine).textContent=e.account||"—";$("posts-"+e.engine).textContent=e.published||0;}
  }).catch(e=>{});}
 document.addEventListener("DOMContentLoaded",load);
 </script>

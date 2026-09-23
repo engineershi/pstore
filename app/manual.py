@@ -288,7 +288,7 @@ def _chapters():
             "which account those credentials control, and 'Publish test post' to "
             "push one tracked post for a keyword (blank = newest niche) natively, "
             "in one click. The card shows the connected-as handle and the total "
-            "native posts that platform has driven. Platforms without tokens still "
+            "published posts that platform has driven. Platforms without tokens still "
             "route through your SOCIAL_WEBHOOK router from /admin/social; this "
             "board is the native, first-class path that works with no n8n/Zapier "
             "in the middle.")
