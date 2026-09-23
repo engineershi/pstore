@@ -7804,7 +7804,8 @@ document.addEventListener("click", function (e) {{
                 if not key:
                     return self._send(200, {"ok": False, "error": "bing key not set"})
                 s, d = webmasters.bing_submit_sitemap(key, webmasters.site_url())
-                ok, msg = s in (200, 201), (str(d)[:150])
+                ok, msg = s in (200, 201), "submitted" if s in (200, 201) \
+                    else (str(d)[:150])
             return self._send(200, {"ok": ok, "error" if not ok else "message": msg} if not ok
                               else {"ok": ok, "message": msg})
         if action == "bingkey":
