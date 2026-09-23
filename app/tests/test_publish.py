@@ -222,9 +222,49 @@ class TestNativeScaffold(Base):
         self.assertIn("Hello world", payload["caption"])
 
     def test_unknown_platform_skipped(self):
+        res = publish.post_to("TikTok", self._kit("TikTok"), self._keys())
+        self.assertEqual(res["via"], "skipped")
+        self.assertFalse(res["ok"])
+
+    def test_threads_no_token_skipped(self):
         res = publish.post_to("Threads", self._kit("Threads"), self._keys())
         self.assertEqual(res["via"], "skipped")
         self.assertFalse(res["ok"])
+
+    def test_threads_posts_text_through_me_path(self):
+        calls = []
+        def fake(url, payload_, headers, timeout=15):
+            calls.append((url, payload_))
+            if url.endswith("/me/threads"):
+                return 200, {"id": "container-1"}
+            return 200, {"id": "pub-99"}
+        publish._post = fake
+        res = publish.post_to("Threads", self._kit("Threads"),
+                              self._keys({("threads", "token"): "THREADS"}))
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["via"], "native")
+        self.assertIn("posted id=pub-99", res["message"])
+        self.assertEqual(len(calls), 2)
+        self.assertIn("graph.threads.net/v1.0/me/threads", calls[0][0])
+        self.assertIn("graph.threads.net/v1.0/me/threads_publish", calls[1][0])
+        self.assertEqual(calls[0][1]["media_type"], "TEXT")
+        self.assertEqual(calls[0][1]["access_token"], "THREADS")
+        self.assertEqual(calls[1][1]["creation_id"], "container-1")
+
+    def test_threads_image_post_uses_png(self):
+        kit = self._kit("Threads")
+        kit["image_png"] = "https://example.com/og.png"
+        calls = []
+        def fake(url, payload_, headers, timeout=15):
+            calls.append((url, payload_))
+            return 200, {"id": "c2"}
+        publish._post = fake
+        res = publish.post_to("Threads", kit,
+                              self._keys({("threads", "token"): "THREADS"}))
+        self.assertTrue(res["ok"])
+        self.assertEqual(calls[0][0].endswith("/me/threads"), True)
+        self.assertEqual(calls[0][1]["media_type"], "IMAGE")
+        self.assertEqual(calls[0][1]["image_url"], "https://example.com/og.png")
 
     def test_publish_batch_never_raises_mixed(self):
         self._ok()
@@ -662,8 +702,20 @@ class TestConnection(Base):
         self.assertEqual(r["account"], "channel:yt-1")
         self.assertEqual(r["name"], "Acme Channel")
 
-    def test_unknown_platform(self):
+    def test_threads_identity_read(self):
+        r = self._ident("Threads", {"id": "threads-1", "username": "acme"},
+                        {("threads", "token"): "THT"})
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["account"], "@acme")
+        self.assertEqual(r["name"], "threads id threads-1")
+
+    def test_threads_missing_token(self):
         r = publish.test_connection("Threads", self._keys())
+        self.assertFalse(r["ok"])
+        self.assertIn("Threads access token", r["message"])
+
+    def test_unknown_platform(self):
+        r = publish.test_connection("TikTok", self._keys())
         self.assertFalse(r["ok"])
 
     def test_bad_identity_is_not_ok(self):

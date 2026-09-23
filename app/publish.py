@@ -24,6 +24,9 @@ Supported native backends today (each posts ``{body, link}``):
   * LinkedIn        — UGC post with an organization access token
   * Instagram       — Graph API photo publish (image_url + caption) with a
                       Business account token + ``social.key.instagram.ig_user_id``
+  * Threads         — Threads Graph API post (text or image) with a Threads user
+                      access token + ``social.key.threads`` (uses the ``me``
+                      path, so no per-account id is required)
   * YouTube         — renders the kit as a 9:16 Shorts MP4 with ffmpeg when
                       present (4 spliced scenes: hook → picks → proof → CTA)
                       and uploads via Data API v3 ``videos.insert`` (multipart)
@@ -185,6 +188,11 @@ def _li_cred(kv):
             or kv("linkedin", "user_token"),)
 
 
+def _threads_cred(kv):
+    return (kv("threads", "token") or kv("threads", "access_token")
+            or kv("threads", "user_token"),)
+
+
 # ------------------------------------------------------------------ post app
 
 def _body_for(platform, kit):
@@ -210,7 +218,7 @@ def post_to(platform, kit, key_getter):
         "Twitter / X": _post_twitter, "Pinterest": _post_pinterest,
         "Facebook": _post_facebook, "LinkedIn": _post_linkedin,
         "Telegram": _post_telegram, "Instagram": _post_instagram,
-        "YouTube": _post_youtube,
+        "YouTube": _post_youtube, "Threads": _post_threads,
     }.get(platform)
     if profile is None:
         return {"ok": False, "platform": platform, "via": "skipped",
@@ -276,6 +284,40 @@ def _post_instagram(b, kv):
                        {"creation_id": cid, "access_token": token}, {})
     pid = (pdata or {}).get("id") if isinstance(pdata, dict) else None
     return {"ok": 200 <= pst < 300, "platform": "Instagram", "via": "native",
+            "message": ("posted id=" + str(pid)) if pid
+            else json.dumps(pdata or pst)[:300]}
+
+
+def _post_threads(b, kv):
+    """Threads Graph API publish. Creates a media container from the kit's
+    share-card PNG URL (or body text for a text-only post), then publishes it.
+    Needs ``social.key.threads`` (a Threads user access token with
+    threads_basic + threads_content_publish scopes). Uses the ``me`` path, so
+    no per-account id is required."""
+    token = _threads_cred(kv)[0] or ""
+    if not token:
+        return {"ok": False, "platform": "Threads", "via": "skipped",
+                "message": "No Threads access token configured."}
+    text = (b["body"] or "")[:500]
+    if b["link"] and b["link"] not in text:
+        text = (text + "\n\n" + b["link"])[:500]
+    image = b["image_png"] or b["pin_image"] or b["image"]
+    payload = {"text": text, "access_token": token}
+    if image:
+        payload["media_type"] = "IMAGE"
+        payload["image_url"] = image
+    else:
+        payload["media_type"] = "TEXT"
+    st, data = _post("%s/me/threads" % _THREADS_GRAPH, payload, {})
+    cid = (data or {}).get("id") if isinstance(data, dict) else None
+    if not cid:
+        return {"ok": False, "platform": "Threads", "via": "native",
+                "message": "Threads container failed: %s"
+                           % json.dumps(data or st)[:300]}
+    pst, pdata = _post("%s/me/threads_publish" % _THREADS_GRAPH,
+                       {"creation_id": cid, "access_token": token}, {})
+    pid = (pdata or {}).get("id") if isinstance(pdata, dict) else None
+    return {"ok": 200 <= pst < 300, "platform": "Threads", "via": "native",
             "message": ("posted id=" + str(pid)) if pid
             else json.dumps(pdata or pst)[:300]}
 
@@ -590,6 +632,17 @@ def _ig_account(token, uid):
     return _get(url, {"User-Agent": "pstore/1.0"}, timeout=10)
 
 
+_THREADS_GRAPH = "https://graph.threads.net/v1.0"
+
+
+def _threads_me(token):
+    """Threads `/me` read (the exact token the native post uses). Returns
+    (status, json); never raises."""
+    url = ("%s/me?fields=id,username&access_token=%s"
+           % (_THREADS_GRAPH, urllib.parse.quote(token or "", safe="")))
+    return _get(url, {"User-Agent": "pstore/1.0"}, timeout=10)
+
+
 def _li_me(token):
     """LinkedIn OpenID userinfo read (the same token the UGC post signs with).
     Returns (status, json); never raises."""
@@ -731,6 +784,19 @@ def test_connection(platform, kv):
                 "account": "@" + str(data.get("username") or ""),
                 "name": "IG business id " + str(uid),
                 "message": "Instagram identity verified"}
+    if p == "Threads":
+        tok = _threads_cred(kv)[0] or ""
+        if not tok:
+            return {"ok": False, "platform": p, "account": "", "name": "",
+                    "message": "No Threads access token configured."}
+        st, data = _threads_me(tok)
+        if st != 200 or not isinstance(data, dict) or not data.get("username"):
+            return {"ok": False, "platform": p, "account": "", "name": "",
+                    "message": _api_error(st, data)}
+        return {"ok": True, "platform": p,
+                "account": "@" + str(data.get("username") or ""),
+                "name": "threads id " + str(data.get("id") or ""),
+                "message": "Threads identity verified"}
     if p == "Telegram":
         tok = (kv("telegram", "token") or "").strip()
         if "|" in tok:

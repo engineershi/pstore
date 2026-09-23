@@ -11057,7 +11057,7 @@ document.addEventListener("click", (e)=>{{
         out = []
         shown = [p for p in social.PLATFORMS if social._key(p) in
                  ("twitter", "pinterest", "facebook", "linkedin", "instagram",
-                  "telegram", "youtube")]
+                  "telegram", "youtube", "threads")]
         for platform in shown:
             ns = social._key(platform)
             out.append({
@@ -11104,7 +11104,7 @@ document.addEventListener("click", (e)=>{{
         settings keys /admin/apikeys writes). Returns ok + a hint."""
         ns = (body.get("engine") or "").strip().lower()
         known = ("twitter", "pinterest", "facebook", "linkedin", "instagram",
-                 "telegram", "youtube")
+                 "telegram", "youtube", "threads")
         if ns not in known:
             return {"ok": False, "error": "unknown engine %r" % ns}
         token = (body.get("token") or "").strip()
@@ -11204,6 +11204,10 @@ document.addEventListener("click", (e)=>{{
             "youtube": ("Uploads a 9:16 Shorts video (rendered locally, ~6s) "
                         "via the Data API. Needs a youtube.upload OAuth access "
                         "token; ffmpeg is used when available."),
+            "threads": ("Threads posts (text or image) via the Graph API. "
+                        "Needs a Threads user access token with "
+                        "threads_basic + threads_content_publish scopes; the "
+                        "``me`` path is used, so no account id is required."),
         }
         extra = {
             "twitter": ('<div class="row" style="flex-wrap:wrap;gap:8px;align-items:center">'
