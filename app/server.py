@@ -6727,6 +6727,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 "SELECT keyword, created_at, updated_at, products FROM niches").fetchall()
             conn.close()
         live = set()
+        seen = set()
         for r in nrows:
             # Only indexable niches belong in the sitemap — a niche without
             # products renders noindex and must never be listed.
@@ -6737,6 +6738,11 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 kw = seo._slugify(r["keyword"])
             except Exception:
                 kw = "niche"
+            # Two keyword rows may slugify to the same path (e.g. "back pain"
+            # vs "back-pain"); list each URL once — Google flags duplicates.
+            if kw in seen:
+                continue
+            seen.add(kw)
             lm = (r["updated_at"] or r["created_at"] or "")[:10] or "2026-08-28"
             entries.append((f"/n/{kw}", lm))
             entries.append((f"/lp/{kw}", lm))

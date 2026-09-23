@@ -1078,8 +1078,13 @@ def indexable_urls(saved_niches, base_url=None, saved_topics=None):
     urls = [base + "/", base + "/blog", base + "/stories"]
     for page in STATIC_PAGES:
         urls.append(base + "/" + page)
+    seen = set()
     for n in (saved_niches or []):
-        urls.append(base + "/n/" + _slugify(n["keyword"]))
+        main = base + "/n/" + _slugify(n["keyword"])
+        if main in seen:
+            continue  # "back pain" vs "back-pain" slugify identically
+        seen.add(main)
+        urls.append(main)
         urls.append(base + "/lp/" + _slugify(n["keyword"]))
         urls.append(base + "/stories/" + _slugify(n["keyword"]))
     for p_slug, t_slug in (saved_topics or []):

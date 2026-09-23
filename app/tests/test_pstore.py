@@ -816,6 +816,24 @@ class TestRoutes(unittest.TestCase):
         for page in seo.STATIC_PAGES:
             self.assertIn(("/%s</loc>" % page).encode(), body)
 
+    def test_sitemap_has_no_duplicate_urls(self):
+        st, _, body = self._get("/sitemap.xml")
+        self.assertEqual(st, 200)
+        locs = [line.strip() for line in body.decode("utf-8", "replace").splitlines()
+                if line.strip().startswith("<loc>")]
+        self.assertEqual(len(locs), len(set(locs)),
+                         "duplicate URLs in sitemap (back pain vs back-pain): %s"
+                         % [l for l in locs if locs.count(l) > 1][:3])
+
+    def test_sitemap_dedupes_colliding_slugs(self):
+        # "back pain" and "back-pain" slugify identically — only the first may
+        # appear; Google flags duplicated URLs in the coverage report.
+        niches = [{"keyword": "back pain"}, {"keyword": "back-pain"}]
+        urls = seo.indexable_urls(niches, "https://pstore.example")
+        self.assertEqual(
+            [u for u in urls if "/back-pain" in u].count(
+                "https://pstore.example/n/back-pain"), 1)
+
     # ------------------------------------------------ live header-tag checker
 
     def test_head_emits_social_and_search_engine_tags(self):
