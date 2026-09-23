@@ -705,7 +705,8 @@ def yandex_auth_url(state):
             "&scope=%s&state=%s"
             % (YANDEX_OAUTH, urllib.parse.quote(cid, safe=""),
                urllib.parse.quote(YANDEX_VERIFY_REDIRECT, safe=""),
-               urllib.parse.quote("webmaster:host:all", safe=""),
+               urllib.parse.quote("webmaster:hostinfo webmaster:verify",
+                                  safe=""),
                urllib.parse.quote(state, safe="")))
 
 

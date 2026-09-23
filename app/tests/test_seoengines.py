@@ -463,7 +463,7 @@ class TestWebmastersClients(unittest.TestCase):
         url = webmasters.yandex_auth_url("y-st")
         self.assertIn("oauth.yandex.ru/authorize", url)
         self.assertIn("client_id=yid-test", url)
-        self.assertIn("webmaster%3Ahost%3Aall", url)
+        self.assertIn("webmaster%3Ahostinfo%20webmaster%3Averify", url)
         self.assertIn("redirect_uri=https%3A%2F%2Foauth.yandex.ru"
                       "%2Fverification_code", url)
         self.assertNotIn("cb%2Fyandex", url)
