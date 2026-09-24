@@ -510,6 +510,20 @@ class TestSEO(unittest.TestCase):
         self.assertEqual(errs, [])
         self.assertTrue(any("no offers emitted" in w for w in warns))
 
+    def test_audit_counts_products_nested_in_itemlist(self):
+        # Story reels nest every Product under ItemList.itemListElement[].item.
+        # The audit must count and validate those nested products or a story
+        # full of marked products reports "0 schema nodes" on the dashboard.
+        niche = {"keyword": "rocking chair", "products": [
+            {"asin": "B1", "title": "Chair A", "price": 99.0,
+             "stars": 4.5, "reviews": 1234, "url": "https://a/dp/B1"},
+            {"asin": "B2", "title": "Chair B", "price": 149.0,
+             "stars": 4.1, "reviews": 88, "url": "https://a/dp/B2"}]}
+        ld = seo.audit_niche(niche)["ldjson"]
+        story = next(p for p in ld["pages"] if p["kind"] == "story")
+        self.assertEqual(story["nodes"], 2)
+        self.assertEqual(story["types"].get("Product"), 2)
+
     def test_audit_jsonld_covers_all_emitted_types(self):
         # The /admin/seo Schema column validates every schema.org type the
         # site ships — not just Product — against Google's required fields, so

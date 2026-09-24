@@ -1390,6 +1390,16 @@ def audit_jsonld(niche):
 
     def check_page(kind, url, nodes):
         nonlocal invalid
+        nodes = list(nodes)
+        for node in (n for n in nodes if isinstance(n, dict)):
+            if node.get("@type") == "ItemList":
+                # Products inside an ItemList live at
+                # itemListElement[].item — count and validate them too or a
+                # story reel full of marked products reports 0 nodes.
+                for entry in node.get("itemListElement") or []:
+                    item = (entry or {}).get("item")
+                    if isinstance(item, dict):
+                        nodes.append(item)
         prod_nodes = [n for n in nodes
                       if isinstance(n, dict) and n.get("@type") == "Product"]
         types = {}
