@@ -285,8 +285,12 @@ def _parse_search_page(html, top=8):
         except ValueError:
             total = 0
     seen = set()
-    # Match result cards by their link/data attributes.
-    urls = re.findall(r'href="(/[^"]*dp/[A-Z0-9]{10}[^"]*)"', html)
+    # Match result cards by their link/data attributes. `cs_sr_dp_loc` links
+    # are the color/size variant switchers nested INSIDE a card — each is the
+    # same physical product, so treat them like the other variant links and
+    # skip them (a real card is linked via refresh/ref=sr_ or the first /dp/).
+    urls = [u for u in re.findall(r'href="(/[^"]*dp/[A-Z0-9]{10}[^"]*)"', html)
+            if "cs_sr_dp_loc" not in u]
     if not urls:
         urls = re.findall(r'href="(/[^"]*?/dp/[A-Z0-9]{10})[^"]*"', html)
     for u in urls:
@@ -322,7 +326,10 @@ def _card_window(html, asin):
     around the `/dp/<ASIN>` link for classic/simple layouts."""
     i = html.find('role="listitem" data-asin="' + asin + '"')
     if i != -1:
-        j = html.find('role="listitem"', i + 1)
+        # The card ends at the NEXT product card, not at any inner nested
+        # `role="listitem"` (Amazon nests these inside the price block); an
+        # inner cutoff truncates the window before price/rating/reviews.
+        j = html.find('role="listitem" data-asin="', i + 1)
         return html[i:j if j != -1 else i + 30000]
     i = html.find('data-asin="' + asin + '"')
     if i != -1:

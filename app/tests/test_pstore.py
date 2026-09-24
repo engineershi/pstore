@@ -598,6 +598,34 @@ class TestRealisticParsing(unittest.TestCase):
         self.assertEqual(it["reviews"], 1597)
         self.assertNotIn("Overall Pick", it["title"])
 
+    def test_card_window_skips_nested_role_listitem(self):
+        # Current Amazon search layout nests an inner `role="listitem"` inside
+        # the price block of the card. The card window must end at the NEXT
+        # product card — not at the inner element — or price/rating/reviews
+        # (which live after it) are truncated away and every item comes back
+        # with None price/stars/reviews.
+        html = '\n'.join((
+            '<div role="listitem" data-asin="B0NESTED01" data-component-type="s-search-result">',
+            '  <a href="/Hamper-A/dp/B0NESTED01"><h2>Hammock Nest A</h2></a>',
+            '  <div class="puis-price-container">',
+            '    <div role="listitem"><a aria-current="true" href="/x/y/dp/B0NESTED01">',  # inner, nested, no data-asin
+            '      <span class="a-price"><span class="a-offscreen">$42.10</span></span>',
+            '    </div>',
+            '    <a aria-label="2,301 ratings" href="/x"></a>',
+            '    <i alt="4.3 out of 5 stars"></i>',
+            '  </div>',
+            '</div>',
+            '<div role="listitem" data-asin="B0NESTED02" data-component-type="s-search-result">',
+            '  <a href="/Hamper-B/dp/B0NESTED02"><h2>Hammock Nest B</h2></a>',
+            '</div>',
+        ))
+        items, _ = amazon._parse_search_page(html, top=8)
+        self.assertEqual([i["asin"] for i in items], ["B0NESTED01", "B0NESTED02"])
+        self.assertEqual(items[0]["price"], 42.10)
+        self.assertEqual(items[0]["stars"], 4.3)
+        self.assertEqual(items[0]["reviews"], 2301)
+        self.assertEqual(items[0]["title"], "Hammock Nest A")
+
     def test_no_html_noise_in_titles(self):
         items, _ = amazon._parse_search_page(REAL_CARD_HTML, top=8)
         self.assertEqual(items[1]["title"], "Keto Gammon Pack 2kg")
