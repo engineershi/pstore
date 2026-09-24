@@ -172,10 +172,37 @@ def _org_jsonld():
 
 
 def _website_jsonld():
+    """WebSite node with a Sitelinks SearchBox action — the same rich-result
+    ProductFind and other top engines ship on every page."""
     return {
-        "@context": "https://schema.org", "@type": "WebSite",
-        "name": SITE_NAME, "url": ORG_URL,
+        "@type": "WebSite", "name": SITE_NAME, "url": ORG_URL,
+        "potentialAction": {
+            "@type": "SearchAction",
+            "target": {"@type": "EntryPoint",
+                       "urlTemplate": ORG_URL + "/?s={search_term_string}"},
+            "query-input": "required name=search_term_string",
+        },
     }
+
+
+def _guide_title(keyword):
+    """SERP-safe <title> body: the stored keyword usually already reads
+    'best X', so don't double up ('Best best hammock'). The full <title> is
+    '<body> | pstore' (see _head) — keep that whole string <= 60 chars so
+    Google doesn't truncate it mid-word."""
+    kw = (keyword or "").strip()
+    # "best best hammock" (mined long-tail doubling 'best') -> "best hammock"
+    while re.match(r"^best\s+best\b", kw, flags=re.I):
+        kw = re.sub(r"^best\s+", "", kw, flags=re.I)
+    suffix = " | %s" % SITE_NAME
+    budget = 60 - len(suffix)
+    has_best = re.match(r"^best\b", kw, flags=re.I)
+    title = ("%s — ranked picks" % kw) if has_best else ("Best %s — ranked picks" % kw)
+    if len(title) > budget:
+        title = kw if has_best else ("Best %s" % kw)
+    if len(title) > budget:
+        title = title[: budget - 3].rstrip() + "..."
+    return title
 
 
 def _clean(s):
@@ -664,7 +691,7 @@ def render_landing(saved_niches):
     """Storefront-style home: value prop, how-we-pick, niche index, FAQ."""
     jsonld = {
         "@context": "https://schema.org", "@graph": [
-            {"@type": "WebSite", "name": SITE_NAME, "url": BASE_URL},
+            _website_jsonld(),
             {"@type": "Organization", "name": SITE_NAME, "url": BASE_URL},
         ],
     }
@@ -776,10 +803,14 @@ def render_niche(keyword, niche, saved_niches=None, ab_headline=None, ab_variant
     methodology + trust, FAQ, related niches."""
     items = niche.get("products") or []
     canonical = "/n/" + _slugify(keyword)
-    title = "Best %s to Buy — Ranked Picks From Live Amazon Data" % keyword
-    desc = (f"See the best {keyword}, ranked. We score live Amazon listings on "
-            f"rating, review volume and price, then show you which to buy and "
-            f"why — with honest pros and cons for each.")
+    title = _guide_title(keyword)
+    desc = ("Ranked %s picks scored on live Amazon price, rating and review "
+            "volume — with honest pros, cons and a clear verdict on which to "
+            "buy." % keyword)
+    if len(desc) > 160:
+        desc = _guide_title(keyword) + " — scored on live Amazon price, rating and reviews."
+        if len(desc) > 160:
+            desc = desc[:157].rstrip() + "..."
     best = editorial.best_pick(items)
     ranked = "".join(
         editorial.pick_html(keyword, it, idx, items)
@@ -791,6 +822,7 @@ def render_niche(keyword, niche, saved_niches=None, ab_headline=None, ab_variant
     if best:
         graph.append(editorial.faq_jsonld(keyword, best))
         graph.append(editorial.breadcrumb_jsonld(keyword))
+    graph.append(_website_jsonld())
     graph.append(_org_jsonld())
     jsonld = {"@context": "https://schema.org", "@graph": graph}
     og = BASE_URL + "/og/" + _slugify(keyword) + ".png"
@@ -874,10 +906,14 @@ def render_topic(term, parent_keyword, niche, parent_slug, style_pack=None):
     items = niche.get("products") or []
     term_slug = _slugify(term)
     canonical = "/n/%s/%s" % (_slugify(parent_keyword), term_slug)
-    title = "Best %s — Ranked From Live Amazon Data" % (term or parent_keyword)
-    desc = (f"Looking for the best {term}? The same live Amazon scoring — rating, "
-            f"review volume, price — that ranks the parent {parent_keyword} guide "
-            f"now points you straight at the top products for this {term} list.")
+    title = _guide_title(term or parent_keyword)
+    desc = (f"Ranked {term or parent_keyword} picks scored on live Amazon price, "
+            f"rating and review volume — with honest pros, cons and a clear "
+            f"verdict on which to buy.")
+    if len(desc) > 160:
+        desc = _guide_title(term or parent_keyword) + " — scored on live Amazon price, rating and reviews."
+        if len(desc) > 160:
+            desc = desc[:157].rstrip() + "..."
     graph = []
     il = editorial.item_list_jsonld(items, term or parent_keyword)
     if il:
@@ -888,6 +924,7 @@ def render_topic(term, parent_keyword, niche, parent_slug, style_pack=None):
         graph.append(editorial.faq_jsonld(term or parent_keyword, best))
         graph.append(editorial.breadcrumb_jsonld(term or parent_keyword,
                                                  parent_keyword))
+    graph.append(_website_jsonld())
     graph.append(_org_jsonld())
     jsonld = {"@context": "https://schema.org", "@graph": graph}
     og = BASE_URL + "/og/" + (term_slug or _slugify(parent_keyword)) + ".png"

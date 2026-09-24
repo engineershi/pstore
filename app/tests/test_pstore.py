@@ -16,6 +16,7 @@ import editorial
 import market_engine
 import niche
 import seo
+import seobench
 import indexnow
 import security
 import server
@@ -524,6 +525,31 @@ class TestSEO(unittest.TestCase):
         self.assertEqual(story["nodes"], 2)
         self.assertEqual(story["types"].get("Product"), 2)
 
+    def test_guide_title_dedupes_best_and_stays_in_60(self):
+        # The <title> element is "<body> | pstore", so the body must stay under
+        # 60 - len(" | pstore") = 52 chars or Google truncates mid-string.
+        for kw in ("best hammock", "best string lights", "keto snacks",
+                   "rocking chair"):
+            t = seo._guide_title(kw)
+            self.assertLessEqual(len("%s | pstore" % t), 60, kw)
+            self.assertNotIn("best best", ("%s" % t).lower(), kw)
+            self.assertTrue(t.strip(), kw)
+
+    def test_niche_page_titles_deduped_and_schema_websites(self):
+        niche = {"products": [{"asin": "B0KETO1234", "title": "Keto Bar",
+                               "price": 12.99, "stars": 4.5, "reviews": 3100,
+                               "url": "https://www.amazon.com/dp/B0KETO1234?tag=yourname-20"}],
+                 "keyword": "best keto snacks", "source": "amazon"}
+        page = seo.render_niche("best keto snacks", niche).decode("utf-8")
+        title = re.search(r"<title>(.*?)</title>", page, flags=re.S)
+        self.assertTrue(title)
+        low = title.group(1).lower()
+        self.assertNotIn("best best", low)
+        # WebSite node with a Sitelinks SearchBox (gap vs the competitor).
+        self.assertIn('"@type": "WebSite"', page)
+        self.assertIn("SearchAction", page)
+        self.assertIn("search_term_string", page)
+
     def test_audit_jsonld_covers_all_emitted_types(self):
         # The /admin/seo Schema column validates every schema.org type the
         # site ships — not just Product — against Google's required fields, so
@@ -578,6 +604,108 @@ class TestSEO(unittest.TestCase):
         # must NOT be swallowed by the bare /og/ disallow rule.
         self.assertIn(b"Allow: /og/*.png", rob)
         self.assertIn(b"Disallow: /og/", rob)
+
+
+class TestSeoBench(unittest.TestCase):
+    """Head-to-head engine benchmark (app/seobench.py) with faked fetches."""
+
+    GUIDE = b"""<!DOCTYPE html><html><head>
+<meta name="robots" content="index,follow">
+<meta name="description" content="See the very best hammock available today, ranked on live Amazon price data and real customer ratings.">
+<title>Best hammock - ranked picks | pstore</title>
+<link rel="canonical" href="https://trypstore.com/n/best-hammock">
+</head><body>
+<h1>Best hammock</h1><h2>How we pick</h2><h2>Compare the shortlist</h2><h2>FAQ</h2>
+<p class="faq">long form answer text</p>
+<p>%s</p>
+<img alt="hammock pic 1" src="/img1.jpg"><img alt="hammock pic 2" src="/img2.jpg"><img alt="hammock pic 3" src="/img3.jpg">
+<a href="/n/best-hammock">other</a>
+<a href="https://www.amazon.com/dp/B0001?tag=pstore2006-20">buy</a>
+<a href="https://www.amazon.com/dp/B0002">buy</a>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[
+{"@type":"WebSite","name":"pstore","url":"https://trypstore.com","potentialAction":{"@type":"SearchAction","target":{"@type":"EntryPoint","urlTemplate":"https://trypstore.com/?s={search_term_string}"},"query-input":"required name=search_term_string"}},
+{"@type":"Organization","name":"pstore","url":"https://trypstore.com"},
+{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1}]},
+{"@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Q","acceptedAnswer":{"@type":"Answer","text":"A"}}]},
+{"@type":"ItemList","itemListElement":[{"@type":"ListItem","position":1,"item":{"@type":"Product","name":"H1","offers":{"@type":"Offer","price":59.99,"priceCurrency":"USD"},"aggregateRating":{"@type":"AggregateRating","ratingValue":4.6,"reviewCount":1200}}}]},
+{"@type":"Product","name":"H2","offers":{"@type":"Offer","price":"79.00","priceCurrency":"USD"},"aggregateRating":{"@type":"AggregateRating","ratingValue":4.3,"reviewCount":800}}
+]}</script>
+</body></html>"""
+
+    def setUp(self):
+        class _Resp:
+            def __init__(self, body):
+                self.body = body
+                self.status = 200
+                self.headers = {}
+            def read(self):
+                return self.body
+        routes = {}
+        def fake(req, timeout=None):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            return _Resp(routes[url])
+        self.routes = routes
+        self.fake = fake
+        seobench._urlopen = fake
+
+    def _serve(self, kind, site):
+        slug = "best-hammock"
+        path = {"guide": "/n/", "story": "/stories/", "landing": "/lp/"}[kind]
+        base = {"ours": "https://trypstore.com", "theirs": "https://rival.com"}[site]
+        url = base + path + slug
+        prose = ("hammock comparison " * 400).encode()
+        self.routes[url] = self.GUIDE.replace(b"<p>%s</p>", b"<p>" + prose + b"</p>")
+        return url
+
+    def test_extract_jsonld_and_depth(self):
+        blocks = seobench.extract_jsonld(self.GUIDE.decode("utf-8"))
+        nodes = seobench._graph_nodes(blocks)
+        self.assertEqual(seobench._count_type(nodes, "Product"), 2)
+        pq = seobench._product_quality(blocks)
+        self.assertEqual(pq["products"], 2)
+        self.assertEqual(pq["priced"], 2)
+        self.assertEqual(pq["rated"], 2)
+
+    def test_analyze_page(self):
+        url = self._serve("guide", "ours")
+        p = seobench.analyze_page("best hammock", url, "guide", None)
+        self.assertEqual(p["status"], 200)
+        self.assertFalse(p["noindex"])
+        self.assertEqual(p["h1"], 1)
+        self.assertGreaterEqual(p["h2"], 3)
+        self.assertGreaterEqual(p["words"], 5)
+        self.assertLessEqual(p["desc_len"], 160)
+        self.assertEqual(p["title_len"], 36)
+        self.assertEqual(p["amazon_links"], 2)
+        self.assertEqual(p["amazon_tagged"], 1)
+        self.assertEqual(p["images"], 3)
+        self.assertEqual(p["images_alt"], 3)
+        self.assertTrue(p["schema_ok"])
+        self.assertIsInstance(p["ld_types"], dict)
+
+    def test_score_site_full_marks(self):
+        url = self._serve("guide", "ours")
+        p = seobench.analyze_page("best hammock", url, "guide", None)
+        sc = seobench.score_site([p], "ours")
+        self.assertEqual(sc["schema"], 100)
+        self.assertEqual(sc["content"], 100)
+        self.assertEqual(sc["crawl"], 100)
+        self.assertEqual(sc["features"], 75)  # Offer/AggregateRating nest under Product
+        # affiliate = 40 base + 40*(1/2 tagged) + 20*(3/3 alt) = 80
+        self.assertEqual(sc["affiliate"], 80)
+
+    def test_compare_markdown(self):
+        # Do not compare same-content pages (both score 100 against each other)
+        # — assert the matrix and gap plumbing works with mismatched depths.
+        our_url = self._serve("guide", "ours")
+        their_url = self._serve("guide", "theirs")
+        ours = [seobench.analyze_page("best hammock", our_url, "guide", None)]
+        theirs = [seobench.analyze_page("best hammock", their_url, "guide", None)]
+        m = seobench.compare(ours, theirs, "pstore", "rival")
+        self.assertEqual(m["overall"]["winner"], "pstore")
+        out = seobench.render_matrix(m)
+        self.assertIn("OVERALL", out)
+        self.assertIn("Prioritized gaps", out)
 
 
 REAL_CARD_HTML = """

@@ -51,6 +51,7 @@ import paapi
 import pricedrop
 import sales_events
 import seo
+import seobench
 import security
 import segments
 import sem
@@ -396,9 +397,9 @@ FUNCTION_PATHS = {
     "social": ("/admin/social", "/admin/socialengines", "/api/social",
                "/api/socialengines"),
     "telegram": ("/admin/telegram", "/api/telegram/hook", "/api/telegram/state", "/api/telegram/config", "/api/telegram/broadcast", "/api/telegram/feed"),
-"seo": ("/admin/seo", "/admin/seoengines", "/admin/rss", "/admin/sem",
+"seo": ("/admin/seo", "/admin/seoengines", "/admin/seobench", "/admin/rss", "/admin/sem",
             "/admin/linkauthority", "/seo/snippet/", "/api/sem", "/api/seo-audit",
-            "/api/seoengines", "/api/indexnow",
+            "/api/seoengines", "/api/seobench", "/api/indexnow",
             "/api/linkauthority", "/api/topics/generate"),
     "content": ("/admin/cms", "/admin/ebooks", "/admin/refresh",
                 "/api/cms", "/api/suggest", "/api/refresh", "/api/settings",
@@ -5186,6 +5187,7 @@ for (const id of ["me-name","me-pw","me-pw2"])
 
         build_section = section("🛠 Build — content & pages", [
             ("/admin/seo", "🔍 SEO audit", "indexability + schema"),
+            ("/admin/seobench", "⚔️ Engine benchmark", "score vs a rival site"),
             ("/admin/seoengines", "🔎 Search-engine consoles", "GSC · Bing · Yandex"),
             ("/admin/linkauthority", "🔗 Link authority", "guest posts · HARO · PR"),
             ("/admin/cms", "🧩 Lead page CMS", "edit sections &amp; style"),
@@ -5613,6 +5615,10 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._sem_api(q)
             if path == "/api/seo-audit":
                 return self._seo_audit_api()
+            if path == "/api/seobench":
+                return self._seobench_api()
+            if path == "/admin/seobench":
+                return self._admin_seobench(q)
             if path == "/api/seoengines":
                 return self._seoengines_api(q)
             if path == "/api/seo/topics":
@@ -5800,6 +5806,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._linkauthority_list()
             if parsed.path == "/api/seoengines":
                 return self._seoengines_post()
+            if parsed.path == "/api/seobench":
+                return self._seobench_api()
             if parsed.path == "/api/users":
                 return self._users_api_post()
             if parsed.path == "/api/me":
@@ -12090,6 +12098,87 @@ fresh();
 
     def _seo_audit_api(self):
         return self._send(200, self._seo_audit_payload())
+
+    def _seobench_api(self):
+        """POST /api/seobench with {"our":[urls...], "theirs":[urls...]} or
+        {"keyword":"best hammock","theirs":["guide url"]} -> scored engine
+        benchmark (indexability, structured data, content, performance,
+        affiliate hygiene, SERP features) with a prioritized gap list."""
+        body = self._body() or {}
+        if not isinstance(body, dict):
+            body = {}
+        our_urls = [u for u in (body.get("our") or []) if isinstance(u, str)][: seobench._MAX]
+        their_urls = [u for u in (body.get("theirs") or []) if isinstance(u, str)]
+        keyword = str(body.get("keyword") or "").strip()
+        if not our_urls and keyword:
+            our_urls = [seo.BASE_URL + "/n/" + seo._slugify(keyword),
+                        seo.BASE_URL + "/lp/" + seo._slugify(keyword),
+                        seo.BASE_URL + "/stories/" + seo._slugify(keyword)][: seobench._MAX]
+        pairs = []
+        kinds = ("guide", "story", "landing")
+        for i, a in enumerate(our_urls):
+            b = their_urls[i] if i < len(their_urls) else None
+            pairs.append((kinds[i % len(kinds)], a, b))
+        ours, theirs = seobench.fetch_pages(pairs, "bench")
+        m = seobench.compare(
+            ours, theirs,
+            ours_label=str(body.get("our_label") or "trypstore"),
+            theirs_label=str(body.get("their_label") or "competitor"))
+        return self._send(200, m)
+
+    def _admin_seobench(self, q=None):
+        """⚔️ Head-to-head engine benchmark: score our guide / landing / story
+        pages for a keyword against the same page types on a rival affiliate
+        engine, then list the concrete gaps where their engine out-scores ours."""
+        kw = ((q or {}).get("keyword") or "").strip()
+        their = ((q or {}).get("theirs") or "").strip()
+        their_label = ((q or {}).get("their_label") or "").strip() or "competitor"
+        pre = ("<p class='hint'>Run a keyword to benchmark this site's /n/, /lp/ and "
+               "/stories/ pages against the same page types on the rival engine. "
+               "Scores: indexability, structured data, content depth, lab "
+               "performance, affiliate hygiene, SERP features.</p>")
+        result = None
+        if kw:
+            our_urls = [seo.BASE_URL + "/n/" + seo._slugify(kw),
+                        seo.BASE_URL + "/lp/" + seo._slugify(kw),
+                        seo.BASE_URL + "/stories/" + seo._slugify(kw)]
+            their_urls = [their] * 3 if their else []
+            pairs = [(k, a, (their_urls[i] if i < len(their_urls) else None))
+                     for i, (k, a) in enumerate(zip(("guide", "story", "landing"), our_urls))]
+            ours, theirs = seobench.fetch_pages(pairs, "bench")
+            result = seobench.compare(ours, theirs, "pstore", their_label)
+            pre = ("<pre style='white-space:pre-wrap;font:12px/1.5 ui-monospace,monospace'>%s</pre>"
+                   % seo._clean(seobench.render_matrix(result)))
+        niche_options = "".join(
+            "<option value='%s'>%s</option>" % (seo._clean(n["keyword"]),
+                                                seo._clean(n["keyword"]))
+            for n in self._all_niches()[:60])
+        interests = sorted({x.strip() for x in niche_options if x.strip()})
+        body = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Engine benchmark — pstore</title><link rel="stylesheet" href="/style.css">
+<meta name="robots" content="noindex,nofollow">
+<style>.card{{max-width:860px;margin:1rem auto;padding:1.25rem}} form{{display:flex;gap:8px;flex-wrap:wrap}} input{{flex:1 1 220px;min-width:0}}</style>
+</head><body>
+<header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
+<div class="hero"><h1>Engine <span>benchmark.</span></h1>
+<p class="tagline">This site's SEO engine scored head-to-head against the best programmatic-affiliate engine that ranks for the same query — and a prioritized list of gaps to close.</p></div></header>
+<main class="card">
+<h2>Benchmark a keyword</h2>
+<form method="get" action="/admin/seobench">
+<select name="keyword" required>
+<option value="">Pick a niche…</option>{interests}</select>
+<input name="theirs" placeholder="rival guide URL, e.g. https://productfind.com/best-hammocks" value="{seo._clean(their)}" size="42">
+<input name="their_label" placeholder="rival name (optional)" value="{seo._clean(their_label)}" size="18">
+<button type="submit" class="btn">Benchmark</button>
+</form>
+<br>
+{pre}
+<p class="hint" style="margin-top:6px">Runs live HTTP fetches of both sites (up to {seobench._MAX} pages/site). Pair the rival's guide / landing / story URLs to make it apples-to-apples; a lone guide URL reuses it for all three kinds.</p>
+</main>
+<footer class="plain"><p><a href="/admin/seo">← SEO audit</a> · engine signals data affiliate (ProductFind-class), not manual-editorial brand/backlink strength.</p></footer>
+</body></html>"""
+        return self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
 
     def _seo_topics_payload(self):
         """Audit rows for every long-tail topic page (/n/<parent>/<term>)."""
