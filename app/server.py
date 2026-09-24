@@ -12149,25 +12149,34 @@ fresh();
             result = seobench.compare(ours, theirs, "pstore", their_label)
             pre = ("<pre style='white-space:pre-wrap;font:12px/1.5 ui-monospace,monospace'>%s</pre>"
                    % seo._clean(seobench.render_matrix(result)))
+        niche_options = ""
+        kws = [n["keyword"] for n in self._all_niches()[:60]]
+        interests = sorted(set(kws)) if kws else []
         niche_options = "".join(
-            "<option value='%s'>%s</option>" % (seo._clean(n["keyword"]),
-                                                seo._clean(n["keyword"]))
-            for n in self._all_niches()[:60])
-        interests = sorted({x.strip() for x in niche_options if x.strip()})
+            "<option value='%s'>%s</option>" % (seo._clean(k), seo._clean(k))
+            for k in interests)
         body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Engine benchmark — pstore</title><link rel="stylesheet" href="/style.css">
 <meta name="robots" content="noindex,nofollow">
-<style>.card{{max-width:860px;margin:1rem auto;padding:1.25rem}} form{{display:flex;gap:8px;flex-wrap:wrap}} input{{flex:1 1 220px;min-width:0}}</style>
+<style>.card{{max-width:860px;margin:1rem auto;padding:1.25rem}} form{{display:flex;gap:8px;flex-wrap:wrap}} input{{flex:1 1 220px;min-width:0}} ol.steps{{padding-left:1.2rem}} ol.steps li{{margin:.5rem 0}}</style>
 </head><body>
 <header id="top"><a class="logo" href="/"><span class="mark">P</span><span>pstore</span></a>
 <div class="hero"><h1>Engine <span>benchmark.</span></h1>
 <p class="tagline">This site's SEO engine scored head-to-head against the best programmatic-affiliate engine that ranks for the same query — and a prioritized list of gaps to close.</p></div></header>
 <main class="card">
+<h2>How to run a comparison</h2>
+<ol class="steps">
+<li><b>Pick a keyword</b> from the dropdown — it should be a money keyword saved on this site (the list comes from saved niches).</li>
+<li><b>Paste the rival's guide URL</b> for that same keyword — e.g. <code>https://productfind.com/best-hammocks</code>. The tool pairs this site's /n/, /lp/ and /stories/ pages against the same page types on the rival. If you paste just one URL it is reused for all three, so the comparison stays apples-to-apples.</li>
+<li><b>Name the rival</b> (optional) so the scoreboard reads clearly instead of "competitor".</li>
+<li><b>Click Benchmark.</b> The page fetches both sites live (up to {seobench._MAX} pages/site), scores all six dimensions, and prints the matrix + prioritized gaps below.</li>
+<li><b>Read the result:</b> higher score wins each row; the <code>OVERALL</code> row is the trend line; the <b>Prioritized gaps</b> list names exactly what to fix, in impact order. Re-run after you ship a fix to confirm the gap closes.</li>
+</ol>
 <h2>Benchmark a keyword</h2>
 <form method="get" action="/admin/seobench">
 <select name="keyword" required>
-<option value="">Pick a niche…</option>{interests}</select>
+<option value="">Pick a niche…</option>{niche_options}</select>
 <input name="theirs" placeholder="rival guide URL, e.g. https://productfind.com/best-hammocks" value="{seo._clean(their)}" size="42">
 <input name="their_label" placeholder="rival name (optional)" value="{seo._clean(their_label)}" size="18">
 <button type="submit" class="btn">Benchmark</button>
@@ -12175,6 +12184,8 @@ fresh();
 <br>
 {pre}
 <p class="hint" style="margin-top:6px">Runs live HTTP fetches of both sites (up to {seobench._MAX} pages/site). Pair the rival's guide / landing / story URLs to make it apples-to-apples; a lone guide URL reuses it for all three kinds.</p>
+<h2>Monitoring &amp; automation</h2>
+<p>Automate the same comparison with <code>POST /api/seobench</code> (JSON: <code>keyword</code>, <code>theirs[]</code>, <code>our_label</code>, <code>their_label</code>) — or run the CLI <code>python3 app/seobench.py [--json] our-guide their-guide [our-lp their-lp ...]</code>. Save JSON/CSV snapshots weekly; alert if <code>overall.us</code> dips below baseline or a new high-priority gap appears. After every deploy, re-run your top money keyword to confirm titles/descs stay ≤60/≤160 and schema counts hold.</p>
 </main>
 <footer class="plain"><p><a href="/admin/seo">← SEO audit</a> · engine signals data affiliate (ProductFind-class), not manual-editorial brand/backlink strength.</p></footer>
 </body></html>"""

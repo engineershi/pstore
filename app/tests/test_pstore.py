@@ -1129,6 +1129,20 @@ class TestRoutes(unittest.TestCase):
         self.assertIn("function tagCheck", html)
         self.assertIn('id="tgp"', html)
 
+    def test_seobench_page_knowledge_dropdown(self):
+        # The benchmark guide page must list real saved keywords in the
+        # <select>, not a character soup from iterating the HTML string.
+        sto, _, body = self._get("/admin/seobench")
+        self.assertEqual(sto, 200)
+        html = body.decode("utf-8", "replace")
+        self.assertIn("How to run a comparison", html)
+        self.assertIn("Monitoring", html)
+        opts = re.findall(r"<option value='([^']*)'>", html)
+        saved = {n["keyword"] for n in server._niches_rows()}
+        self.assertTrue(opts, "keyword <select> is empty")
+        self.assertTrue(opts[0] in saved, "dropdown does not list saved keywords")
+        self.assertNotIn("['", html)  # no repr(list) leak from the f-string
+
     def test_seo_page_survives_stored_string_last_sync(self):
         # webmasters persists engine last-sync as a human datetime string
         # ("%Y-%m-%d %H:%M UTC"). The /admin/seo engines board must render it;
