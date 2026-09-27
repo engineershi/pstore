@@ -1928,6 +1928,44 @@ def _drip_board_card_html():
         seo._clean(last), seo._clean(run_state), horizon, b["daily"])
 
 
+_DRIP_STOP = frozenset((
+    "for", "with", "and", "the", "of", "to", "in", "a", "an", "best", "under",
+    "on", "at", "no", "that", "your", "you", "vs", "or", "top", "cheap",
+))
+
+
+def _drip_is_broad_head(keyword):
+    """True for a bare category word that a new domain cannot rank for.
+
+    'keto', 'yoga', 'sleep' and 'kitchen' are single generic nouns: enormous
+    demand, ferocious competition, and no chance for a site with no authority.
+    A query that names a product plus a qualifier ('best desk lamp for dorm')
+    is a different proposition entirely.
+    """
+    toks = [t for t in re.split(r"[^a-z0-9]+", (keyword or "").lower()) if t]
+    return len([t for t in toks if t not in _DRIP_STOP]) <= 1
+
+
+def _drip_demand(products):
+    """Total review volume behind a niche's products.
+
+    The best available proxy for a query with real commercial demand, and the
+    same signal the consolidation planner uses to pick a page's keeper. Parsed
+    defensively: a malformed products blob must not break the whole sweep.
+    """
+    try:
+        items = json.loads(products) if isinstance(products, str) else (products or [])
+    except Exception:
+        return 0
+    total = 0
+    for it in items or []:
+        if isinstance(it, dict):
+            rv = it.get("reviews")
+            if isinstance(rv, (int, float)) and not isinstance(rv, bool):
+                total += int(rv)
+    return total
+
+
 def _webhook_payload(kit):
     """One Make/Zapier-ready payload per kit. Everything the robot needs:
     copy + tracked link + platform + niche (slug/keyword/board) + both share
@@ -3379,11 +3417,37 @@ def _pin_drip(now=None):
                 (now - last).total_seconds() / 86400.0 < min_gap_days:
             continue
         cands.append({"slug": slug, "keyword": n["keyword"], "items": n["products"],
-                      "count": count, "clicks": clicks, "created": n.get("created_at") or ""})
-    # unpinned niches first (oldest first — they've waited longest for their
-    # first pin); then proven click-winners (clicks desc). Note: clicks are 0
-    # for unpinned niches so the tie-break stays on created.
-    cands.sort(key=lambda c: (1 if c["count"] else 0, -c["clicks"],
+                      "count": count, "clicks": clicks, "created": n.get("created_at") or "",
+                      "demand": _drip_demand(n["products"]),
+                      "broad": _drip_is_broad_head(n["keyword"])})
+    # Pick the pins most likely to earn a click, not the ones created first.
+    #
+    # The old key was (already_pinned, -clicks, created_at). Once every pinnable
+    # niche has been pinned at least once -- which is the case in production,
+    # 549 pinned against 494 pinnable -- the first term is 1 for every
+    # candidate and clicks are 0 for every candidate, so the whole ordering
+    # collapsed onto created_at. The drip degenerated into "re-pin whatever was
+    # created first", and because a new site's oldest niches are its broadest
+    # head terms, the live queue filled with "keto" and "yoga" repeats. Those
+    # are the least winnable queries on the internet for a domain with no
+    # authority, so the scarce slots (6/day) went to the pages least able to
+    # rank. A new board name is minted per keyword too, which spreads a tiny
+    # daily volume across hundreds of low-activity boards.
+    #
+    # New order: specific queries before bare head terms, then real buyer
+    # demand (review volume behind the products), and only then the original
+    # coverage tie-breaks. Specificity first is what actually matters: nobody
+    # ranks for "keto", but "best desk lamp for dorm" is winnable.
+    #
+    # Demand above clicks is the fix for the queue that ran keto/yoga and
+    # nothing else. The old key sorted on raw -clicks, and since 'keto' (3
+    # clicks) and 'yoga' (1) were the ONLY two niches in the whole corpus with
+    # any recorded click, they took every one of the 6 daily slots on every
+    # sweep; the 2-day min gap then just rotated those same two pages back in.
+    # Clicks still break ties below demand, which is where a real signal
+    # belongs, but a few clicks can no longer outrank buyer demand forever.
+    cands.sort(key=lambda c: (1 if c["broad"] else 0, -c["demand"],
+                              1 if c["count"] else 0, -c["clicks"],
                               c["created"] or ""))
     picked = cands[:daily]
     ats = _next_peak_slots(now, len(picked))

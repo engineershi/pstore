@@ -951,6 +951,160 @@ class TestSocialSuite(unittest.TestCase):
             server._set_setting("social.amplify.max_runs", "2")
             server._set_setting("social.amplify.min_age_hours", "24")
 
+    def test_drip_prefers_specific_pages_over_old_broad_head_terms(self):
+        """The drip must rank by winnability, not by creation date.
+
+        Regression: the candidate key was (already_pinned, -clicks,
+        created_at). In production every pinnable niche is already pinned and
+        every click count is 0, so both leading terms were constant and the
+        ordering collapsed onto created_at. On a young site the oldest niches
+        are the broadest head terms, so the live queue filled with "keto" and
+        "yoga" -- the least winnable queries on the internet -- while the
+        specific product pages that could actually rank went unpinned.
+        """
+        import datetime as _dt
+        import json as _json
+        saved = self._drip_settings()
+        now = _dt.datetime(2026, 9, 27, 10, 0, 0)
+        broad = "zzqqx"
+        # Demand is set above anything in the 43-niche seed so the assertion is
+        # about the ranking rule, not about seed data. The broad head term is
+        # deliberately created EARLIEST, so the old created_at ordering would
+        # pick it; the new ordering must not.
+        made = [(broad, "2020-01-01 00:00:00", 9000000),
+                ("best desk lamp for dorm", "2026-01-01 00:00:00", 8000000),
+                ("best water bottle for hiking", "2026-01-02 00:00:00", 1200)]
+        # An asin is required: post_kits() returns no kits at all without one,
+        # so the drip would schedule nothing and the test would prove nothing.
+        def _prods(revs, asin):
+            return _json.dumps([{"asin": asin, "title": "Test " + asin,
+                                 "price": 29.99, "reviews": revs}])
+        try:
+            server._set_setting("social.key.pinterest.token", "pin-token")
+            server._set_setting("social.drip.daily", "1")
+            server._set_setting("social.drip.min_gap_days", "0")
+            server._set_setting("social.drip.last", "2000-01-01")
+            with server._lock:
+                c = server._db()
+                for kw, created, revs in made:
+                    c.execute(
+                        "INSERT OR REPLACE INTO niches "
+                        "(keyword, market, products, created_at) VALUES (?,?,?,?)",
+                        (kw, "com",
+                         _prods(revs, "B0%08d" % (900000 + revs % 9000)),
+                         created))
+                c.commit()
+                c.close()
+            res = server._pin_drip(now=now)
+            self.assertTrue(res["on"])
+            self.assertEqual(res["scheduled"], 1)
+            with server._lock:
+                c = server._db()
+                row = c.execute(
+                    "SELECT keyword FROM social_posts WHERE platform='Pinterest' "
+                    "AND status='scheduled' ORDER BY id DESC LIMIT 1").fetchone()
+                c.close()
+            self.assertIsNotNone(row, "drip scheduled nothing")
+            self.assertNotEqual(
+                row["keyword"], broad,
+                "drip spent a slot on a bare head term instead of a specific page")
+            self.assertEqual(
+                row["keyword"], "best desk lamp for dorm",
+                "expected the specific high-demand page, got %r" % row["keyword"])
+
+        finally:
+            self._restore_drip_settings(saved)
+            with server._lock:
+                c = server._db()
+                try:
+                    for kw, _c, _r in made:
+                        c.execute("DELETE FROM niches WHERE keyword=?", (kw,))
+                    c.commit()
+                except Exception:
+                    pass
+                c.close()
+
+    def test_drip_does_not_let_a_few_clicks_monopolise_the_daily_slots(self):
+        """A handful of recorded clicks must not outrank real buyer demand.
+
+        In production 'keto' (3 clicks) and 'yoga' (1) were the ONLY two niches
+        in the whole corpus with any click at all. The old key sorted on raw
+        -clicks, so those two took every one of the 6 daily slots on every
+        sweep and the 2-day min gap just rotated the same pages back in.
+
+        All four pages here already have a published pin, so the old
+        "already pinned?" term ties and the clicks term is what decides.
+        """
+        import datetime as _dt
+        import json as _json
+        saved = self._drip_settings()
+        now = _dt.datetime(2026, 9, 27, 10, 0, 0)
+        # Demand is set above anything in the 43-niche seed (max ~261k reviews)
+        # so the assertion is about the ranking rule, not about seed data.
+        made = [("best water bottle for hiking", "2026-01-01 00:00:00", 900000, 0),
+                ("best desk lamp for dorm", "2026-01-02 00:00:00", 800000, 0),
+                ("hot pink mouse", "2026-01-03 00:00:00", 10, 3),
+                ("thin laptop stand", "2026-01-04 00:00:00", 10, 1)]
+
+        def _prods(revs, asin):
+            return _json.dumps([{"asin": asin, "title": "Test " + asin,
+                                 "price": 29.99, "reviews": revs}])
+        try:
+            server._set_setting("social.key.pinterest.token", "pin-token")
+            server._set_setting("social.drip.daily", "2")
+            server._set_setting("social.drip.min_gap_days", "0")
+            server._set_setting("social.drip.last", "2000-01-01")
+            with server._lock:
+                c = server._db()
+                for i, (kw, created, revs, nclick) in enumerate(made):
+                    slug = server.seo._slugify(kw)
+                    code = "code%d" % i
+                    c.execute(
+                        "INSERT OR REPLACE INTO niches "
+                        "(keyword, market, products, created_at) VALUES (?,?,?,?)",
+                        (kw, "com", _prods(revs, "B0%08d" % (700000 + i)),
+                         created))
+                    # A real pin, so the clicks below can be attributed to it.
+                    c.execute(
+                        "INSERT OR REPLACE INTO social_posts (slug, keyword, platform,"
+                        " name, body, link, utm_content, status, published_at) "
+                        "VALUES (?,?,'Pinterest','p','b',?,?,'published',?)",
+                        (slug, kw, "https://trypstore.com/lp/" + slug, code,
+                         "2026-09-01 08:00:00"))
+                    for _ in range(nclick):
+                        c.execute(
+                            "INSERT INTO clicks (slug, source, ip, referrer, asin,"
+                            " content) VALUES (?,'social','t','','',?)",
+                            (slug, code))
+                c.commit()
+                c.close()
+            res = server._pin_drip(now=now)
+            self.assertEqual(res["scheduled"], 2)
+            with server._lock:
+                c = server._db()
+                rows = c.execute(
+                    "SELECT keyword FROM social_posts WHERE platform='Pinterest' "
+                    "AND status='scheduled' ORDER BY id").fetchall()
+                c.close()
+            got = [r["keyword"] for r in rows]
+            self.assertEqual(
+                got, ["best water bottle for hiking", "best desk lamp for dorm"],
+                "3 clicks on a 10-review page beat 4000 reviews of demand: %r" % got)
+        finally:
+            with server._lock:
+                c = server._db()
+                try:
+                    for kw, _cr, _r, _n in made:
+                        c.execute("DELETE FROM niches WHERE keyword=?", (kw,))
+                        c.execute("DELETE FROM clicks WHERE slug=?",
+                                  (server.seo._slugify(kw),))
+                    c.commit()
+                except Exception:
+                    pass
+                c.close()
+            self._restore_drip_settings(saved)
+
+
     def _drip_token(self, token):
         """Paste/clear the Pinterest token for the drip (returns prev for restore)."""
         prev = server._get_setting("social.key.pinterest.token")
