@@ -4111,6 +4111,7 @@ class Handler(BaseHTTPRequestHandler):
             "affiliate_tag": amazon.AFFILIATE_TAG,
             "scraper": amazon.scraper_status(),
             "paapi": paapi.status(),
+            "consolidation": {"holds": sorted(_consolidation_holds())},
             "social": {
                 "webhook": bool(_get_setting("social.webhook")),
                 "keys": {
@@ -6433,13 +6434,28 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                     v = max(0, min(int(float(em.get("max_per_day") or 0)), 50))
                 except (TypeError, ValueError):
                     v = 1
-                _set_setting("email.freq.max_per_day", str(v))
+                    _set_setting("email.freq.max_per_day", str(v))
             if "min_gap_hours" in em:
                 try:
                     v = max(0.0, min(float(em.get("min_gap_hours") or 0), 168.0))
                 except (TypeError, ValueError):
                     v = 0.0
                 _set_setting("email.freq.min_gap_hours", str(v))
+        # Topical consolidation. A held niche stays live for visitors but is
+        # served noindex and dropped from sitemap.xml, so the site stops
+        # competing with itself. `holds` is the whole set, so posting it
+        # replaces the previous state and posting [] clears it (the rollback
+        # path used by /tmp/opencode/diag/consolidate.py).
+        cons = body.get("consolidation")
+        if isinstance(cons, dict) and "holds" in cons:
+            raw = cons.get("holds")
+            if raw is None:
+                raw = []
+            if isinstance(raw, str):
+                raw = [p for p in (s.strip() for s in raw.split(",")) if p]
+            if not isinstance(raw, (list, tuple)):
+                raw = []
+            _set_consolidation_holds(raw)
         return self._send(200, self._settings())
 
     def _settings_test(self):
