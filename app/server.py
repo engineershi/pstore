@@ -2113,11 +2113,75 @@ def _consolidation_holds(max_age=60.0):
 
 
 def _set_consolidation_holds(slugs):
-    """Replace the hold set. Returns the normalised set that was stored."""
+    """Replace the hold set. Returns the normalised set that was stored.
+
+    Verifies the write landed. `_set_setting` swallows DB errors by design, so
+    without this a locked or unwritable database returns 200 and reports the
+    requested holds back while nothing was persisted -- a silent false success
+    that is indistinguishable, from the caller's side, from a real apply.
+    """
     val = sorted({str(s or "").strip() for s in (slugs or []) if str(s or "").strip()})
     _set_setting("seo.consolidation.holds", ",".join(val))
     _HOLDS_CACHE.update({"key": None, "at": 0.0, "val": frozenset()})
+    got = _consolidation_holds(max_age=0.0)
+    if got != frozenset(val):
+        raise RuntimeError(
+            "consolidation hold write did not persist: wanted %d slugs, read back %d"
+            % (len(val), len(got)))
     return frozenset(val)
+
+
+_HOLD_PATH_RE = re.compile(r"^/(?:n|lp|stories)/([a-z0-9-]+)(?:/|$)")
+
+
+def _path_is_held(path):
+    """True when a request path belongs to a niche parked by consolidation.
+
+    A held niche must stop competing through *every* route that carries its
+    keyword, not just the /n/ hub: the long-tail topic children, the /vs/ and
+    /under-<amount> variants, the /lp/ sales page and the /stories/ reel all
+    target the same intent. Each of those is produced by a different renderer
+    (seo.render_topic, render_vs, render_priceband, market_engine, render_story)
+    and the sitemap already drops them all, so a page excluded from the sitemap
+    but still serving `index` is exactly the mismatch Google penalises.
+
+    Matching the leading path segment keeps this correct for unknown future
+    routes rather than relying on every call site to remember the flag.
+    """
+    m = _HOLD_PATH_RE.match(path or "")
+    return bool(m) and m.group(1) in _consolidation_holds()
+
+
+_ROBOTS_META_RE = re.compile(
+    rb"<meta\s+name=[\"']robots[\"']\s+content=[\"'][^\"']*[\"']\s*/?>", re.I)
+_ROBOTS_NONE_RE = re.compile(rb"<meta\s+name=[\"']robots[\"']", re.I)
+_NOINDEX_META = b'<meta name="robots" content="noindex, follow">'
+
+
+def _force_noindex(body, path):
+    """Force noindex on a held page's robots meta.
+
+    Applied as a chokepoint in the GET dispatcher instead of a `hold=True`
+    argument on each renderer. `render_niche`/`render_topic` already accept the
+    flag, but /lp/, /stories/, /vs/ and /under-<amt> are built elsewhere and
+    would silently escape consolidation. Centralising it means a route added
+    later inherits the behaviour instead of needing a remember-to-thread-this
+    edit. Idempotent, so double-applying is harmless.
+    """
+    if not _path_is_held(path):
+        return body
+    if not body:
+        return body
+    if not _ROBOTS_NONE_RE.search(body):
+        # No robots meta at all -- insert one so the page is unambiguously
+        # noindex rather than merely absent from the sitemap.
+        i = body.lower().find(b"</head>")
+        if i < 0:
+            i = body.lower().find(b"<body")
+            if i < 0:
+                return body
+        return body[:i] + _NOINDEX_META + body[i:]
+    return _ROBOTS_META_RE.sub(_NOINDEX_META, body, count=1)
 
 
 def _set_setting(key, value):
@@ -4062,6 +4126,7 @@ class Handler(BaseHTTPRequestHandler):
         data = _stamp_style_version(data, ctype)
         if "text/html" in ctype:
             data = _inject_telegram_button(data, getattr(self, "path", ""))
+            data = _force_noindex(data, getattr(self, "path", ""))
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
@@ -4088,6 +4153,7 @@ class Handler(BaseHTTPRequestHandler):
         data = _stamp_style_version(data, ctype)
         if "text/html" in ctype:
             data = _inject_telegram_button(data, getattr(self, "path", ""))
+            data = _force_noindex(data, getattr(self, "path", ""))
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
@@ -6455,7 +6521,15 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 raw = [p for p in (s.strip() for s in raw.split(",")) if p]
             if not isinstance(raw, (list, tuple)):
                 raw = []
-            _set_consolidation_holds(raw)
+            try:
+                _set_consolidation_holds(raw)
+            except Exception as e:
+                # Report the failure instead of returning 200. A consolidation
+                # that silently no-ops is worse than one that errors: the
+                # operator would believe the pages were parked and leave them
+                # competing.
+                return self._send(500, {"error": "consolidation write failed",
+                                        "detail": str(e)})
         return self._send(200, self._settings())
 
     def _settings_test(self):
@@ -7817,10 +7891,16 @@ document.addEventListener("click", function (e) {{
                     if cached is not None:
                         return self._send_cached(cached, "text/html; charset=utf-8", ttl,
                                                  edge=cacheable)
+                    # NOTE: no `hold=` here on purpose. The hold is applied by
+                    # `_force_noindex` in the response senders, because baking
+                    # it into the render would store the noindexed HTML in the
+                    # 300s render cache -- and clearing a hold would then take
+                    # up to 5 minutes to take effect, making rollback look
+                    # broken. Holding at the send layer keeps the cache clean
+                    # and the rollback instant.
                     res = seo.render_niche(n["keyword"], n, saved_niches=all_niches,
                                            ab_headline=headline, ab_variant=vno,
-                                           style_pack=template.for_page(n["keyword"], slug),
-                                           hold=slug in _consolidation_holds())
+                                           style_pack=template.for_page(n["keyword"], slug))
                     if aware:
                         _render_cache_put(cache_key, res, ttl)
                         return self._send_cached(res, "text/html; charset=utf-8", ttl,
