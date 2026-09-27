@@ -36,12 +36,21 @@ class TestRateLimiterSweep(unittest.TestCase):
         buckets must expire; the old `max(64, len(self._hits))` sweep gate could
         never fire because the counter and the map grew at the same rate, so
         every dead bucket was retained for the life of the process."""
-        rl = security.RateLimiter(5, 0.5)
+        # A window long enough that the fill cannot expire mid-loop. With a 0.5s
+        # window this assertion was timing-fragile: on a loaded machine the
+        # 5000-hit loop outlived the window, the sweep reclaimed the earliest
+        # buckets, and the exact count read 3975 instead of 5000.
+        rl = security.RateLimiter(5, 60.0)
         for i in range(5000):
             rl.hit("10.0.%d.%d" % (i // 250, i % 250))
         # all 5000 are live inside the window, so they are legitimately held
         self.assertEqual(len(rl._hits), 5000)
-        time.sleep(0.6)
+        # Age every bucket past the window rather than sleeping: what is under
+        # test is the sweep reclaiming expired buckets, and wall-clock sleeps
+        # make that assertion depend on machine load.
+        stale = time.monotonic() - 61.0
+        for bucket in rl._hits.values():
+            bucket[:] = [stale]
         for i in range(300):
             rl.hit("10.9.9.%d" % i)
         self.assertLess(len(rl._hits), 400,

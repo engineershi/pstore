@@ -863,6 +863,15 @@ _PRICEDROP_STATE_KEY = "pricedrop.state"  # json progress for the background scr
 _PRICEDROP_SEND_KEY = "pricedrop.send"    # json progress for the background drop-email push
 _PRICEDROP_ASIN_TIMEOUT = 35.0  # per-ASIN fetch budget; a stuck Amazon
 # call is skipped so one bad ASIN can never stall the whole scan
+# Concurrency for the price-drop sweep. The amazon module is lock-guarded and
+# keeps per-request state in thread-locals, so parallel fetches are safe. The
+# sweep previously ran on a single worker, which made a 2,685-ASIN pass take
+# ~26h against a 6h interval -- i.e. no pass could ever finish.
+_PRICEDROP_WORKERS = 8
+_PRICEDROP_STATE_WRITE_EVERY = 20   # progress writes per pass, not one per ASIN
+_PRICEDROP_STALE_SECONDS = 900.0    # a run whose last heartbeat is older than
+# this lost its worker; the auto loop reclaims it instead of trusting a `running`
+# flag that nothing will ever clear again
 SOCIAL_PEAK_SLOTS = (8, 12, 19)  # high-engagement schedule hours (morning/lunch/evening)
 _WEEKLYDIGEST_STATE_KEY = "weeklydigest.state"  # json: {status,sent,last_run,week,errors}
 _WEEKLYDIGEST_GATE_KEY = "weeklydigest.last_week"  # json: {keyword: "YYYY-Wxx"} — one digest/week/niche
@@ -1322,57 +1331,152 @@ def _watched_products_rows():
     return list(seen.values())
 
 
+def _pricedrop_today():
+    from datetime import datetime as _dt
+    return _dt.utcnow().strftime("%Y-%m-%d")
+
+
 def _pricedrop_scan(rows, min_pct):
     """Background re-scrape worker (shared by the manual button and the auto
     loop): polls update the persisted _PRICEDROP_STATE_KEY state so the admin
     page can paint progress instead of waiting on a blocking HTTP call.
     Never raises. A single slow/black-holed ASIN must never stall the whole
     scan: each fetch runs under a per-ASIN timeout and is skipped on any
-    error/slow response."""
+    error/slow response.
+
+    Parallel and resumable. This used to walk every ASIN one at a time through a
+    single-worker pool: 2,685 watched products x a 35s per-ASIN budget is a
+    26-hour pass against a 6-hour auto interval, so a pass could never finish.
+    The auto loop skips while `running` is set, so exactly one pass ever started
+    and it never completed -- 0 price drops and 0 price-drop emails, ever.
+
+    - The store is the checkpoint. `record()` stamps snapshots with today's date
+      and same-day snapshots replace one another, so an ASIN whose newest
+      snapshot is already today has been scanned today and is skipped. A pass
+      interrupted by a restart or a deploy resumes instead of starting over, and
+      an ASIN whose fetch failed is left unrecorded so the next pass retries it.
+    - Fetches run concurrently (the amazon module is lock-guarded and keeps
+      per-request state in thread-locals). Recording stays on this thread, as
+      futures complete, so the store is never mutated from a worker.
+    - Progress is written every _PRICEDROP_STATE_WRITE_EVERY completions rather
+      than after every ASIN. 2,685 commits per pass bought nothing but write
+      amplification, and every one of them re-asserted `running`.
+    - Each write refreshes a `beat` timestamp so the auto loop can tell a
+      progressing scan from one whose thread died, and reclaim the latter
+      instead of waiting forever on a flag nothing will clear.
+    """
     store = _pricedrop_store()
     fresh = {}
     reviews = {}
     checked = 0
     error = ""
-    try:
-        from concurrent.futures import ThreadPoolExecutor
-        pool = ThreadPoolExecutor(max_workers=1)
-        for row in rows:
-            asin = str(row.get("asin") or "").strip().upper()
-            if not asin:
-                continue
-            fut = pool.submit(amazon.search, asin, 1)
-            try:
-                items, _src = fut.result(timeout=_PRICEDROP_ASIN_TIMEOUT)
-                if items:
-                    it = items[0]
-                    if it.get("price") is not None:
-                        fresh[asin] = it.get("price")
-                    rv = it.get("reviews")
-                    if rv is not None:
-                        reviews[asin] = rv
-            except Exception:
-                fur_e = str(fut.exception()) if fut.done() and fut.exception() else "timeout"
-                error = f"skipped {asin}: {fur_e[:120]}"
+    today = _pricedrop_today()
+    all_asins = []
+    for row in rows:
+        a = str(row.get("asin") or "").strip().upper()
+        if a:
+            all_asins.append((a, row))
+    total = len(all_asins)
+    # Resume: today's already-snapshotted ASINs are this pass's work, done.
+    todo = []
+    for asin, row in all_asins:
+        done_price = None
+        try:
+            snaps = store.snapshots(asin)
+            if snaps and str(snaps[-1].get("ts") or "")[:10] == today:
+                if snaps[-1].get("price") is not None:
+                    done_price = snaps[-1].get("price")
+        except Exception:
+            done_price = None
+        if done_price is not None:
+            fresh[asin] = done_price
             checked += 1
-            _set_setting(_PRICEDROP_STATE_KEY, json.dumps({
-                "running": True, "owner": _BOOT_ID, "status": "scanning",
-                "checked": checked, "total": len(rows), "drops": [],
-                "last_run": "", "error": error}))
-        pool.shutdown(wait=False, cancel_futures=True)
-    except Exception as e:
-        error = str(e)[:160]
+        else:
+            todo.append((asin, row))
+
+    _last = [0.0]
+
+    def _progress(status="scanning", err=""):
+        now = time.time()
+        if err == "" and now - _last[0] < 1.0:
+            return
+        _last[0] = now
+        _set_setting(_PRICEDROP_STATE_KEY, json.dumps({
+            "running": True, "owner": _BOOT_ID, "status": status,
+            "checked": checked, "total": total, "drops": [],
+            "last_run": "", "error": err, "beat": now}))
+
+    _progress()
+    if todo:
+        try:
+            from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+            pool = ThreadPoolExecutor(max_workers=_PRICEDROP_WORKERS)
+            pending = {}
+            rows_iter = iter(todo)
+            submitted = [0]
+
+            def _submit(n):
+                got = 0
+                for _ in range(n):
+                    try:
+                        asin, row = next(rows_iter)
+                    except StopIteration:
+                        break
+                    pending[pool.submit(amazon.search, asin, 1)] = (asin, row)
+                    submitted[0] += 1
+                    got += 1
+                return got
+
+            _submit(_PRICEDROP_WORKERS * 2)
+            while pending:
+                done, _still = wait(list(pending),
+                                    timeout=_PRICEDROP_ASIN_TIMEOUT,
+                                    return_when=FIRST_COMPLETED)
+                if not done:
+                    # Nothing in the window finished inside the per-ASIN budget,
+                    # so every worker is occupied by a fetch that will not
+                    # return. Account for the stuck window and the work never
+                    # dispatched, then stop issuing fetches: queueing more
+                    # behind permanently-occupied workers would just grow a
+                    # backlog that can never run. The pass still completes and
+                    # still reports honestly.
+                    stuck = len(pending) + (len(todo) - submitted[0])
+                    error = "timeout on %d asins" % stuck
+                    for f in pending:
+                        f.cancel()
+                    pending = {}
+                    checked += stuck
+                    break
+                for fut in done:
+                    asin, _row = pending.pop(fut)
+                    try:
+                        items, _src = fut.result(timeout=0)
+                        if items:
+                            it = items[0]
+                            price = it.get("price")
+                            if price is not None:
+                                # Checkpoint durably, now: a pass interrupted
+                                # by a deploy resumes from here.
+                                store.record(asin, price=price,
+                                             reviews=it.get("reviews"))
+                                fresh[asin] = price
+                            rv = it.get("reviews")
+                            if rv is not None:
+                                reviews[asin] = rv
+                    except Exception as exc:
+                        error = "skipped %s: %s" % (asin, str(exc)[:100])
+                    checked += 1
+                _submit(len(done))
+                _progress()
+            pool.shutdown(wait=False, cancel_futures=True)
+        except Exception as e:
+            error = str(e)[:160]
     try:
         result = pricedrop.check(rows, fresh, store=store, min_drop_pct=min_pct)
         result["checked"] = checked
     except Exception as e:
         result = {"drops": [], "tracked": 0, "checked": checked}
         error = error or str(e)[:160]
-    for asin, price in fresh.items():
-        try:
-            store.record(asin, price=price, reviews=reviews.get(asin))
-        except Exception:
-            continue
     try:
         trending = pricedrop.trend_report(store, rows)
     except Exception:
@@ -1384,10 +1488,10 @@ def _pricedrop_scan(rows, min_pct):
     from datetime import datetime as _dt
     _set_setting(_PRICEDROP_STATE_KEY, json.dumps({
         "running": False, "status": "done", "checked": checked,
-        "total": len(rows), "drops": result.get("drops") or [],
+        "total": total, "drops": result.get("drops") or [],
         "last_run": _dt.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         "error": error, "events": events or {},
-        "trending": trending or []}))
+        "trending": trending or [], "beat": time.time()}))
     _beat("pricedrop", ok=not error, err=error)
 
 
@@ -1473,7 +1577,21 @@ def _pricedrop_auto_loop():
                 continue
             data = _run_state(_get_setting(_PRICEDROP_STATE_KEY, "{}"))
             if data.get("running"):
-                continue
+                # `_run_state` already cleared a flag left by a previous boot,
+                # so reaching here means this boot owns it. A live scan
+                # refreshes `beat` on every progress write, so a stale (or
+                # missing) heartbeat means the worker is gone -- which is the
+                # state that wedged the scanner forever: nothing clears the
+                # flag, the loop skips, and no price-drop alert is ever sent.
+                beat = float(data.get("beat") or 0)
+                if beat > 0 and (time.time() - beat) < _PRICEDROP_STALE_SECONDS:
+                    continue
+                _set_setting(_PRICEDROP_STATE_KEY, json.dumps({
+                    "running": False, "status": "interrupted",
+                    "checked": int(data.get("checked") or 0),
+                    "total": int(data.get("total") or 0),
+                    "drops": [], "last_run": str(data.get("last_run") or ""),
+                    "error": "reclaimed: worker heartbeat expired"}))
             hb = _HEARTBEATS.get("pricedrop-auto") or {}
             if hb.get("last") and time.time() - hb["last"] < _pricedrop_auto_hours() * 3600:
                 continue
