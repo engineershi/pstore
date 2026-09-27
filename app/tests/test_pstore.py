@@ -795,7 +795,19 @@ class TestIndexNow(unittest.TestCase):
 
     def setUp(self):
         indexnow._DEFAULT_KEY = self.KEY
+        # indexnow.key() prefers _RUNTIME_KEY, which the *server* populates from
+        # settings at import. TestRoutes boots the real server, so if it runs
+        # first its runtime key survives here and every assertion below compares
+        # against the wrong key. Reset both, and put them back afterwards.
+        self._saved_runtime = indexnow._RUNTIME_KEY
+        self._saved_base = seo.BASE_URL
+        indexnow._RUNTIME_KEY = None
         seo.BASE_URL = "https://pstore.example"
+
+    def tearDown(self):
+        indexnow._RUNTIME_KEY = self._saved_runtime
+        seo.BASE_URL = self._saved_base
+        indexnow._DEFAULT_KEY = "0aa657c0ce459baba7a21e6d40e35351"
 
     def test_key_and_file_route(self):
         self.assertEqual(indexnow.key(), self.KEY)

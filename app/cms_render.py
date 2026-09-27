@@ -14,6 +14,7 @@ reveal-on-scroll — is controlled from page settings toggles.
 """
 import html
 import json
+import re
 import urllib.parse
 
 import market_engine
@@ -21,8 +22,66 @@ import amazon as amazon_mod
 import seo
 
 
+_MD_LINK = re.compile(r"\[([^\]]*)\]\(\s*[^)]*\)")
+_MD_IMG = re.compile(r"!\[([^\]]*)\]\(\s*[^)]*\)")
+_MD_BOLD = re.compile(r"(\*\*|__)(.+?)\1", re.S)
+_MD_ITAL = re.compile(r"(?<![\w*])(\*|_)(?!\s)(.+?)(?<!\s)\1(?![\w*])", re.S)
+_MD_TICK = re.compile(r"`{1,3}([^`]*)`{1,3}")
+_MD_HEAD = re.compile(r"^\s{0,3}#{1,6}\s*", re.M)
+_MD_QUOTE = re.compile(r"^\s{0,3}>\s?", re.M)
+_MD_RULE = re.compile(r"^\s{0,3}([-*_])\s*(?:\1\s*){2,}$", re.M)
+_MD_BULLET = re.compile(r"^\s{0,3}([-*+])\s+", re.M)
+_MD_OL = re.compile(r"^\s{0,3}\d{1,3}[.)]\s+", re.M)
+_MD_WS = re.compile(r"[ \t]{2,}")
+# Trailing punctuation that a truncating cap leaves dangling at a cut point.
+_TRIM_TAIL = " \t\n\r,;:.!?—–-\u2014/|"
+
+
+def strip_markdown(s):
+    """Reduce LLM/CMS-authored text to plain prose.
+
+    AI copy is stored verbatim and this is the render boundary, so a model that
+    ignores the "plain text, no markdown" instruction used to surface literal
+    ``**`` and stray markup in the live <h1> and body copy. Fixing only the AI
+    prompt would not repair rows already written to the DB, so every field is
+    normalised here on the way out.
+    """
+    t = str(s or "")
+    if not t:
+        return ""
+    t = _MD_IMG.sub(r"\1", t)      # images have no place in copy fields
+    t = _MD_LINK.sub(r"\1", t)     # [label](url) -> label
+    t = _MD_BOLD.sub(r"\2", t)     # **bold** -> bold
+    t = _MD_ITAL.sub(r"\2", t)     # *em* / _em_ -> em
+    t = _MD_TICK.sub(r"\1", t)     # `code` -> code
+    t = _MD_RULE.sub("", t)        # --- horizontal rules
+    t = _MD_HEAD.sub("", t)        # ## heading
+    t = _MD_QUOTE.sub("", t)       # > quote
+    t = _MD_BULLET.sub("", t)      # - bullet
+    t = _MD_OL.sub("", t)          # 1. numbered
+    t = t.replace("***", "").replace("**", "")   # unmatched leftovers
+    t = _MD_WS.sub(" ", t)
+    return t.strip()
+
+
+def clip_words(s, limit):
+    """Truncate to <= limit chars on a word boundary.
+
+    A hard slice cut headlines mid-word ("...Without Starving\u2014Try T"),
+    which reads as broken copy and wastes the tail of the SERP snippet.
+    """
+    t = str(s or "").strip()
+    if limit <= 0 or len(t) <= limit:
+        return t
+    cut = t[:limit].rstrip(_TRIM_TAIL)
+    sp = cut.rfind(" ")
+    if sp > limit * 0.6:          # only honour the space if it keeps most text
+        cut = cut[:sp].rstrip(_TRIM_TAIL)
+    return cut
+
+
 def _esc(s):
-    return html.escape(str(s or ""), quote=True)
+    return html.escape(strip_markdown(s), quote=True)
 
 
 def _rgba(hexc, alpha):
@@ -325,7 +384,7 @@ def _section_html(section, ctx):
         return f"""
   <div class="card {cls}" style="text-align:{txt_align}">
     {badge_html}
-    <h1>{e(headline)}</h1>
+    <h1>{e(clip_words(headline, 110))}</h1>
     <p class="muted" style="font-size:clamp(15px,2.4vw,18px);max-width:640px;{'margin-left:auto;margin-right:auto' if txt_align=='center' else ''}">{e(sub)}</p>
     {stars_line}
     {img_html}
@@ -567,6 +626,30 @@ def _landing_jsonld_html(context, base, slug, og_image, e):
             % json.dumps(graph).replace("</", "<\\/"))
 
 
+def _related_guides_html(context):
+    """Sibling guides block for /lp/<slug>.
+
+    Landing pages previously offered exactly one onward link, so they were
+    crawl dead ends. This hands both readers and crawlers a path into the
+    ranking pages, and gives a paid-traffic visitor somewhere to go if the
+    single-pick pitch did not land.
+    """
+    rel = [r for r in (context.get("related") or [])
+           if isinstance(r, dict) and r.get("slug") and r.get("keyword")]
+    if not rel:
+        return ""
+    e = _esc
+    chips = "".join(
+        '<a class="chip" href="/n/%s" rel="noopener">%s</a>'
+        % (e(r["slug"]), e(r["keyword"]))
+        for r in rel[:8])
+    return ('<h2 style="font-size:17px;margin:22px 0 10px">Related buying guides</h2>'
+            '<p class="muted" style="font-size:13.5px;margin:0 0 10px">'
+            'More ranked picks, scored the same way:</p>'
+            '<div class="chips" style="display:flex;flex-wrap:wrap;gap:8px">'
+            '%s</div>' % chips)
+
+
 def render_landing_page_page(context, keyword, site_url=None):
     """Render the full HTML for a CMS-driven landing page."""
     sections = context.get("sections", [])
@@ -648,6 +731,7 @@ def render_landing_page_page(context, keyword, site_url=None):
   {top_link or '<span class="muted">—</span>'}
 </div>
 <hr class="hr">
+{_related_guides_html(context)}
 <div class="foot-legal">pstore researches live Amazon listings — rating, review volume and price — so every pick is data-backed, not guesswork.
 We may earn a small commission when you buy through our links (the price you pay never changes).</div>
 <p class="aff">As an Amazon Associate we earn from qualifying purchases.</p>

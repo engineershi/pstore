@@ -6,17 +6,55 @@ services:
     plan: free
     dockerfilePath: ./Dockerfile
     healthCheckPath: /
+    # NOTE ON PERSISTENCE — the single most important thing in this file.
+    #
+    # The Docker image bakes app/pstore.db in as a 43-niche *seed*. With no disk
+    # mounted, the running database is the container's own writable layer, which
+    # Render throws away on every deploy: subscribers, settings, clicks,
+    # earnings, social posts and anything the operator added all revert to the
+    # seed. Nothing errors, the site just quietly stops being the same site.
+    #
+    # Render only supports persistent disks on a paid plan, so there is no disk
+    # block here that would work on `plan: free`. To fix this:
+    #   1. Move the service to a plan that supports disks.
+    #   2. Add the block below.
+    #   3. Leave PSTORE_DB set so the app uses the mounted path.
+    #
+    # disk:
+    #   name: pstore_data
+    #   mountPath: /data
+    #   sizeGB: 1
+    #
+    # Until then the app prints a WARNING at every boot naming this exact risk.
     envVars:
       - key: PORT
         value: "8765"
+      - key: PSTORE_URL
+        value: https://trypstore.com
+      # A mount point that is safe to set now: the seed is copied into it on
+      # first boot, so turning the disk on above needs no code change.
+      - key: PSTORE_DB
+        value: /data/pstore.db
+      # Empty means every Amazon link renders UNTAGGED and earns ZERO
+      # commission. sync:false makes Render PROMPT for it in the dashboard
+      # rather than accepting a hardcoded empty value, which is how a site
+      # quietly ends up serving 1,800+ untagged links. The app also warns at
+      # boot and flags it in /admin/system if the value ever comes out empty.
       - key: PSTORE_TAG
-        value: ""
+        sync: false
       - key: PSTORE_MARKET
         value: com
       - key: PSTORE_ADMIN_EMAIL
         sync: false
       - key: PSTORE_ADMIN_PASSWORD
         sync: false
+      # Durable signing secrets. Without these, security.py generates random
+      # values at each boot, which invalidates signed unsubscribe links,
+      # PDF-gate tokens and in-flight OAuth logins on every restart.
+      - key: PSTORE_HASH_SECRET
+        generateValue: true
+      - key: PSTORE_OAUTH_SECRET
+        generateValue: true
       - key: OAUTH_GOOGLE_CLIENT_ID
         sync: false
       - key: OAUTH_GOOGLE_CLIENT_SECRET
@@ -24,4 +62,16 @@ services:
       - key: OAUTH_FACEBOOK_APP_ID
         sync: false
       - key: OAUTH_FACEBOOK_APP_SECRET
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: IMAP_HOST
+        sync: false
+      - key: IMAP_USER
+        sync: false
+      - key: IMAP_PASSWORD
         sync: false

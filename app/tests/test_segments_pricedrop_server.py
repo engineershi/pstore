@@ -98,6 +98,12 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
         security.TRACK_LIMITER.clear("trk|" + self.IPKEY)
         security.API_LIMITER.clear("api|" + self.IPKEY)
         # offline: never hit the network from /api/pricedrop/run
+        # Restore via addCleanup: these are module globals, so without this the
+        # stub leaks into every later test module. It bit us in reverse order,
+        # where test_pstore.TestAmazon then received ([], "") from this stub and
+        # reported provider id "" instead of "serpapi".
+        self.addCleanup(setattr, amazon, "_scraper_search", amazon._scraper_search)
+        self.addCleanup(setattr, amazon, "_urlopen", amazon._urlopen)
         amazon._scraper_search = lambda *a, **k: ([], "")
         amazon._urlopen = _no_network
         # offline: even if a prior module left a runtime AI key behind, the
@@ -122,6 +128,17 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
         import ai as _ai
         _ai._urlopen = self._saved_ai_urlopen
         amazon._urlopen = _no_network
+
+    def _wait_pricedrop_send(self, tries=200):
+        """Poll /api/pricedrop/state until the background drop-push settles."""
+        import time as _t
+        for _ in range(tries):
+            st, _, body = self._raw("/api/pricedrop/state", cookie=self.cookie)
+            send = json.loads(body).get("send") or {}
+            if not send.get("running"):
+                return send
+            _t.sleep(0.1)
+        self.fail("background price-drop push never finished")
 
     def _seed(self):
         """Create 5 subscribers with distinct engagement, plus a saved niche."""
@@ -378,14 +395,25 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
             mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD = saved
 
     def test_pricedrop_send_offline_no_raises(self):
-        """Auto price-drop push must answer 200 and not raise with no network."""
+        """Auto price-drop push must answer 200 and not raise with no network.
+
+        The push re-scrapes every watched ASIN, so it runs in a background
+        thread and the POST returns immediately; the reply therefore carries
+        `started`/`running` plus a `state` block rather than the final counts.
+        Wait for the worker and assert on the settled state."""
         self._seed()
         st, ct, body = self._raw("/api/pricedrop/send", method="POST",
                                  body=b"{}", cookie=self.cookie)
         self.assertEqual(st, 200)
         data = json.loads(body)
         self.assertEqual(data["ok"], True)
-        self.assertIn("drops", data)
+        self.assertTrue(data["started"], "push should have been accepted")
+        self.assertTrue(data["running"])
+        self.assertIn("drops", data["state"])
+        final = self._wait_pricedrop_send()
+        self.assertFalse(final["running"])
+        self.assertIn("drops", final)
+        self.assertEqual(final["status"], "done")
 
     def test_price_alert_captures_watcher_and_referral(self):
         """'Track this price' card converts a visitor into a subscriber AND a
@@ -461,8 +489,18 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
             self.assertEqual(st, 200)
             data = json.loads(body)
             self.assertTrue(data["ok"], data)
-            self.assertGreaterEqual(len(data["drops"]), 1)
-            self.assertEqual(data["watcher_emails"], 1)
+            self.assertTrue(data["started"], "push should have been accepted")
+            self.assertTrue(data["running"])
+            # The push re-scrapes every watched ASIN, so it runs in a background
+            # thread and the POST returns before any mail is sent. The counts
+            # live in the polled state, not in the POST reply.
+            final = self._wait_pricedrop_send()
+            self.assertFalse(final["running"])
+            self.assertEqual(final["status"], "done", final)
+            self.assertGreaterEqual(len(final["drops"]), 1)
+            # sent is the segment-wide fan-out; this test only cares that the
+            # single pricewatch row produced exactly one alert for its owner.
+            self.assertGreaterEqual(final["sent"], 1)
             hit = [c for c in captured if c["to"] == "watchy@x.com"]
             self.assertEqual(len(hit), 1)
             self.assertIn("drop", hit[0]["subject"].lower())

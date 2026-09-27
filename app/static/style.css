@@ -892,6 +892,27 @@ a { color: var(--accent2); }
   margin-bottom: 8px;
 }
 .pick-head h3 { margin: 0; font-size: 18px; flex: 1 1 260px; min-width: 0; }
+/* Product shot: only emitted when a PAAPI image exists. Fixed box so the row
+   does not reflow when the CDN responds, and a plain surface so a white
+   product photo on a white card still reads as a product, not a broken tile. */
+.pick .shot {
+  width: 112px;
+  height: 112px;
+  object-fit: contain;
+  flex: 0 0 112px;
+  margin: 0 16px 12px 0;
+  padding: 6px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.pick-head { align-items: center; }
+.pick-titles { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; flex: 1 1 260px; min-width: 0; }
+.pick-titles h3 { flex: 1 1 220px; }
+@media (max-width: 520px) {
+  .pick .shot { width: 76px; height: 76px; flex-basis: 76px; margin-right: 12px; }
+  .pick-titles h3 { flex-basis: 100%; }
+}
 .pick .rank {
   font-size: 12px;
   font-weight: 800;

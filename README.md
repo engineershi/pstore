@@ -16,12 +16,26 @@ python3 server.py            # serves http://localhost:8765
 ```
 Set env: `PSTORE_TAG=youraffiliate-20`, `PSTORE_MARKET=com` (or co.uk/de/ca/in/...).
 Set `PSTORE_ADMIN_EMAIL` + `PSTORE_ADMIN_PASSWORD` to lock the owner section
-(dashboard, tools, keys, APIs). Without them the server falls back to the
-default credentials and warns. Optional Google/Facebook login: set
+(dashboard, tools, keys, APIs). Without them the server generates a random
+single-boot admin password, prints it, and warns — it never falls back to a
+well-known default. Set `PSTORE_HASH_SECRET` and `PSTORE_OAUTH_SECRET` to long
+random strings too: without them a new random value is generated at every boot,
+which invalidates signed unsubscribe links, PDF-gate tokens and in-flight OAuth
+logins on each restart. Optional Google/Facebook login: set
 `OAUTH_GOOGLE_CLIENT_ID`/`OAUTH_GOOGLE_CLIENT_SECRET` or
 `OAUTH_FACEBOOK_APP_ID`/`OAUTH_FACEBOOK_APP_SECRET` (with `PSTORE_URL`) to add
 "Continue with Google/Facebook" buttons on the login page; only the admin email
 wins a session.
+
+### Persistence
+The database is a single SQLite file at `PSTORE_DB` (default
+`app/pstore.db`). **If `PSTORE_DB` is not set it lands inside the container
+image, and every deploy replaces it** — subscribers, settings, clicks, earnings
+and social posts revert to the baked 43-niche seed. Mount a persistent disk and
+point `PSTORE_DB` at it (`/data/pstore.db`); the shipped catalogue is copied in
+automatically on first boot, so an empty volume still comes up with the niches.
+The server prints a `WARNING` at boot and lists it in `/admin/system` when this
+is misconfigured.
 
 ## Two parts
 - **Public site** — fully crawlable, no login: `/` landing, `/n/<niche>`

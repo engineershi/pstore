@@ -19,6 +19,7 @@ we never persist or log secrets.
 """
 import json
 import os
+import re
 import time
 import urllib.request
 
@@ -241,8 +242,32 @@ def _complete(system, user, timeout=25):
     return (out.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
 
 
+_MD = (
+    (re.compile(r"!\[([^\]]*)\]\(\s*[^)]*\)"), r"\1"),   # ![alt](url) -> alt
+    (re.compile(r"\[([^\]]*)\]\(\s*[^)]*\)"), r"\1"),    # [label](url) -> label
+    (re.compile(r"(\*\*|__)(.+?)\1", re.S), r"\2"),       # **bold** -> bold
+    (re.compile(r"(?<![\w*])(\*|_)(?!\s)(.+?)(?<!\s)\1(?![\w*])", re.S), r"\2"),
+    (re.compile(r"`{1,3}([^`]*)`{1,3}"), r"\1"),
+    (re.compile(r"^\s{0,3}#{1,6}\s*", re.M), ""),
+    (re.compile(r"^\s{0,3}([-*+])\s+", re.M), ""),
+)
+
+
+def _strip_md(line):
+    """Models often ignore 'no markdown' despite the system prompt, so
+    normalise here rather than trusting the instruction. Storing plain prose
+    keeps every downstream renderer (CMS, PDF, social, email) clean."""
+    t = line
+    for rx, rep in _MD:
+        t = rx.sub(rep, t)
+    return t.replace("***", "").replace("**", "").strip()
+
+
 def _clean(text):
-    lines = [ln.strip().strip('"') for ln in (text or "").splitlines()]
+    # Markdown first, then quotes: a value like '**"Headline**' only exposes
+    # the quote once the asterisks are gone, so the old order left it dangling.
+    lines = [_strip_md(ln.strip()).strip('"').strip("*").strip()
+             for ln in (text or "").splitlines()]
     return [ln for ln in lines if ln]
 
 

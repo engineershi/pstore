@@ -25,11 +25,14 @@ import re
 import secrets
 import shutil
 import sqlite3
+import sys
 import threading
 import time
+import traceback
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import BaseServer
 
 import amazon
 import audience
@@ -68,6 +71,112 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(ROOT, "static")
 DB = os.environ.get("PSTORE_DB", os.path.join(ROOT, "pstore.db"))
 PORT = int(os.environ.get("PORT", "8765"))
+
+
+def _clamp_int(raw, default, lo, hi, fallback=None):
+    """Parse a query-string int defensively.
+
+    Pagination params arrive from the open web, so `?limit=abc`, `?limit=-1`,
+    `?limit=1e9` and `?limit=` must all degrade to a sane value instead of
+    raising a 500 or letting a caller ask the DB for the whole table.
+    """
+    if raw is None or raw == "":
+        return default
+    try:
+        val = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    if val < lo:
+        return lo
+    if val > hi:
+        return hi
+    return val
+
+
+def _seed_db_once(target):
+    """Copy the shipped niche catalogue into a fresh, empty database file.
+
+    The image bakes app/pstore.db in as a *seed* (43 niches and nothing else).
+    When PSTORE_DB points at a persistent volume, that volume starts empty, so
+    the first boot has to be given the seed or the deployed site comes up with
+    no niches at all. Never overwrites an existing database, and never copies
+    over one that already has rows — only fills a genuinely empty file."""
+    seed = os.environ.get("PSTORE_SEED_DB") or os.path.join(ROOT, "pstore.db")
+    seed = os.path.abspath(seed)
+    target = os.path.abspath(target)
+    if not os.path.isfile(seed) or os.path.abspath(seed) == target:
+        return False
+    try:
+        if os.path.exists(target) and os.path.getsize(target) > 0:
+            return False
+    except OSError:
+        return False
+    try:
+        parent = os.path.dirname(target)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        shutil.copyfile(seed, target)
+        return True
+    except OSError as e:
+        print("WARNING: could not seed %s from %s (%s)" % (target, seed, e))
+        return False
+
+
+def _db_is_persistent():
+    """True when the database file's directory is a real mount point (a Render
+    disk, a Fly volume, a host bind mount) rather than the container's own
+    writable layer. Setting PSTORE_DB=/data/pstore.db is not enough on its own:
+    a blueprint that declares the env var but no disk block gives a path that
+    LOOKS durable, lives in the container layer, and is wiped on every redeploy
+    with no warning at all. /proc/self/mountinfo is the ground truth, with an
+    ismount() fallback for platforms that do not expose it."""
+    path = os.path.dirname(os.path.abspath(
+        os.environ.get("PSTORE_DB") or os.path.join(ROOT, "pstore.db")))
+    try:
+        with open("/proc/self/mountinfo", "r") as fh:
+            mounts = {line.split(" ")[4] for line in fh if " - " in line}
+        return path in mounts or path.rstrip("/") in mounts
+    except Exception:
+        return os.path.ismount(path)
+
+
+def _db_durability_warnings():
+    """Loud, specific warnings for the two ways this deployment can quietly lose
+    every subscriber, click, setting and earnings row in the database.
+
+    1. The database is not on a persistent mount -> the file lives inside the
+       container filesystem. Render (and any container redeploy) replaces that
+       layer, so the site comes back with the baked 43-niche seed and nothing
+       else. This checks the actual mount, not just the env var, because
+       PSTORE_DB=/data/pstore.db with no disk attached is the same data loss
+       while looking configured.
+    2. PSTORE_HASH_SECRET / PSTORE_OAUTH_SECRET unset -> security.py invents
+       random values at boot, which silently invalidates every signed
+       unsubscribe link, PDF-gate token and in-flight OAuth handshake, and
+       rotates on every restart."""
+    out = []
+    db_path = os.environ.get("PSTORE_DB") or os.path.join(ROOT, "pstore.db")
+    db_dir = os.path.dirname(os.path.abspath(db_path))
+    if not _db_is_persistent():
+        configured = " (PSTORE_DB is set to %s, but that directory is not a "\
+                    "mount)" % db_path if os.environ.get("PSTORE_DB") else ""
+        out.append(
+            "The database at %s is NOT on a persistent mount%s, so it lives in "
+            "the container filesystem. Every deploy REPLACES that layer: "
+            "subscribers, settings, clicks, earnings and social posts will all "
+            "be lost. Attach a persistent disk mounted at %s (Render: a `disk:` "
+            "block, which requires a paid plan) and point PSTORE_DB at a file on "
+            "it before relying on this deployment."
+            % (db_path, configured, db_dir))
+    missing = [k for k in ("PSTORE_HASH_SECRET", "PSTORE_OAUTH_SECRET")
+               if not os.environ.get(k)]
+    if missing:
+        out.append(
+            "%s not set — a random value is generated at every boot, so signed "
+            "unsubscribe links, PDF-gate tokens and in-flight OAuth logins all "
+            "break on each restart (and sessions do not survive it). Set them to "
+            "long random strings." % " and ".join(missing))
+    return out
 
 # Content fingerprint for the stylesheet so every HTML page can cache-bust its
 # /style.css link —— new deploys reflect in the browser immediately (the file is
@@ -751,6 +860,7 @@ _AUTOSEND_LIMIT = int((os.environ.get("AUTOSEND_LIMIT") or "0") or 0) \
 _AUTOSEND_LAST_KEY = "autosend.last"  # "YYYY-MM-DD:HH" marker so a slot runs once/day
 AUTOSEND_STATE_KEY = "autosend.state"  # json: {status,sent,last_run,last_status,next_run,errors}
 _PRICEDROP_STATE_KEY = "pricedrop.state"  # json progress for the background scraper
+_PRICEDROP_SEND_KEY = "pricedrop.send"    # json progress for the background drop-email push
 _PRICEDROP_ASIN_TIMEOUT = 35.0  # per-ASIN fetch budget; a stuck Amazon
 # call is skipped so one bad ASIN can never stall the whole scan
 SOCIAL_PEAK_SLOTS = (8, 12, 19)  # high-engagement schedule hours (morning/lunch/evening)
@@ -760,8 +870,64 @@ _WEEKLYDIGEST_DAY = 1  # ISO weekday the weekly money email goes out (1=Monday)
 _WEEKLYDIGEST_HOUR = 9  # UTC hour of day it fires
 _WEEKLYDIGEST_AUTOPRUNE_KEY = "weeklydigest.autoprune"  # "0" to disable auto-pause
 _WEEKLYDIGEST_PRUNED_KEY = "weeklydigest.pruned"       # JSON {keyword_lower: iso_date}
+_SOCIAL_PUBLISH_ALL_KEY = "social.publish_all"  # json progress for publish-all
 _WD_MV_PIN_KEY = "weeklydigest.mv.%s"       # JSON {sid: variant} — permanent A/B pin
 _WD_MV_OPEN_IDX = 99                        # digest open-pixel/clicks resolve to this idx
+
+# Long-running jobs persist `running: true` so the admin page can poll progress.
+# That flag lives in sqlite, so a deploy, crash or restart in the middle of a run
+# leaves it set with no thread behind it — every later POST then answers
+# `{"started": false}` forever and the button is dead until someone edits the
+# database by hand. Each run is tagged with the boot id of the process that
+# started it; a run owned by any other process is dead by definition, because
+# the thread that owned it died with that process.
+_BOOT_ID = secrets.token_hex(8)
+_ORPHANED_RUN_KEYS = (_PRICEDROP_STATE_KEY, _PRICEDROP_SEND_KEY,
+                      _SOCIAL_PUBLISH_ALL_KEY, _WEEKLYDIGEST_STATE_KEY)
+
+
+def _run_state(raw):
+    """Parse a persisted run-state blob, treating a `running` flag owned by a
+    previous boot as not running."""
+    try:
+        data = json.loads(raw or "{}") or {}
+    except Exception:
+        data = {}
+    if data.get("running") and data.get("owner") != _BOOT_ID:
+        data["running"] = False
+        if data.get("status") in ("scanning", "sending", "publishing", "running"):
+            data["status"] = "interrupted"
+    return data
+
+
+def _clear_orphaned_runs():
+    """Startup sweep: flip any run left `running` by a previous process to
+    `interrupted` so the UI offers the button again instead of spinning
+    forever. Best-effort; a failure here only costs a stuck button."""
+    cleared = []
+    for key in _ORPHANED_RUN_KEYS:
+        try:
+            raw = _get_setting(key, "{}") or "{}"
+            try:
+                stored = json.loads(raw) or {}
+            except Exception:
+                stored = {}
+            # Judge the stored value, not the normalized one: _run_state has
+            # already rewritten `running`, so checking it here would see a
+            # healthy run and skip the write-back.
+            if not stored.get("running") or stored.get("owner") == _BOOT_ID:
+                continue
+            data = dict(stored)
+            data["running"] = False
+            data["status"] = "interrupted"
+            _set_setting(key, json.dumps(data))
+            cleared.append(key)
+        except Exception:
+            continue
+    if cleared:
+        print("recovered %d interrupted background run(s) from a previous "
+              "process: %s" % (len(cleared), ", ".join(cleared)))
+    return cleared
 
 
 def _weeklydigest_cfg():
@@ -956,6 +1122,8 @@ _lock = threading.Lock()
 
 _SOCIAL_FLUSH_ACTIVE = [0]  # in-process flag: >0 while a delivery flush is in flight
 _PRICEDROP_RUN_LOCK = threading.Lock()
+_PRICEDROP_SEND_LOCK = threading.Lock()
+_SOCIAL_PUBLISH_ALL_LOCK = threading.Lock()
 
 # --- niche data refresh -------------------------------------------------------
 # Manual refresh re-mines one/all saved niches so prices, ratings and stock
@@ -1188,9 +1356,9 @@ def _pricedrop_scan(rows, min_pct):
                 error = f"skipped {asin}: {fur_e[:120]}"
             checked += 1
             _set_setting(_PRICEDROP_STATE_KEY, json.dumps({
-                "running": True, "status": "scanning", "checked": checked,
-                "total": len(rows), "drops": [], "last_run": "",
-                "error": error}))
+                "running": True, "owner": _BOOT_ID, "status": "scanning",
+                "checked": checked, "total": len(rows), "drops": [],
+                "last_run": "", "error": error}))
         pool.shutdown(wait=False, cancel_futures=True)
     except Exception as e:
         error = str(e)[:160]
@@ -1303,10 +1471,7 @@ def _pricedrop_auto_loop():
         try:
             if _get_setting("pricedrop.auto", "1") != "1":
                 continue
-            try:
-                data = json.loads(_get_setting(_PRICEDROP_STATE_KEY, "{}") or "{}") or {}
-            except Exception:
-                data = {}
+            data = _run_state(_get_setting(_PRICEDROP_STATE_KEY, "{}"))
             if data.get("running"):
                 continue
             hb = _HEARTBEATS.get("pricedrop-auto") or {}
@@ -1317,8 +1482,9 @@ def _pricedrop_auto_loop():
                 _beat("pricedrop-auto", True)
                 continue
             _set_setting(_PRICEDROP_STATE_KEY, json.dumps({
-                "running": True, "status": "scanning", "checked": 0,
-                "total": len(rows), "drops": [], "last_run": "", "error": ""}))
+                "running": True, "owner": _BOOT_ID, "status": "scanning",
+                "checked": 0, "total": len(rows), "drops": [],
+                "last_run": "", "error": ""}))
             threading.Thread(
                 target=_pricedrop_scan,
                 args=(rows, pricedrop.DEFAULT_MIN_DROP_PCT), daemon=True).start()
@@ -1917,6 +2083,41 @@ def _get_setting(key, default=""):
     except Exception:
         return default
     return row["value"] if row else default
+
+
+_HOLDS_CACHE = {"key": None, "at": 0.0, "val": frozenset()}
+
+
+def _consolidation_holds(max_age=60.0):
+    """Slugs parked out of the index by topical consolidation.
+
+    50 niche URLs were competing for roughly 12 distinct search intents
+    (singular/plural splits, "for the bedroom"/"for the classroom" variants of
+    one product). Google indexed all of them and ranked none. Consolidation
+    keeps every page live for visitors but marks the losing variants noindex and
+    drops them from the sitemap, so authority concentrates on one page per
+    intent. Fully reversible: clear the setting and everything is indexable
+    again.
+
+    Cached briefly — this is read on every /n/ render and the write path is
+    rare, so a 60s staleness window is a good trade.
+    """
+    key = "seo.consolidation.holds"
+    now = time.time()
+    if _HOLDS_CACHE["key"] == key and now - _HOLDS_CACHE["at"] < max_age:
+        return _HOLDS_CACHE["val"]
+    raw = _get_setting(key, "")
+    val = frozenset(s.strip() for s in raw.split(",") if s.strip())
+    _HOLDS_CACHE.update({"key": key, "at": now, "val": val})
+    return val
+
+
+def _set_consolidation_holds(slugs):
+    """Replace the hold set. Returns the normalised set that was stored."""
+    val = sorted({str(s or "").strip() for s in (slugs or []) if str(s or "").strip()})
+    _set_setting("seo.consolidation.holds", ",".join(val))
+    _HOLDS_CACHE.update({"key": None, "at": 0.0, "val": frozenset()})
+    return frozenset(val)
 
 
 def _set_setting(key, value):
@@ -3103,15 +3304,54 @@ _db_schema_ready = False
 
 
 def _connect_db():
+    """Open a tuned connection to the app database.
+
+    busy_timeout is set first and on its own: a locked database must still make
+    this connection *wait* for the writer instead of failing on the spot, and
+    when it used to share a try block with the journal-mode PRAGMA a failure
+    there skipped it entirely. Journal mode is a persistent, file-level property
+    and is converted once at schema time by _ensure_wal(), not on every connect.
+    """
     conn = sqlite3.connect(DB, timeout=15)
     conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=15000")
-        conn.execute("PRAGMA synchronous=NORMAL")
-    except sqlite3.Error:
-        pass
+    for pragma in ("PRAGMA busy_timeout=15000", "PRAGMA synchronous=NORMAL"):
+        try:
+            conn.execute(pragma)
+        except sqlite3.Error:
+            pass
     return conn
+
+
+def _db_journal(conn):
+    """Journal mode currently in force for `conn`'s database, lowercased."""
+    try:
+        row = conn.execute("PRAGMA journal_mode").fetchone()
+        return str(row[0]).lower() if row else ""
+    except sqlite3.Error:
+        return ""
+
+
+def _ensure_wal(conn, retries=5):
+    """Put the database file into WAL so readers never block the writer.
+
+    journal_mode is persistent, so this is a one-time conversion per file. It
+    still needs retries: converting while some other connection holds a read
+    lock fails with 'database is locked', and swallowing that failure is what
+    left the shipped database in rollback-journal mode -- where any reader
+    blocks writers and the site returns 500s under normal concurrent load.
+    """
+    for attempt in range(retries):
+        if _db_journal(conn) == "wal":
+            return True
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.Error:
+            pass
+        if _db_journal(conn) == "wal":
+            return True
+        if attempt + 1 < retries:
+            time.sleep(0.2 * (attempt + 1))
+    return False
 
 
 def _db():
@@ -3119,19 +3359,19 @@ def _db():
     with _DB_SCHEMA_LOCK:
         if _db_schema_ready:
             return _connect_db()
+        _seed_db_once(DB)
         conn = _connect_db()
+        if not _ensure_wal(conn):
+            print("WARNING: %s is still in %r journal mode; concurrent writes "
+                  "can fail with 'database is locked'. Close every other "
+                  "process holding it and restart."
+                  % (DB, _db_journal(conn) or "unknown"))
         _ensure_db_schema(conn)
         _db_schema_ready = True
         return conn
 
 
 def _ensure_db_schema(conn):
-    conn = sqlite3.connect(DB, timeout=15)
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-    except sqlite3.Error:
-        pass
     conn.execute("""CREATE TABLE IF NOT EXISTS niches (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         keyword TEXT NOT NULL,
@@ -3641,12 +3881,37 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "pstore"
     sys_version = ""
 
+    # HTTP/1.1 keeps the connection open between requests. Without this,
+    # BaseHTTPRequestHandler defaults to HTTP/1.0 and answers every single
+    # request with `Connection: close`, so a page with six subresources pays
+    # seven full TCP+TLS handshakes. On a Render free instance a TLS handshake
+    # measured ~0.7-1.9s, so that alone added seconds of pure latency to every
+    # page view. Requires every response to carry an accurate Content-Length
+    # (see _send / _redirect helpers below).
+    protocol_version = "HTTP/1.1"
+    # Reap idle keep-alive connections so a client that walks away does not pin
+    # a worker thread forever. Generous enough for a large /admin/backup SQL
+    # dump or a PDF download to finish writing on a slow link.
+    timeout = 65
+
     def log_message(self, *a):
         pass
+
+    def parse_request(self):
+        """Reset per-response state. One handler instance now serves many
+        requests over a keep-alive connection, so anything cached for the
+        previous response must be cleared or the next response reuses it."""
+        self._resp_started = False
+        self._resp_early = []
+        self._resp_code = None
+        self._resp_len = False
+        return BaseHTTPRequestHandler.parse_request(self)
 
     def send_header(self, key, value):
         """Defer headers until the status line is written, so callers may set
         cookies before send_response() without corrupting the response."""
+        if str(key).lower() == "content-length":
+            self._resp_len = True
         if not getattr(self, "_resp_started", False):
             if not hasattr(self, "_resp_early"):
                 self._resp_early = []
@@ -3657,6 +3922,7 @@ class Handler(BaseHTTPRequestHandler):
     def send_response(self, code, message=None):
         if not getattr(self, "_resp_started", False):
             self._resp_started = True
+            self._resp_code = code
             super().send_response(code, message)
             for k, v in getattr(self, "_resp_early", []):
                 super().send_header(k, v)
@@ -3665,7 +3931,12 @@ class Handler(BaseHTTPRequestHandler):
         super().send_response(code, message)
 
     def _is_secure(self):
-        return (self.headers.get("X-Forwarded-Proto") or "http").lower() == "https"
+        # self.headers does not exist yet when parse_request() rejects a
+        # malformed request line and send_error() calls end_headers().
+        headers = getattr(self, "headers", None)
+        if headers is None:
+            return False
+        return (headers.get("X-Forwarded-Proto") or "http").lower() == "https"
 
     def end_headers(self):
         """Security headers on every response: clickjacking, MIME sniffing,
@@ -3682,6 +3953,17 @@ class Handler(BaseHTTPRequestHandler):
                          "geolocation=(), microphone=(), camera=(), payment=()")
         if self._is_secure():
             self.send_header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        # HTTP/1.1 framing safety net. Without Content-Length (and without
+        # chunking) a client must read until the socket closes, so a keep-alive
+        # response that forgot its length hangs the browser for the full socket
+        # timeout. Every real response path sets its own length; this catches
+        # any bodyless response that slips through, and shouts so a genuine
+        # mistake is visible in the logs instead of silently hanging a client.
+        if not self._resp_len and self._resp_code not in (204, 304):
+            print("[pstore] WARNING %s %s sent no Content-Length; framing as "
+                  "empty. Use _send()/_send_empty() so the body is delimited."
+                  % (self._resp_code, getattr(self, "path", "?")))
+            self.send_header("Content-Length", "0")
         super().end_headers()
 
     def _client_ip(self):
@@ -3723,6 +4005,56 @@ class Handler(BaseHTTPRequestHandler):
         if not start:
             return None
         return (time.time() - start) * 1000.0
+
+    def _send_500(self, exc, path=None):
+        """Report an unhandled handler exception as a 500, safely.
+
+        Two things went wrong when this was a bare `self._send(500, ...)` in the
+        dispatcher's except clause:
+
+        1. A visitor who navigates away mid-response (or a crawler that gives up
+           on a slow share-card PNG) leaves the socket dead, so the first write
+           raised ConnectionResetError. That was caught as a generic error and
+           then we tried to send a 500 down the same dead socket, which raised
+           again and dumped a second traceback for a request that had actually
+           been produced fine.
+        2. The raw exception text was returned to the client, leaking SQL and
+           filesystem paths to anonymous visitors on public pages.
+
+        Now a disconnected client is a silent no-op, the traceback goes to the
+        server log, and the detail is only echoed back to a signed-in operator.
+        """
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+            return None
+        traceback.print_exc()
+        detail = str(exc)[:300]
+        try:
+            authed = bool(self._authed())
+        except Exception:
+            authed = False
+        body = ({"error": detail} if authed
+                else {"error": "internal error",
+                      "path": path or getattr(self, "path", "")})
+        try:
+            return self._send(500, body)
+        except (BrokenPipeError, ConnectionResetError):
+            return None
+
+    def _send_empty(self, code, location=None, extra=()):
+        """Bodyless response (redirect or bare 404).
+
+        Under HTTP/1.1 a response with no Content-Length and no chunked
+        encoding is delimited by connection close, so the client cannot reuse
+        the connection. Sending an explicit Content-Length: 0 is what keeps
+        keep-alive working for every redirect on the site."""
+        self.send_response(code)
+        if location is not None:
+            self.send_header("Location", location)
+        for k, v in extra:
+            self.send_header(k, v)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return None
 
     def _send(self, code, body, ctype="application/json; charset=utf-8"):
         _tally_api(getattr(self, "path", ""), code, self._latency())
@@ -4077,12 +4409,29 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _function_for_path(path):
-        """Function slug covering `path`, or None when no function owns it."""
+        """Function slug covering `path`, or None when no function owns it.
+
+        A configured prefix owns the path itself plus its nested children, but
+        only across a segment boundary: "/api/social" covers "/api/social/blitz"
+        while "/admin/seo" does not swallow "/admin/seoengines" (which keeps its
+        own entry). A prefix that already ends in "/" (e.g. "/api/ai/") matches
+        any remainder. The longest matching prefix wins, so a specific entry
+        always beats a broader one. Unlisted paths stay owner-only.
+        """
+        best = None
+        best_len = 0
         for fn, prefixes in FUNCTION_PATHS.items():
             for p in prefixes:
-                if path == p or (p.endswith("/") and path.startswith(p)):
+                if path == p:
                     return fn
-        return None
+                if not path.startswith(p):
+                    continue
+                if not (p.endswith("/") or path[len(p):].startswith("/")):
+                    continue  # "/app.js" must not claim "/app.js.map"
+                if len(p) > best_len:
+                    best = fn
+                    best_len = len(p)
+        return best
 
     def _function_denied(self, path):
         """True when this session must not reach `path`. Public paths and the
@@ -4092,10 +4441,10 @@ class Handler(BaseHTTPRequestHandler):
                     "/admin/verify", "/admin/resend", "/admin/pending",
                     "/admin/forgot-password", "/admin/reset-password"):
             return False
-        if path == "/api/me":  # self-service profile for any signed-in team member
-            return not (self._authed() and self._session_uid() is not None)
         if self._session_uid() is None:  # owner: everything
             return False
+        if path == "/api/me":  # self-service profile for any signed-in team member
+            return not (self._authed() and self._session_uid() is not None)
         fn = self._function_for_path(path)
         if fn is None:
             return True
@@ -4166,21 +4515,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def _redirect_login(self, next_path):
         loc = "/admin/login?next=" + urllib.parse.quote(next_path or "/dashboard", safe="")
-        self.send_response(302)
-        self.send_header("Location", loc)
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        return None
+        return self._send_empty(302, loc, (("Cache-Control", "no-store"),))
 
     def _redirect_path(self, url):
         url = (url or "/dashboard")
         if not (url.startswith("/") and not url.startswith("//")):
             url = "/dashboard"
-        self.send_response(302)
-        self.send_header("Location", url)
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        return None
+        return self._send_empty(302, url, (("Cache-Control", "no-store"),))
 
     def _login_page(self, error=None, oauth_error=None):
         err = ('<p class="msg" style="color:#d64545">%s</p>' % seo._clean(error or oauth_error)) if (error or oauth_error) else ""
@@ -4339,12 +4680,8 @@ $("em").addEventListener("keydown", e => {{ if (e.key === "Enter") doLogin(); }}
 
     def _logout(self):
         self._drop_session(self._cookie_token())
-        self.send_response(302)
-        self.send_header("Location", "/admin/login")
         self._set_cookie("x", max_age=0)
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        return None
+        return self._send_empty(302, "/admin/login", (("Cache-Control", "no-store"),))
 
     # --------------------------------------------------- accounts & verification
     @staticmethod
@@ -4617,19 +4954,11 @@ for (const id of ["nm","em","pw","pw2"])
             # the user is allowed (pending/onboarding page until roles are granted).
             sess = self._new_session(uid)
             loc = "/dashboard" if "dashboard" in _user_functions(uid=uid) else "/admin/pending?welcome=1"
-            self.send_response(302)
             self._set_cookie(sess)
-            self.send_header("Location", loc)
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            return None
+            return self._send_empty(302, loc, (("Cache-Control", "no-store"),))
         else:
             loc = "/admin/login?verified=1"
-        self.send_response(302)
-        self.send_header("Location", loc)
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        return None
+        return self._send_empty(302, loc, (("Cache-Control", "no-store"),))
 
     def _resend_post(self):
         key = "resend|" + security.client_key(self.headers, self._client_ip())
@@ -4951,11 +5280,8 @@ for (const id of ["pw","pw2"]) $(id).addEventListener("keydown", e => {{ if (e.k
         """Dedicated team-member dashboard — profile, roles, tools, sign out."""
         user = self._current_user()
         if not user:
-            self.send_response(302)
-            self.send_header("Location", "/admin/login?next=/dashboard")
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            return None
+            return self._send_empty(302, "/admin/login?next=/dashboard",
+                                    (("Cache-Control", "no-store"),))
         name = user.get("name") or user.get("email", "")
         email = user.get("email", "")
         status = user.get("status", "")
@@ -5309,12 +5635,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             url = oauth.authorize_url(provider, state)
             if not url:
                 return self._send(404, {"error": "oauth provider not configured"})
-            self.send_response(302)
             self._set_cookie(state, max_age=600, cookie=_OAUTH_COOKIE, path="/admin/oauth")
-            self.send_header("Location", url)
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            return None
+            return self._send_empty(302, url, (("Cache-Control", "no-store"),))
         # Callback: verify state, exchange the code, grant only to the admin mail.
         code = (q.get("code") or [""])[0]
         state = (q.get("state") or [""])[0]
@@ -5330,12 +5652,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         if not email or email != _ADMIN_EMAIL.lower():
             return self._login_page(oauth_error="This account is not authorized to administer pstore.")
         tok = self._new_session()
-        self.send_response(302)
         self._set_cookie(tok)
-        self.send_header("Location", "/dashboard")
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        return None
+        return self._send_empty(302, "/dashboard", (("Cache-Control", "no-store"),))
 
     def _site_base(self):
         """Origin used for links inside emails. PSTORE_URL always wins; without
@@ -5346,12 +5664,6 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         if not host or host.startswith(("\\", "/")):
             return ""
         return "%s://%s" % (scheme, host)
-
-    def _latency(self):
-        start = getattr(self, "_req_start", None)
-        if not start:
-            return None
-        return (time.time() - start) * 1000.0
 
     def do_GET(self):
         self._req_start = time.time()
@@ -5401,11 +5713,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             clean = path.rstrip("/")
             if parsed.query:
                 clean += "?" + parsed.query
-            self.send_response(301)
-            self.send_header("Location", clean)
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            return None
+            return self._send_empty(301, clean, (("Cache-Control", "no-store"),))
         try:
             # public auth flow — login/logout/register/verify/reset never need a session
             if path == "/admin/login":
@@ -5633,6 +5941,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._seo_snippet(path[len("/seo/snippet/"):])
             if path == "/api/social":
                 return self._social_api(q)
+            if path == "/api/social/publish-all/state":
+                return self._social_publish_all_progress()
             if path == "/api/socialengines":
                 return self._socialengines_api(q)
             if path == "/api/social/drip":
@@ -5692,7 +6002,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             if path == "/api/mine":
                 return self._mine(q)
             if path == "/api/niches":
-                return self._list_niches()
+                return self._list_niches(q)
             if path == "/api/refresh/status":
                 return self._refresh_status()
             if path == "/api/subscribers":
@@ -5721,7 +6031,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             else:
                 self._send(404, seo.render_404(), "text/html; charset=utf-8")
         except Exception as e:
-            self._send(500, {"error": str(e)})
+            self._send_500(e, path)
 
     def do_POST(self):
         self._req_start = time.time()
@@ -5747,6 +6057,11 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
 
     def _dispatch_post(self):
         parsed = urllib.parse.urlsplit(self.path)
+        # POST bodies arrive as JSON, but the read-only list endpoints that are
+        # also reachable by POST (e.g. /api/captions, /api/subjects) take their
+        # filters from the query string. Without this they raise NameError and
+        # every caller gets a 500.
+        q = urllib.parse.parse_qs(parsed.query)
         try:
             if parsed.path == "/admin/login":
                 return self._login_post()
@@ -5877,7 +6192,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             if parsed.path == "/api/pricedrop/run":
                 return self._pricedrop_run()
             if parsed.path == "/api/pricedrop/send":
-                return self._send(200, self._pricedrop_send())
+                return self._pricedrop_send_start()
             if parsed.path == "/api/pricedrop/config":
                 return self._pricedrop_config()
             if parsed.path == "/api/pricedrop/state":
@@ -5934,7 +6249,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._suggest_build_api()
             self._send(404, {"error": "not found"})
         except Exception as e:
-            self._send(500, {"error": str(e)})
+            self._send_500(e, parsed.path)
 
     def do_PUT(self):
         self._send(405, {"error": "method not allowed"})
@@ -6432,18 +6747,21 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
 
     def _save_niche(self):
         body = self._body()
+        keyword = str(body.get("keyword") or "").strip()
+        if not keyword:
+            return self._send(400, {"error": "keyword required"})
         products = json.dumps(body.get("products") or [])
         with _lock:
             conn = _db()
             cur = conn.execute(
                 "INSERT INTO niches (keyword, market, score, saturation, products) VALUES (?,?,?,?,?)",
-                (body.get("keyword"), amazon.MARKET, body.get("score"), body.get("saturation"), products))
+                (keyword, amazon.MARKET, body.get("score"), body.get("saturation"), products))
             conn.commit()
             nid = cur.lastrowid
             conn.close()
-        self._push_indexnow(body.get("keyword"))
+        self._push_indexnow(keyword)
         try:
-            _warm_og_png(seo._slugify(body.get("keyword") or ""))
+            _warm_og_png(seo._slugify(keyword))
         except Exception:
             pass
         # auto-build long-tail pages under the fresh niche so the plain dashboard
@@ -6453,7 +6771,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         topics_created = []
         if flag == "" or str(flag).strip().lower() in ("1", "on", "true", "yes"):
             try:
-                slug = seo._slugify(body.get("keyword"))
+                slug = seo._slugify(keyword)
                 topics_created = self._generate_topics(slug, 6)
             except Exception:
                 topics_created = []
@@ -6461,7 +6779,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         # pin queued at the next peak slot right away (gated by the drip +
         # token), instead of waiting for the next daily sweep.
         try:
-            _spawn_first_pin(body.get("keyword"), body.get("products"))
+            _spawn_first_pin(keyword, body.get("products"))
         except Exception:
             pass
         _bust_admin_data_cache()
@@ -6502,10 +6820,35 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         except Exception:
             pass
 
-    def _list_niches(self):
+    def _list_niches(self, q=None):
+        """Saved niches, paginated.
+
+        `limit`/`offset` are honoured (bounded) and `total` is always returned so
+        a caller can tell "end of data" from "page 1 happened to look full".
+        Previously this was a hardcoded `LIMIT 50` with the query string
+        discarded, so `?offset=50` silently returned the *same* first 50 rows
+        again — which made the catalog look like 50 niches and broke every
+        crawler/inventory tool built on top of it.
+        """
+        q = q or {}
+        limit = _clamp_int((q.get("limit") or [""])[0], 50, 1, 500, 50)
+        offset = _clamp_int((q.get("offset") or [""])[0], 0, 0, 10 ** 7, 0)
+        keyword = (q.get("q") or [""])[0].strip()
         with _lock:
             conn = _db()
-            rows = conn.execute("SELECT * FROM niches ORDER BY id DESC LIMIT 50").fetchall()
+            if keyword:
+                like = "%" + keyword.replace("%", r"\%") + "%"
+                total = conn.execute(
+                    "SELECT COUNT(*) c FROM niches WHERE keyword LIKE ? ESCAPE '\\'",
+                    (like,)).fetchone()["c"]
+                rows = conn.execute(
+                    "SELECT * FROM niches WHERE keyword LIKE ? ESCAPE '\\' "
+                    "ORDER BY id DESC LIMIT ? OFFSET ?", (like, limit, offset)).fetchall()
+            else:
+                total = conn.execute("SELECT COUNT(*) c FROM niches").fetchone()["c"]
+                rows = conn.execute(
+                    "SELECT * FROM niches ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (limit, offset)).fetchall()
             conn.close()
         out = []
         for r in rows:
@@ -6516,7 +6859,9 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             except Exception:
                 d["slug"] = ""
             out.append(d)
-        return self._send(200, {"niches": out})
+        return self._send(200, {"niches": out, "total": total,
+                                "limit": limit, "offset": offset,
+                                "has_more": offset + len(out) < total})
 
     # -------------------------------------------------- Niche data refresh
     def _refresh_status(self):
@@ -6749,9 +7094,12 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             conn.close()
         live = set()
         seen = set()
+        holds = _consolidation_holds()
         for r in nrows:
             # Only indexable niches belong in the sitemap — a niche without
-            # products renders noindex and must never be listed.
+            # products renders noindex and must never be listed. A slug under
+            # topical consolidation also serves noindex, so listing it would
+            # contradict the page we hand the crawler.
             prods = (r["products"] or "").strip()
             if not prods or prods in ("[]", "{}"):
                 continue
@@ -6759,6 +7107,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 kw = seo._slugify(r["keyword"])
             except Exception:
                 kw = "niche"
+            if kw in holds:
+                continue
             # Two keyword rows may slugify to the same path (e.g. "back pain"
             # vs "back-pain"); list each URL once — Google flags duplicates.
             if kw in seen:
@@ -7453,7 +7803,8 @@ document.addEventListener("click", function (e) {{
                                                  edge=cacheable)
                     res = seo.render_niche(n["keyword"], n, saved_niches=all_niches,
                                            ab_headline=headline, ab_variant=vno,
-                                           style_pack=template.for_page(n["keyword"], slug))
+                                           style_pack=template.for_page(n["keyword"], slug),
+                                           hold=slug in _consolidation_holds())
                     if aware:
                         _render_cache_put(cache_key, res, ttl)
                         return self._send_cached(res, "text/html; charset=utf-8", ttl,
@@ -7466,11 +7817,7 @@ document.addEventListener("click", function (e) {{
 
     def _go(self, asin):
         target, market = market_engine.expand_go(asin)
-        self.send_response(302)
-        self.send_header("Location", target)
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        return None
+        return self._send_empty(302, target, (("Cache-Control", "no-store"),))
 
     def _email_click(self, token):
         """Click-tracked email outbound: validates the signed token, records a
@@ -7479,9 +7826,7 @@ document.addEventListener("click", function (e) {{
         import urllib.parse as _up
         payload = mailer.decode_track_token(token, scope="e")
         if not payload:
-            self.send_response(404)
-            self.end_headers()
-            return None
+            return self._send_empty(404)
         kw, asin, sid, idx = (list(payload) + ["", "", "", ""])[:4]
         try:
             asin = asin.upper()
@@ -7493,14 +7838,8 @@ document.addEventListener("click", function (e) {{
             pass
         target = amazon.affiliate_url(asin) if asin else ""
         if not target:
-            self.send_response(404)
-            self.end_headers()
-            return None
-        self.send_response(302)
-        self.send_header("Location", target)
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        return None
+            return self._send_empty(404)
+        return self._send_empty(302, target, (("Cache-Control", "no-store"),))
 
     def _email_open(self, token):
         """Open-tracking endpoint (1x1 transparent GIF). Records that this
@@ -7590,6 +7929,13 @@ document.addEventListener("click", function (e) {{
                 })
             finally:
                 conn.close()
+        # /lp/<slug> shipped with a single onward link (to /n/<slug>), making
+        # every landing page a crawl dead end. Pass siblings so the renderer can
+        # hand readers (and crawlers) into the ranking pages they came from.
+        ctx["related"] = [
+            {"slug": seo._slugify(n["keyword"]), "keyword": n["keyword"]}
+            for n in editorial.related_niches(niche["keyword"], self._all_niches())
+        ]
         return cms_render.render_landing_page_page(
             ctx, niche["keyword"], site_url=seo.BASE_URL)
 
@@ -8034,13 +8380,9 @@ document.addEventListener("click", function (e) {{
         if not callback:
             state = security.make_token("oauth:pinterest", 600)
             url = oauth.pinterest_authorize_url(cid, redir, state)
-            self.send_response(302)
             self._set_cookie(state, max_age=600, cookie=_OAUTH_COOKIE,
                              path="/admin/oauth")
-            self.send_header("Location", url)
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            return None
+            return self._send_empty(302, url, (("Cache-Control", "no-store"),))
         code = (q.get("code") or [""])[0]
         state = (q.get("state") or [""])[0]
         expect = self._cookie_token(_OAUTH_COOKIE)
@@ -8076,11 +8418,7 @@ document.addEventListener("click", function (e) {{
         return go("Pinterest connected")
 
     def _redirect(self, location):
-        self.send_response(302)
-        self.send_header("Location", location)
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        return None
+        return self._send_empty(302, location, (("Cache-Control", "no-store"),))
 
     def _admin_golive(self, q):
         """Owner go-live checklist — the four knobs that turn the default demo
@@ -9921,12 +10259,20 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
         with _lock:
             conn = _db()
             rows = conn.execute(
-                "SELECT platform, utm_content FROM social_posts WHERE lower(slug)=?",
-                (slug,)).fetchall()
+                "SELECT platform, utm_content, status FROM social_posts "
+                "WHERE lower(slug)=? ORDER BY id", (slug,)).fetchall()
             conn.close()
+        # keep: the stable code per platform, so a re-publish flips the existing
+        # post's status instead of forking a second tracked link (oldest row
+        # wins, because that is the one already carrying clicks).
         keep = {}
+        # live: only codes that actually resolve to a page right now, i.e. the
+        # statuses /social/<slug>/<code> serves. Anything else would 404.
+        live = set()
         for r in rows:
             keep.setdefault(r["platform"], r["utm_content"])
+            if (r["status"] or "") in ("published", "scheduled"):
+                live.add(r["utm_content"])
         out = []
         for kit in kits:
             code = keep.get(kit["platform"])
@@ -9947,14 +10293,15 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
                     k2["link"] = social.track_link(seo.BASE_URL, slug,
                                                    k2["platform"], vcode)
                     k2["caption_variant"] = v["variant"]
+                    k2["has_page"] = vcode in live
                     out.append(k2)
-            elif variants:
+                continue
+            if variants:
                 # Single caption variant: keep the one stable post, live body swap.
                 kit["body"] = variants[0]["caption"]
                 kit["caption_variant"] = variants[0]["variant"]
-                out.append(kit)
-            else:
-                out.append(kit)
+            kit["has_page"] = kit["utm_content"] in live
+            out.append(kit)
         return out
 
     def _caption_variants(self, slug, platform):
@@ -10440,25 +10787,94 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
                 "keyword": keyword}
 
     def _social_publish_all(self):
-        """One click to cover every saved niche: build + upsert the published kit
-        for every platform (best effort; a niche without a top pick is skipped)."""
-        niches = [n["keyword"] for n in self._all_niches()]
+        """POST /api/social/publish-all — cover every saved niche: build + upsert
+        the published kit for every platform (best effort; a niche without a top
+        pick is skipped).
+
+        The work fans out over every niche x every platform and takes well over a
+        minute on a real account, which used to hold the request thread for that
+        whole time and burn a slot in the server's concurrency semaphore. It now
+        runs in a background thread, mirroring the /admin/social blitz button and
+        the pricedrop scan: the POST returns at once and the page polls
+        /api/social/publish-all/state for the per-niche progress."""
+        with _SOCIAL_PUBLISH_ALL_LOCK:
+            state = self._social_publish_all_state()
+            if state["running"]:
+                return self._send(200, {"ok": True, "started": False,
+                                        "running": True, "state": state})
+            _set_setting(_SOCIAL_PUBLISH_ALL_KEY, json.dumps({
+                "running": True, "owner": _BOOT_ID, "status": "publishing",
+                "checked": 0, "total": 0, "published": 0, "native": 0,
+                "skipped": 0, "per": []}))
+        threading.Thread(target=self._social_publish_all_worker,
+                         daemon=True).start()
+        return self._send(200, {"ok": True, "started": True, "running": True,
+                                "state": self._social_publish_all_state()})
+
+    def _social_publish_all_state(self):
+        data = _run_state(_get_setting(_SOCIAL_PUBLISH_ALL_KEY, "{}"))
+        state = {"running": bool(data.get("running")),
+                 "status": data.get("status", "idle"),
+                 "checked": int(data.get("checked", 0)),
+                 "total": int(data.get("total", 0)),
+                 "published": int(data.get("published", 0)),
+                 "native": int(data.get("native", 0)),
+                 "skipped": int(data.get("skipped", 0)),
+                 "niches": int(data.get("total", 0)),
+                 "per": data.get("per") or []}
+        if not state["running"] and state["status"] == "publishing":
+            state["status"] = "done"
+        return state
+
+    def _social_publish_all_worker(self):
+        """Background body of /api/social/publish-all. Never raises."""
+        # Pre-seed the accumulators: the finalizer below runs even when the very
+        # first statement throws, so these must be bound before the try block.
+        niches = []
         total = native = skipped = 0
         per = []
-        for kw in niches:
-            try:
-                data = self._social_publish_keyword(kw, "all")
-            except Exception:
-                data = None
-            if data is None:
-                per.append({"keyword": kw, "published": 0})
-                skipped += 1
-                continue
-            total += data["published"]
-            native += data["native"]
-            per.append({"keyword": kw, "published": data["published"]})
-        return self._send(200, {"ok": True, "niches": len(niches), "published": total,
-                                "native": native, "skipped": skipped, "per": per})
+        try:
+            niches = [n["keyword"] for n in self._all_niches()]
+            _set_setting(_SOCIAL_PUBLISH_ALL_KEY, json.dumps({
+                "running": True, "owner": _BOOT_ID, "status": "publishing",
+                "checked": 0, "total": len(niches), "published": 0,
+                "native": 0, "skipped": 0, "per": []}))
+            for kw in niches:
+                try:
+                    data = self._social_publish_keyword(kw, "all")
+                except Exception:
+                    data = None
+                if data is None:
+                    per.append({"keyword": kw, "published": 0})
+                    skipped += 1
+                else:
+                    total += data["published"]
+                    native += data["native"]
+                    per.append({"keyword": kw, "published": data["published"]})
+                _set_setting(_SOCIAL_PUBLISH_ALL_KEY, json.dumps({
+                    "running": True, "owner": _BOOT_ID, "status": "publishing",
+                    "checked": len(per), "total": len(niches),
+                    "published": total, "native": native, "skipped": skipped,
+                    "per": per}))
+            status, err = "done", ""
+        except Exception as exc:
+            status, err = "error", str(exc)[:200]
+        with _SOCIAL_PUBLISH_ALL_LOCK:
+            _set_setting(_SOCIAL_PUBLISH_ALL_KEY, json.dumps({
+                "running": False, "status": status, "checked": len(per),
+                "total": len(niches), "published": total, "native": native,
+                "skipped": skipped, "per": per, "error": err}))
+
+    def _social_publish_all_progress(self):
+        """GET /api/social/publish-all/state — poll target for the background
+        publish-all run started by POST /api/social/publish-all."""
+        st = self._social_publish_all_state()
+        return self._send(200, {"ok": True, "running": st["running"],
+                                "status": st["status"], "state": st,
+                                "published": st["published"],
+                                "niches": st["niches"],
+                                "native": st["native"],
+                                "skipped": st["skipped"]})
 
     def _social_pint_blitz(self):
         """Pin the newest niches: build + publish a Pinterest kit (with the shared
@@ -10781,6 +11197,18 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
                     "%s"
                     "</div>" % (seo._clean(kit["pin_image"]), seo._clean(kit["pin_image"]),
                                 seo._clean(keyword), variant_thumbs))
+            # Only link to a post page that actually resolves. A kit with no
+            # persisted published/scheduled row has no /social/<slug>/<code>
+            # page yet, so the old unconditional anchor was a guaranteed 404
+            # that also misled the operator into thinking the post was live.
+            if kit.get("has_page"):
+                view_live = (
+                    '<a class="btn ghost soc-view" target="_blank" rel="noopener" '
+                    'href="/social/%s/%s">View live ↗</a>'
+                    % (seo._clean(slug), seo._clean(kit["utm_content"])))
+            else:
+                view_live = ('<span class="hint">not published yet — '
+                             '"Publish now" or "Schedule" creates the page</span>')
             kit_cards.append(f"""<div class="soc-kit">
 <div class="soc-head">
   <div>
@@ -10796,7 +11224,7 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
 <button class="warm soc-pub" data-kw="{seo._clean(keyword)}" data-platform="{seo._clean(kit['platform'])}">Publish now</button>
 <button class="ghost soc-sched" data-kw="{seo._clean(keyword)}" data-platform="{seo._clean(kit['platform'])}">Schedule (24h)</button>
 <button class="ghost soc-copy">Copy post</button>
-<a class="btn ghost soc-view" target="_blank" rel="noopener" href="/social/{seo._clean(slug)}/{seo._clean(kit['utm_content'])}">View live ↗</a>
+{view_live}
 </div>
 </div>""")
         kit_html = "".join(kit_cards) if kit_cards else \
@@ -10969,11 +11397,23 @@ async function puball(){{
   $("flushout").textContent = "Publishing every niche…";
   const r = await fetch("/api/social/publish-all", {{method:"POST", headers:{{"Content-Type":"application/json"}}}});
   const d = await r.json().catch(()=>({{ok:false}}));
-  $("flushout").textContent = d && d.ok
-    ? "Published " + d.published + " post(s) across " + d.niches + " niche(s)" + (d.native ? " (" + d.native + " native)" : "") + "." + (d.skipped ? " " + d.skipped + " had no top pick." : "")
-    : "Publish-all failed.";
-  setTimeout(()=>location.reload(), 1500);
-}}
+  if(!d || !d.ok){{ $("flushout").textContent = "Publish-all failed."; return; }}
+  if(d.started === false){{ $("flushout").textContent = "Already running — waiting…"; }}
+  let tries=0;
+  const poll=async()=>{{
+    let st;try{{st=await (await fetch("/api/social/publish-all/state")).json();}}catch(e){{}}
+    const s=(st&&st.state)||null;
+    if(s){{ $("flushout").textContent = "Publishing… "+(s.checked||0)+"/"+(s.total||0)+" niches ("+(s.published||0)+" posts)"; }}
+    if(s && !s.running){{
+      $("flushout").textContent = (s.status==="error")
+        ? "Publish-all failed: "+(s.error||"unknown error")
+        : "Published "+(s.published||0)+" post(s) across "+(s.niches||0)+" niche(s)"+(s.native?" ("+s.native+" native)":"")+"."+(s.skipped?" "+s.skipped+" had no top pick.":"");
+      setTimeout(()=>location.reload(), 1500); return;
+    }}
+    if(tries++>900){{ $("flushout").textContent="Still running — refresh to see results."; return; }}
+    setTimeout(poll,2000);}};
+  poll();}}
+
 async function pint(){{
   $("flushout").textContent = "📌 Pinning fresh niches…";
   const r = await fetch("/api/social/pint", {{method:"POST", headers:{{"Content-Type":"application/json"}},
@@ -12215,10 +12655,11 @@ fresh();
                 self.send_response(200)
                 self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
                 self.send_header("Cache-Control", "public, max-age=3600")
+                self.send_header("Content-Length", str(len(svg)))
                 self.end_headers()
                 try:
                     self.wfile.write(svg)
-                except Exception:
+                except (BrokenPipeError, ConnectionResetError):
                     pass
                 return None
         return self._send(404, b"<html><body><p>Niche not found.</p></body></html>",
@@ -14534,6 +14975,8 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                              "last": hinfo.get("last") or ""})
 
         issues = []
+        for _w in _db_durability_warnings():
+            issues.append("Deployment: " + _w)
         for name, hinfo in healths.items():
             if hinfo["status"] == "error":
                 issues.append("%s is failing: %s" % (hinfo["label"],
@@ -14549,6 +14992,14 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             issues.append("SMTP not configured — email sends are refused (set SMTP_HOST/USER/PASSWORD)")
         if not ai.configured():
             issues.append("AI not configured — ebook/headline copy uses deterministic templates")
+        if not (amazon.AFFILIATE_TAG or _get_setting("paid.tag", os.environ.get("PSTORE_PAID_TAG", ""))):
+            # The single highest-value thing this site does, and it fails
+            # silently: untagged links still look perfect and earn nothing.
+            issues.append("No affiliate tag set — every Amazon link is rendering "
+                          "UNTAGGED and earns ZERO commission (set PSTORE_TAG)")
+        if not paapi.ready():
+            issues.append("PA-API not configured — prices fall back to scraping "
+                          "and can go stale (optional but recommended)")
         with _WEBHOOK_LOCK:
             wh_stats = dict(_WEBHOOK_STATS)
         if not (_SOCIAL_WEBHOOK or _get_setting("social.webhook")) and not native_keys:
@@ -15154,10 +15605,7 @@ database — no log parsing. If a card stays STALE, the worker has stopped beati
 
     # -------------------------------------------------------- weekly money digest
     def _weeklydigest_state(self):
-        try:
-            return json.loads(_get_setting(_WEEKLYDIGEST_STATE_KEY, "{}") or "{}") or {}
-        except Exception:
-            return {}
+        return _run_state(_get_setting(_WEEKLYDIGEST_STATE_KEY, "{}"))
 
     def _weeklydigest_api(self):
         state = self._weeklydigest_state()
@@ -15642,10 +16090,7 @@ mvLoad();"""
                                 "state": state, "drops": state.get("drops") or []})
 
     def _price_run_state(self):
-        try:
-            data = json.loads(_get_setting(_PRICEDROP_STATE_KEY, "{}") or "{}") or {}
-        except Exception:
-            data = {}
+        data = _run_state(_get_setting(_PRICEDROP_STATE_KEY, "{}"))
         state = {"running": bool(data.get("running")),
                  "status": data.get("status", "idle"),
                  "checked": int(data.get("checked", 0)),
@@ -15688,8 +16133,9 @@ mvLoad();"""
                                         "drops": [], "tracked": 0, "checked": 0,
                                         "error": "no saved niches to watch"})
             _set_setting(_PRICEDROP_STATE_KEY, json.dumps({
-                "running": True, "status": "scanning", "checked": 0,
-                "total": len(rows), "drops": [], "last_run": "", "error": ""}))
+                "running": True, "owner": _BOOT_ID, "status": "scanning",
+                "checked": 0, "total": len(rows), "drops": [],
+                "last_run": "", "error": ""}))
         threading.Thread(target=self._pricedrop_worker, args=(rows, min_pct),
                          daemon=True).start()
         return self._send(200, {"started": True, "running": True,
@@ -15722,6 +16168,7 @@ mvLoad();"""
             "interval_hours": _pricedrop_auto_hours(),
             "last_run": pd.get("last_run"),
             "state": pd,
+            "send": self._pricedrop_send_state(),
         })
 
     def _pricedrop_events_api(self):
@@ -15792,7 +16239,14 @@ mvLoad();"""
             "m.textContent='Checking + pushing\u2026';let r,d;"
             "try{r=await fetch('/api/pricedrop/send',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});d=await r.json();}"
             "catch(e){m.textContent='\u2717 Could not reach the server.';return;}\n"
-            "m.textContent=(r.ok?'\u2713 Emailed '+(d.sent||0)+' hot/converted leads':'')+' (already sent '+(d.already_sent||0)+')';}\n"
+            "if(!d||!d.ok){m.textContent='\\u2717 '+((d&&d.error)||'push failed')+'';return;}\n"
+            "let tries=0;\n"
+            "const poll=async()=>{let st;try{st=await (await fetch('/api/pricedrop/state')).json();}catch(e){}\n"
+            "const s=(st&&st.send)||null;\n"
+            "if(s&&!s.running){m.textContent=(s.status==='error')?'\\u2717 '+((s.error)||'push failed'):'\\u2713 Emailed '+(s.sent||0)+' hot/converted leads (already sent '+(s.already_sent||0)+')';return;}\n"
+            "if(tries++>900){m.textContent='Still running \\u2014 refresh to see results.';return;}\n"
+            "setTimeout(poll,2000);};\n"
+            "poll();}\n"
             "async function addEvent(){const m=document.querySelector('#ev-msg');m.textContent='Saving\u2026';\n"
             "const body=JSON.stringify({action:'add',name:document.querySelector('#ev-name').value,emoji:document.querySelector('#ev-emoji').value,start:document.querySelector('#ev-start').value,end:document.querySelector('#ev-end').value,hashtags:document.querySelector('#ev-tags').value});\n"
             "let r,d;try{r=await fetch('/api/pricedrop/events',{method:'POST',headers:{'Content-Type':'application/json'},body});d=await r.json();}\n"
@@ -16178,18 +16632,86 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
         return {"ok": True, "sent": sent, "errors": errors,
                 "already_sent": ready, "keyword": keyword or None}
 
+    def _pricedrop_send_start(self):
+        """POST /api/pricedrop/send — HTTP entry point for the price-drop email
+        push. Re-scrapes every watched ASIN and mails the hot/converted leads,
+        which takes a network round trip per tracked product; running that inline
+        held the request open for minutes (a timeout for the operator, and a
+        wasted slot in the server's concurrency semaphore) and is why the admin
+        page appeared to hang. Mirrors the background scan: return at once, let
+        the page poll /api/pricedrop/state for the `send` block."""
+        body = self._body() or {}
+        kw = str(body.get("keyword") or "").strip().lower()
+        try:
+            min_pct = (float(body.get("min_pct"))
+                       if body.get("min_pct") not in (None, "")
+                       else pricedrop.DEFAULT_MIN_DROP_PCT)
+        except (TypeError, ValueError):
+            min_pct = pricedrop.DEFAULT_MIN_DROP_PCT
+        with _PRICEDROP_SEND_LOCK:
+            state = self._pricedrop_send_state()
+            if state["running"]:
+                return self._send(200, {"ok": True, "started": False,
+                                        "running": True, "state": state})
+            _set_setting(_PRICEDROP_SEND_KEY, json.dumps({
+                "running": True, "owner": _BOOT_ID, "status": "sending",
+                "sent": 0, "already_sent": 0, "drops": [], "candidates": 0,
+                "keyword": kw or None}))
+        threading.Thread(target=self._pricedrop_send_worker, args=(kw, min_pct),
+                         daemon=True).start()
+        return self._send(200, {"ok": True, "started": True, "running": True,
+                                "state": self._pricedrop_send_state()})
+
+    def _pricedrop_send_state(self):
+        data = _run_state(_get_setting(_PRICEDROP_SEND_KEY, "{}"))
+        state = {"running": bool(data.get("running")),
+                 "status": data.get("status", "idle"),
+                 "sent": int(data.get("sent", 0)),
+                 "already_sent": int(data.get("already_sent", 0)),
+                 "candidates": int(data.get("candidates", 0)),
+                 "drops": data.get("drops") or [],
+                 "keyword": data.get("keyword") or None,
+                 "error": data.get("error", "")}
+        if not state["running"] and state["status"] == "sending":
+            state["status"] = "done"
+        return state
+
+    def _pricedrop_send_worker(self, keyword, min_pct):
+        """Background body of POST /api/pricedrop/send. Never raises."""
+        try:
+            res = self._pricedrop_send(keyword=keyword, min_pct=min_pct) or {}
+        except Exception as exc:
+            _set_setting(_PRICEDROP_SEND_KEY, json.dumps({
+                "running": False, "status": "error", "sent": 0,
+                "already_sent": 0, "drops": [], "candidates": 0,
+                "keyword": keyword or None, "error": str(exc)[:200]}))
+            return
+        with _PRICEDROP_SEND_LOCK:
+            _set_setting(_PRICEDROP_SEND_KEY, json.dumps({
+                "running": False, "status": "done",
+                "sent": int(res.get("sent") or 0),
+                "already_sent": int(res.get("already_sent") or 0),
+                "candidates": int(res.get("candidates") or 0),
+                "drops": res.get("drops") or [],
+                "keyword": res.get("keyword") or None, "error": ""}))
+
     def _pricedrop_send(self, keyword=None, min_pct=None, cap=None):
         """Auto-push a 'price dropped' email to HOT + CONVERTED subscribers of any
         niche that just had a real price drop. Deduped per (subscriber, ASIN).
 
         Returns {ok, drops, candidates, sent, already_sent, keyword}.
-        Best-effort and never raises."""
+        Best-effort and never raises.
+
+        Takes its filter as arguments and never reads the request body: it runs
+        on a background thread (and from the autosend scheduler via
+        _AutosendStub), where `self.rfile` is already spent or closed. Reading
+        it there blocked on the idle keep-alive socket until the socket timeout.
+        """
         cap = cap or 50
-        body = self._body()
-        kw_filter = (keyword or (body or {}).get("keyword") or "").strip().lower()
+        kw_filter = (keyword or "").strip().lower()
         try:
             min_pct = float(min_pct if min_pct is not None
-                            else (body or {}).get("min_pct") or pricedrop.DEFAULT_MIN_DROP_PCT)
+                            else pricedrop.DEFAULT_MIN_DROP_PCT)
         except (TypeError, ValueError):
             min_pct = pricedrop.DEFAULT_MIN_DROP_PCT
 
@@ -18181,8 +18703,10 @@ if ($("o_adopt")) $("o_adopt").onclick = async () => {{
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            return None  # client hung up on the download; nothing to report
         except Exception as e:
-            return self._send(500, {"error": str(e)})
+            return self._send_500(e, path)
 
     def _earnings_config(self):
         """Admin: tune the commission estimator. Persists to the DB `settings`
@@ -19135,6 +19659,9 @@ def main():
         print("WARNING: PSTORE_ADMIN_EMAIL / PSTORE_ADMIN_PASSWORD not both set — admin login "
               "uses an EPHEMERAL single-boot credential (email=%s password=%s). Set both env "
               "vars in Render and redeploy before going public." % (_ADMIN_EMAIL, _ADMIN_PW))
+    for _w in _db_durability_warnings():
+        print("WARNING: %s" % _w)
+    _clear_orphaned_runs()
     if not oauth.providers_configured():
         print("NOTE: Google/Facebook OAuth login disabled — set OAUTH_GOOGLE_CLIENT_ID/SECRET "
               "or OAUTH_FACEBOOK_APP_ID/APP_SECRET to enable it.")
@@ -19147,6 +19674,14 @@ def main():
               "key in /admin/ebooks) to enable generation.")
     amazon.set_market(os.environ.get("PSTORE_MARKET", amazon.DEFAULT_MARKET))
     amazon.set_tag(os.environ.get("PSTORE_TAG", ""))
+    if not amazon.AFFILIATE_TAG:
+        # Every product link renders untagged without a tag, so the whole site
+        # silently earns nothing. render.yaml ships PSTORE_TAG pinned to an empty
+        # value, which is exactly how this happens unnoticed -- say so loudly.
+        print("WARNING: PSTORE_TAG is empty — every Amazon link is rendering "
+              "UNTAGGED and earns ZERO commission. Set PSTORE_TAG to your "
+              "Associates tracking ID (e.g. yourtag-20) in the host env and "
+              "redeploy, or set the base tag under /admin/keys.")
     warm = threading.Thread(target=_warm_startup_admin, name="warm-admin-start",
                             daemon=True)
     warm.start()
@@ -19189,7 +19724,21 @@ def main():
     print("weekly money digest: %s, iso-weekday %d at %d:00 UTC"
           % ("ON" if _wdcfg["enabled"] else "OFF (weeklydigest.enabled=0)",
              _wdcfg["day"], _wdcfg["hour"]))
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    class _QuietThreading(ThreadingHTTPServer):
+        """Client disconnects are routine now that connections are kept alive:
+        every closed browser tab resets a socket. Dumping a full traceback for
+        each one buries the errors that actually matter, so log those two
+        quietly and keep tracebacks for everything else."""
+        daemon_threads = True
+
+        def handle_error(self, request, client_address):
+            exc = sys.exc_info()[1]
+            if isinstance(exc, (BrokenPipeError, ConnectionResetError,
+                                ConnectionAbortedError, TimeoutError)):
+                return
+            BaseServer.handle_error(self, request, client_address)
+
+    server = _QuietThreading(("0.0.0.0", PORT), Handler)
     print("pstore running on http://localhost:%d" % PORT)
     try:
         server.serve_forever()

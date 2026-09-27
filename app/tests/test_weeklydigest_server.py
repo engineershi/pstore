@@ -98,6 +98,8 @@ class TestWeeklyDigestServer(unittest.TestCase):
         security.SUBSCRIBE_LIMITER.clear("sub|" + self.IPKEY)
         security.TRACK_LIMITER.clear("trk|" + self.IPKEY)
         security.API_LIMITER.clear("api|" + self.IPKEY)
+        self.addCleanup(setattr, amazon, "_scraper_search", amazon._scraper_search)
+        self.addCleanup(setattr, amazon, "_urlopen", amazon._urlopen)
         amazon._scraper_search = lambda *a, **k: ([], "")
         amazon._urlopen = _no_network
         with server._lock:
@@ -117,7 +119,9 @@ class TestWeeklyDigestServer(unittest.TestCase):
         server._set_setting(server._WEEKLYDIGEST_PRUNED_KEY, "")
 
     def tearDown(self):
-        amazon._urlopen = _no_network
+        # amazon._urlopen / _scraper_search are restored by the addCleanup
+        # hooks registered in setUp; re-stubbing them here would just re-leak.
+        pass
 
     def _seed(self, n_subs=1):
         """One saved niche with a product, n active CONVERTED subscribers (open +

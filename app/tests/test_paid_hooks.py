@@ -5,6 +5,8 @@ Handler._apply_paid_session UTM detection that swaps the tag per request."""
 
 import importlib
 import os
+import shutil
+import uuid
 import unittest
 
 sys_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -67,8 +69,28 @@ class TestPaidSessionHook(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import server as srv
+        # _apply_paid_session records a paid-click session in the DB, and
+        # server._db() resolves PSTORE_DB at call time. Point it at a throwaway
+        # copy so the repo's tracked seed (app/pstore.db) is never written to.
+        cls._orig_db = os.environ.get("PSTORE_DB")
+        cls._db = os.path.join(
+            "/tmp", "pstore_test_paidhooks_%s.db" % uuid.uuid4().hex[:8])
+        shutil.copy(os.path.join(sys_path, "pstore.db"), cls._db)
+        os.environ["PSTORE_DB"] = cls._db
         importlib.reload(srv)
         cls.server = srv
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._orig_db is None:
+            os.environ.pop("PSTORE_DB", None)
+        else:
+            os.environ["PSTORE_DB"] = cls._orig_db
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.remove(cls._db + suffix)
+            except OSError:
+                pass
 
     def _handler_with(self, path):
         h = self.server.Handler.__new__(self.server.Handler)

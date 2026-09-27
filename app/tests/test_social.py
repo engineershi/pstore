@@ -6,6 +6,7 @@
 import json
 import datetime
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -136,8 +137,16 @@ class TestSocialSuite(unittest.TestCase):
         return out
 
     def setUp(self):
-        security.SUBSCRIBE_LIMITER.clear("sub|" + self.IPKEY)
-        security.TRACK_LIMITER.clear("trk|" + self.IPKEY)
+        # Every limiter keyed on this client's IP must be reset, not just the two
+        # the suite originally needed. The background publish-all poll below
+        # loops on /api/social/publish-all/state, and API_LIMITER is a 240/min
+        # per-client cap, so an uncleared budget left later tests 429ing.
+        for lim, prefix in ((security.SUBSCRIBE_LIMITER, "sub|"),
+                            (security.TRACK_LIMITER, "trk|"),
+                            (security.API_LIMITER, "api|"),
+                            (security.HTTP_LIMITER, ""),
+                            (security.PAGEVIEW_LIMITER, "pv|")):
+            lim.clear(prefix + self.IPKEY)
         self._saved_warm = server._warm_og_png
         server._warm_og_png = self._noop_warm  # no background ~4s PNG renders in tests
         with server._lock:
@@ -181,8 +190,39 @@ class TestSocialSuite(unittest.TestCase):
             self.assertIn(platform, html)
         self.assertIn("Publish", html)
         self.assertIn("/api/social/publish", html)
-        self.assertIn("View live", html)
         self.assertIn("/lp/keto?utm_source=", html)
+
+    def test_admin_social_no_dead_view_live_link_for_unpublished_kit(self):
+        """A kit with no persisted post must NOT advertise a "View live" link.
+
+        /social/<slug>/<code> only serves rows that are published or scheduled,
+        so linking an un-published kit produced a guaranteed 404 that also told
+        the operator the post was already live."""
+        st, _, _, data = self._raw("/admin/social", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        html = data.decode("utf-8", "replace")
+        self.assertNotIn("soc-view", html)
+        self.assertNotIn('href="/social/keto/', html)
+        self.assertIn("not published yet", html)
+
+    def test_admin_social_view_live_link_appears_once_published(self):
+        """After a post exists, the card links to the page that will resolve."""
+        st, _, _, data = self._raw(
+            "/api/social/publish", "POST",
+            body=json.dumps({"keyword": "keto snacks", "platform": "Twitter / X"}),
+            cookie=self.cookie)
+        self.assertEqual(st, 200)
+        self.assertTrue(json.loads(data)["ok"])
+        st, _, _, data = self._raw("/admin/social?keyword=keto+snacks",
+                                   cookie=self.cookie)
+        self.assertEqual(st, 200)
+        html = data.decode("utf-8", "replace")
+        self.assertIn("soc-view", html)
+        codes = re.findall(r'href="/social/keto-snacks/([a-z0-9\-]+)"', html)
+        self.assertTrue(codes, "expected a /social/keto-snacks/<code> link")
+        for code in codes:
+            st, _, _, _ = self._raw("/social/keto-snacks/" + code)
+            self.assertEqual(st, 200, "linked post page must not 404")
 
     def test_published_post_carries_live_link(self):
         st, _, _, data = self._raw(
@@ -291,14 +331,34 @@ class TestSocialSuite(unittest.TestCase):
             conn.close()
         self.assertEqual(n, len(social.PLATFORMS))
 
+    def _wait_publish_all(self, tries=600):
+        """Poll the background publish-all run to completion. The POST only
+        starts the worker, so the suite must not read the table until it
+        settles (otherwise a still-running worker repopulates social_posts
+        after the next test's cleanup and the counts below go wild)."""
+        import time as _t
+        for _ in range(tries):
+            st, _, _, data = self._raw("/api/social/publish-all/state",
+                                       cookie=self.cookie)
+            state = (json.loads(data) or {}).get("state") or {}
+            if st == 200 and not state.get("running"):
+                return state
+            _t.sleep(0.1)
+        self.fail("background publish-all never finished")
+
     def test_publish_all_niches_covers_every_saved_niche(self):
         st, _, _, data = self._raw(
             "/api/social/publish-all", "POST", cookie=self.cookie, timeout=180)
         self.assertEqual(st, 200)
         res = json.loads(data)
         self.assertTrue(res["ok"])
-        self.assertGreaterEqual(res["niches"], 1)
-        self.assertGreaterEqual(res["published"], len(social.PLATFORMS))
+        # The work is backgrounded so the button cannot hold the request open
+        # for the whole catalogue; the settled state carries the totals.
+        self.assertTrue(res["running"])
+        final = self._wait_publish_all()
+        self.assertEqual(final["status"], "done")
+        self.assertGreaterEqual(final["niches"], 1)
+        self.assertGreaterEqual(final["published"], len(social.PLATFORMS))
         with server._lock:
             conn = server._db()
             n = conn.execute("SELECT COUNT(*) c FROM social_posts").fetchone()["c"]

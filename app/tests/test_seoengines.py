@@ -584,14 +584,23 @@ class TestWebmastersClients(unittest.TestCase):
             self.assertFalse(st[e]["token"])
             # IndexNow key is always set -> coverage is live.
             self.assertEqual(st[e]["state"], "ready")
+        # A cleared runtime key now falls back to the build-time default rather
+        # than blanking coverage, so a missing DB setting can never silently
+        # unauthenticate IndexNow. Simulate a genuinely keyless process by
+        # dropping the runtime override outright.
         saved = indexnow._RUNTIME_KEY
         try:
-            indexnow.set_key("")
+            indexnow._RUNTIME_KEY = ""
             st = {r["engine"]: r for r in webmasters.engines_status()}
             self.assertEqual(st["duckduckgo"]["state"], "needs-key")
             self.assertEqual(st["yahoo"]["state"], "needs-key")
+            # ...and clearing via the public setter must restore the default.
+            indexnow.set_key("")
+            st = {r["engine"]: r for r in webmasters.engines_status()}
+            self.assertEqual(st["duckduckgo"]["state"], "ready")
+            self.assertEqual(st["yahoo"]["state"], "ready")
         finally:
-            indexnow.set_key(saved if saved is not None else "")
+            indexnow._RUNTIME_KEY = saved
 
     def test_bing_state_key_fallback(self):
         saved = (webmasters.BING_API_KEY, self.wm.store.get("seoeng.bing.apikey"))

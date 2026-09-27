@@ -24,6 +24,34 @@ def _clean(s):
     return html.escape(str(s or ""), quote=True)
 
 
+_BEST_LEAD = re.compile(r"^best\b[\s:,-]*", re.I)
+
+
+def _best_prefixed(keyword):
+    """Return `keyword` carrying exactly one leading "Best".
+
+    Stored keywords are nearly all phrased "best <thing>", so a naive
+    `"Best %s" % keyword` shipped indexable copy reading
+    "Best best camping tent 2 person: ranked picks". The original casing of the
+    keyword is preserved so the result reads naturally in a sentence.
+    """
+    kw = (keyword or "").strip()
+    if not kw:
+        return kw
+    return kw if _BEST_LEAD.match(kw) else "Best %s" % kw
+
+
+def _bare_kw(keyword):
+    """Strip a leading "best" so a template that already says "the best ..."
+    doesn't produce "the best best ...".
+
+    Use this — not `_best_prefixed` — in copy like "See the best %s, ranked",
+    where the template supplies the word itself.
+    """
+    kw = (keyword or "").strip()
+    return _BEST_LEAD.sub("", kw, count=1).strip() if kw else kw
+
+
 def _h(keyword, salt=""):
     return int(hashlib.sha1(("%s:%s" % (keyword, salt)).encode("utf-8")).hexdigest(), 16)
 
@@ -64,6 +92,59 @@ def _review_hum(reviews):
 
 
 _ASINISH = re.compile(r"^B[0-9A-Z]{9}$")
+
+
+_IMG_HOSTS = (
+    "m.media-amazon.com", "images-na.ssl-images-amazon.com",
+    "images-eu.ssl-images-amazon.com", "images-fe.ssl-images-amazon.com",
+    "images.amazon.com", "m.media-amazon.co.uk", "m.media-amazon.de",
+)
+_IMG_SAFE = re.compile(r"^https://[a-z0-9.\-]*amazon\.[a-z.]{2,6}/images/I/[A-Za-z0-9_+.\-]+$")
+
+
+def image_url(item):
+    """Amazon CDN product image for an item, or "" when none is available.
+
+    Amazon's conditions only permit hotlinking images obtained through the
+    Product Advertising API, so this never synthesises a CDN URL from the ASIN
+    the way older affiliate themes did \u2014 that pattern is unsanctioned and
+    breaks without notice. The URL must already be stored on the item (populated
+    by ``paapi.lookup()`` from ``Images.Primary.Large``).
+
+    The allow-list is deliberate: an image field arriving from a scraped or
+    user-supplied record must not become an arbitrary ``src`` (tracking pixel,
+    hotlink to a third party, or a javascript: URL on a lax parser)."""
+    raw = str((item or {}).get("image") or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("//"):
+        raw = "https:" + raw
+    elif raw.startswith("/"):
+        return ""                      # never resolve a relative path off-site
+    if not raw.lower().startswith("https://"):
+        return ""
+    if _IMG_SAFE.match(raw):
+        return raw
+    # Fall back to a host allow-list for the alternate Amazon image CDNs.
+    m = re.match(r"^https://([^/]+)(/.*)$", raw)
+    if m and m.group(1).lower() in _IMG_HOSTS:
+        return raw
+    return ""
+
+
+def product_img(item, keyword=None, cls="shot", sizes="(max-width: 640px) 96px, 112px"):
+    """<img> for a pick, or "" when the product has no usable image.
+
+    Emits explicit width/height so the row reserves its space before the CDN
+    responds (avoids CLS on the money section) and ``loading="lazy"`` so the
+    36 images on a long page do not compete with the first paint."""
+    src = image_url(item)
+    if not src:
+        return ""
+    alt = _display(item, keyword)
+    return ('<img class="%s" src="%s" alt="%s" width="112" height="112" '
+            'loading="lazy" decoding="async" sizes="%s" referrerpolicy="no-referrer">'
+            % (_clean(cls), _clean(src), _clean(alt), _clean(sizes)))
 
 
 def _display(item, keyword=None):
@@ -258,8 +339,11 @@ def faq(keyword, best):
     out = []
     price = _price(best) or "a live Amazon price"
     pick = _display(best, keyword)
+    # The FAQ templates already say "the best {kw}", so a keyword that itself
+    # starts with "best" produced "What's the best best keto bars right now?".
+    kw = _bare_kw(keyword)
     for q, a in _FAQS:
-        out.append((q.format(kw=keyword), a.format(kw=keyword, pick=pick, price=price)))
+        out.append((q.format(kw=kw), a.format(kw=kw, pick=pick, price=price)))
     return out
 
 
@@ -396,6 +480,25 @@ def pick_html(keyword, item, idx, items):
                  'border-radius:8px;font-weight:600;cursor:pointer;font-size:12.5px">'
                  '\U0001f514 Track price — email me when it drops</button>'
                  % (_clean(item.get("asin") or ""), _clean(keyword)))
+    shot = product_img(item, keyword)
+    if shot:
+        head_html = ('<div class="pick-head"><img class="shot" src="%s" alt="%s" '
+                     'width="112" height="112" loading="lazy" decoding="async" '
+                     'referrerpolicy="no-referrer">'
+                     '<div class="pick-titles"><span class="rank">#%d</span>'
+                     '<h3>%s</h3><span class="badge">%s</span></div></div>'
+                     % (_clean(image_url(item)), _clean(_display(item, keyword)),
+                        idx + 1, _clean(_display(item, keyword)), badge))
+        return ('<div class="pick%s">'
+                '%s'
+                '<p class="quick">%s</p>'
+                '<p class="why">%s</p>'
+                '<div class="pilo"><div><h4>Good to know</h4><ul class="pros">%s</ul></div>'
+                '<div><h4>Watch out</h4><ul class="cons">%s</ul></div></div>'
+                '<p class="starsline">%s %s</p>%s%s</div>'
+                % (" top" if idx == 0 else "", head_html,
+                   _clean(quick_take(item, items)), _clean(why), pros, cons,
+                   stars, reviews, cta, watch))
     return ('<div class="pick%s">'
             '<div class="pick-head"><span class="rank">#%d</span>'
             '<h3>%s</h3><span class="badge">%s</span></div>'
@@ -505,7 +608,7 @@ def item_list_jsonld(items, keyword):
     if not elements:
         return None
     return {"@type": "ItemList",
-            "name": "Best %s ranked" % keyword,
+            "name": "%s ranked" % _best_prefixed(keyword),
             "itemListElement": elements}
 
 

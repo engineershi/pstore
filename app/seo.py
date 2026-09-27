@@ -16,6 +16,7 @@ import amazon
 from datetime import datetime
 
 import editorial
+from editorial import _bare_kw, _best_prefixed
 
 SITE_NAME = "pstore"
 SITE_DESC = "Hand-picked Amazon product picks by niche."
@@ -185,11 +186,35 @@ def _website_jsonld():
     }
 
 
-def _guide_title(keyword):
+def _clip_words(text, limit):
+    """Truncate on a word boundary, never mid-word.
+
+    Lives here rather than in cms_render because cms_render already imports seo;
+    reusing cms_render's helper would be a circular import.
+    """
+    s = (text or "").strip()
+    if limit <= 0 or len(s) <= limit:
+        return s
+    cut = s[:limit].rstrip(" \t\n\r,;:.!?—–-/")
+    sp = cut.rfind(" ")
+    if sp > limit * 0.6:
+        cut = cut[:sp].rstrip(" \t\n\r,;:.!?—–-/")
+    return cut
+
+
+def _guide_title(keyword, items=None):
     """SERP-safe <title> body: the stored keyword usually already reads
     'best X', so don't double up ('Best best hammock'). The full <title> is
     '<body> | pstore' (see _head) — keep that whole string <= 60 chars so
-    Google doesn't truncate it mid-word."""
+    Google doesn't truncate it mid-word.
+
+    Upgraded from the flat "<kw> — ranked picks": every page shipped an
+    identical, interchangeable title, so nothing differentiated the result in
+    the SERP and none of it matched the query a buyer actually types. The new
+    form leads with the head term, states a real count, and carries the year as
+    a freshness signal (the prices genuinely are live). Every number is taken
+    from the data — no invented counts, no "(2026)" on a page with no picks.
+    """
     kw = (keyword or "").strip()
     # "best best hammock" (mined long-tail doubling 'best') -> "best hammock"
     while re.match(r"^best\s+best\b", kw, flags=re.I):
@@ -197,12 +222,25 @@ def _guide_title(keyword):
     suffix = " | %s" % SITE_NAME
     budget = 60 - len(suffix)
     has_best = re.match(r"^best\b", kw, flags=re.I)
-    title = ("%s — ranked picks" % kw) if has_best else ("Best %s — ranked picks" % kw)
-    if len(title) > budget:
-        title = kw if has_best else ("Best %s" % kw)
-    if len(title) > budget:
-        title = title[: budget - 3].rstrip() + "..."
-    return title
+    # Head term: "best keto" / "best keto snacks" -> "Best Keto Snacks"
+    head = kw[5:].strip() if has_best else kw
+    head_t = " ".join(w.capitalize() for w in head.split()) or "Amazon Picks"
+
+    n = len(items or [])
+    year = datetime.now().year
+    cands = []
+    if n >= 2:
+        cands.append("Best %s: %d Top Picks (%d)" % (head_t, n, year))
+        cands.append("Best %s: %d Top Picks" % (head_t, n))
+    cands.append("Best %s: Top Picks (%d)" % (head_t, year))
+    cands.append("Best %s: Top Picks" % head_t)
+    cands.append(kw if has_best else ("Best %s" % kw))
+
+    for t in cands:
+        if len(t) <= budget:
+            return t
+    # Nothing fit: fall back to the keyword alone, clipped on a word boundary.
+    return _clip_words((kw if has_best else ("Best %s" % kw)).strip(), budget)
 
 
 def _clean(s):
@@ -639,10 +677,13 @@ def lead_gate_html(keyword, source="niche"):
     with the /subscribe download token. Ships its own CSS (SEO pages don't load
     the CMS gate styles)."""
     kw = _clean(keyword or "picks")
+    # The template supplies "best ... to buy", so strip any leading "best"
+    # rather than adding one.
+    _gate_best = _clean(_bare_kw(keyword) or "picks")
     return f"""<style>{_LEAD_GATE_CSS}</style>
 <div class="gate" id="gate" data-source="{_clean(source)}">
   <div class="gift">🎁</div>
-  <h2>Free guide: best {kw} to buy</h2>
+  <h2>Free guide: {_gate_best} to buy</h2>
   <p class="muted">One compact PDF of the ranked picks — the score, the price, the
   quick take on each. We'll also ping you if any ranked pick's price drops.</p>
   <form class="courier gate-form" action="/subscribe" method="post">
@@ -797,13 +838,18 @@ def _variant_key(n):
 
 
 def render_niche(keyword, niche, saved_niches=None, ab_headline=None, ab_variant=0,
-                 style_pack=None):
+                 style_pack=None, hold=False):
     """Crawlable niche page in the answer-first review layout: breadcrumbs,
     byline, human intro, ranked picks with honest pros/cons, comparison table,
-    methodology + trust, FAQ, related niches."""
+    methodology + trust, FAQ, related niches.
+
+    `hold=True` keeps the page fully live for visitors but marks it noindex.
+    That is how topical consolidation works: 50 URLs were competing for ~12
+    distinct intents, so the losing variants stay reachable (no broken links,
+    no lost traffic) while ceasing to compete for the same queries."""
     items = niche.get("products") or []
     canonical = "/n/" + _slugify(keyword)
-    title = _guide_title(keyword)
+    title = _guide_title(keyword, items)
     desc = ("Ranked %s picks scored on live Amazon price, rating and review "
             "volume — with honest pros, cons and a clear verdict on which to "
             "buy." % keyword)
@@ -827,8 +873,9 @@ def render_niche(keyword, niche, saved_niches=None, ab_headline=None, ab_variant
     jsonld = {"@context": "https://schema.org", "@graph": graph}
     og = BASE_URL + "/og/" + _slugify(keyword) + ".png"
     head = _head(title, desc, canonical, canonical, jsonld=jsonld, og_image=og,
-                 noindex=not bool(items))
-    headline = ab_headline or ("Best %s: ranked picks" % keyword)
+                 noindex=bool(hold) or not bool(items))
+    headline = ab_headline or _clip_words(
+        "%s: ranked picks" % _best_prefixed(keyword), 110)
     ab_attr = (' data-variant="%s"' % ab_variant) if ab_variant else ""
     banner_slot = (style_pack or {}).get("banner") or ""
     style_slot = (style_pack or {}).get("css") or ""
@@ -897,7 +944,8 @@ def score_order(items):
     return [it for it, _s in editorial.score_items(items)]
 
 
-def render_topic(term, parent_keyword, niche, parent_slug, style_pack=None):
+def render_topic(term, parent_keyword, niche, parent_slug, style_pack=None,
+                 hold=False):
     """Long-tail page (/n/<parent>/<term>): reframes the parent niche's ranked
     picks around a related autosuggest term so Google sees a distinct intent.
     Shares the niche's product data (still relevant), URL-canonical for the term,
@@ -906,8 +954,8 @@ def render_topic(term, parent_keyword, niche, parent_slug, style_pack=None):
     items = niche.get("products") or []
     term_slug = _slugify(term)
     canonical = "/n/%s/%s" % (_slugify(parent_keyword), term_slug)
-    title = _guide_title(term or parent_keyword)
-    desc = (f"Ranked {term or parent_keyword} picks scored on live Amazon price, "
+    title = _guide_title(term or parent_keyword, items)
+    desc = (f"Ranked {_bare_kw(term or parent_keyword)} picks scored on live Amazon price, "
             f"rating and review volume — with honest pros, cons and a clear "
             f"verdict on which to buy.")
     if len(desc) > 160:
@@ -929,7 +977,7 @@ def render_topic(term, parent_keyword, niche, parent_slug, style_pack=None):
     jsonld = {"@context": "https://schema.org", "@graph": graph}
     og = BASE_URL + "/og/" + (term_slug or _slugify(parent_keyword)) + ".png"
     head = _head(title, desc, canonical, canonical, jsonld=jsonld, og_image=og,
-                 noindex=not bool(items))
+                 noindex=bool(hold) or not bool(items))
     ranked = "".join(editorial.pick_html(term or parent_keyword, it, idx, items)
                      for idx, it in enumerate(score_order(items)))
     hub = "/n/%s" % _slugify(parent_keyword)
@@ -945,11 +993,11 @@ def render_topic(term, parent_keyword, niche, parent_slug, style_pack=None):
 <main data-niche="{_clean(term_slug)}" data-source="topic" data-keyword="{_clean(term or parent_keyword)}" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
 <div class="card">
   {editorial.breadcrumbs_html(term or parent_keyword)}
-  <h1>Best {_clean(term or parent_keyword)}</h1>
-  <p class="lede">You searched for the best {_clean(term or parent_keyword)}. Here are the same products our
+  <h1>{_clean(_clip_words(_best_prefixed(term or parent_keyword), 110))}</h1>
+  <p class="lede">You searched for {_clean(_best_prefixed(term or parent_keyword))}. Here are the same products our
   {_clean(parent_keyword)} guide ranks — scored live on rating, review volume and price.</p>
   {editorial.trust_block_html()}
-  <h2>Top {_clean(term or parent_keyword)} picks</h2>
+  <h2>Top {_clean(_bare_kw(term or parent_keyword))} picks</h2>
   {ranked}
   {editorial.upsell_block(items, term or parent_keyword)}
   {lead_gate_html(term or parent_keyword, "topic") if items else ""}
@@ -988,7 +1036,7 @@ def render_priceband(amount, parent_keyword, parent_slug, items,
             if (_num_price(it) is not None and _num_price(it) <= amount)]
     term_label = "%s under $%s" % (parent_keyword, amount)
     canonical = "/n/%s/under-%d" % (parent_slug, amount)
-    title = "Best %s under $%s — ranked from live Amazon data" \
+    title = "%s under $%s — ranked from live Amazon data" \
         % (parent_keyword, "{:,}".format(amount))
     desc = (f"Looking for the best {parent_keyword} under ${amount:,}? "
             f"Same live scoring as the full guide — rating, review volume, "
@@ -1148,7 +1196,7 @@ def render_blog(saved_niches, page=1, per_page=BLOG_PAGE_SIZE):
         for n in niches[:12]:
             slug = _slugify(n["keyword"])
             best = editorial.best_pick(n["products"])
-            title = "The best %s: a ranked, data-backed pick" % n["keyword"]
+            title = "The best %s: a ranked, data-backed pick" % _bare_kw(n["keyword"])
             synopsis = (best or {}).get("title") or n["keyword"]
             articles.append({
                 "@type": "BlogPosting",
@@ -1182,7 +1230,7 @@ def render_blog(saved_niches, page=1, per_page=BLOG_PAGE_SIZE):
     for n in page_niches:
         slug = _slugify(n["keyword"])
         best = editorial.best_pick(n["products"])
-        title = "The best %s: a ranked, data-backed pick" % n["keyword"]
+        title = "The best %s: a ranked, data-backed pick" % _bare_kw(n["keyword"])
         synopsis = (best or {}).get("title") or n["keyword"]
         cards += f"""
 <article class="card">
@@ -1233,7 +1281,7 @@ def story_cards(keyword, niche, base_url=None):
         "kind": "cover",
         "keyword": keyword,
         "count": len(items),
-        "title": "Best %s" % keyword,
+        "title": _best_prefixed(keyword),
         "sub": "Ranked from live Amazon price, rating + review data.",
         "img": base + "/og/" + _slugify(keyword) + ".png",
     }]
@@ -1496,7 +1544,7 @@ def audit_jsonld(niche):
                      if s.get("kind") == "product"]
     check_page("story", "/stories/" + slug,
                [{"@type": "ItemList",
-                 "name": "Best %s — story" % kw,
+                 "name": "%s — story" % _best_prefixed(kw),
                  "itemListElement": story_entries},
                 editorial.breadcrumb_jsonld(kw), _org_jsonld()])
 
@@ -1528,14 +1576,14 @@ def render_story(niche, keyword=None):
     desc = "Swipe the %s story: ranked picks from live Amazon price, rating and review data." % keyword
 
     jsonld = {"@context": "https://schema.org", "@graph": [
-        {"@type": "ItemList", "name": "Best %s — story" % keyword,
+        {"@type": "ItemList", "name": "%s — story" % _best_prefixed(keyword),
          "itemListElement": [
              story_listitem(p, s)
              for p, s in enumerate(slides, 1) if s.get("kind") == "product"]},
         editorial.breadcrumb_jsonld(keyword),
         _org_jsonld(),
     ]}
-    head = _head("Best %s — the story" % keyword, desc, canonical, canonical,
+    head = _head("%s — the story" % _best_prefixed(keyword), desc, canonical, canonical,
                  jsonld=jsonld,
                  og_image=BASE_URL + "/og/" + slug + ".png")
     body = f"""
@@ -1590,7 +1638,7 @@ def render_stories_gallery(saved_niches):
               "hasPart": [
                   {"@type": "WebPage",
                    "url": BASE_URL + "/stories/" + _slugify(n["keyword"]),
-                   "name": "Best %s — the story" % n["keyword"]}
+                   "name": "%s — the story" % _best_prefixed(n["keyword"])}
                   for n in niches]}
     head = _head("Stories", desc, "/stories", "/stories", jsonld=jsonld,
                  noindex=len(niches) == 0, og_image=BASE_URL + "/og/home.png")
@@ -1733,8 +1781,8 @@ def _meta_lengths(items):
     """Title + description character counts for a niche page (rule of thumb:
     titles 30–60, descriptions 70–160)."""
     keyword = (items or {}).get("keyword") or ""
-    title = "Best %s to Buy — Ranked Picks From Live Amazon Data" % keyword
-    desc = (f"See the best {keyword}, ranked. We score live Amazon listings on "
+    title = "%s to Buy — Ranked Picks From Live Amazon Data" % _best_prefixed(keyword)
+    desc = (f"See the best {_bare_kw(keyword)}, ranked. We score live Amazon listings on "
             f"rating, review volume and price, then show you which to buy and "
             f"why — with honest pros and cons for each.")
     return len(title), len(desc)
@@ -1821,13 +1869,13 @@ def render_snippet(keyword, desc="", url=""):
     'what will searchers see' check before publishing. Returns an SVG card
     (stdlib-only, cacheable) so it renders in any admin flow without JS."""
     kw = _clean(keyword)
-    title = "Best %s to Buy — Ranked Picks From Live Amazon Data" % kw
+    title = "%s to Buy — Ranked Picks From Live Amazon Data" % _best_prefixed(kw)
     if len(title) > 60:
         title = title[:57] + "…"
     url = url or ("%s/n/%s" % (BASE_URL, _slugify_safe(kw)))
     desc = _clean(desc or ("See the best %s, ranked. We score live Amazon listings on "
                            "rating, review volume and price, then show you which to buy and "
-                           "why — with honest pros and cons for each." % kw))
+                           "why — with honest pros and cons for each." % _bare_kw(kw)))
     if len(desc) > 160:
         desc = desc[:157].rstrip() + "…"
     return f"""<svg xmlns="http://www.w3.org/2000/svg" width="640" height="150" viewBox="0 0 640 150">
@@ -1845,8 +1893,8 @@ def audit_topic(term, parent_keyword, prods):
     None-safe check dict mirroring audit_niche() for the topic angle."""
     kw = ("%s %s" % (parent_keyword or "", term or "")).strip()
     slug = _slugify_safe("%s %s" % (parent_keyword or "", term or ""))
-    title = "Best %s — ranked picks from live Amazon data" % (kw or "picks")
-    desc = ("See the best %s, ranked. Live data, honest pros and cons." % kw) if kw else ""
+    title = "%s — ranked picks from live Amazon data" % _best_prefixed(kw or "picks")
+    desc = ("See the best %s, ranked. Live data, honest pros and cons." % _bare_kw(kw)) if kw else ""
     tl, dl = len(title), len(desc)
     return {
         "keyword": kw, "slug": slug,

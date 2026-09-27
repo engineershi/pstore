@@ -20,12 +20,13 @@ DB_DEFAULT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pstore.db
 def _db():
     conn = sqlite3.connect(os.environ.get("PSTORE_DB", DB_DEFAULT), timeout=15)
     conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=15000")
-        conn.execute("PRAGMA synchronous=NORMAL")
-    except sqlite3.Error:
-        pass
+    # Connection-local PRAGMAs only; see the note in audience._db() for why
+    # journal_mode is not re-issued here on every render.
+    for pragma in ("PRAGMA busy_timeout=15000", "PRAGMA synchronous=NORMAL"):
+        try:
+            conn.execute(pragma)
+        except sqlite3.Error:
+            pass
     return conn
 
 

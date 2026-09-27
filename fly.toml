@@ -1,9 +1,17 @@
 app = "mazon-com"
 primary_region = "iad"
 
+# PSTORE_HASH_SECRET and PSTORE_OAUTH_SECRET are deliberately NOT set here:
+# they must be real random values, and this file is committed. Provision them
+# once with `fly secrets set PSTORE_HASH_SECRET=... PSTORE_OAUTH_SECRET=...`.
+# Without them security.py generates fresh random values on every boot, which
+# invalidates signed unsubscribe links, PDF-gate tokens and in-flight OAuth
+# logins each time the machine restarts. The app warns at boot if they are
+# missing, and /admin/system lists it as an issue.
 [env]
   PORT = "8765"
   PSTORE_DB = "/data/pstore.db"
+  PSTORE_URL = "https://trypstore.com"
 
 [http_service]
   internal_port = 8765

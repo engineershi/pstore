@@ -179,6 +179,13 @@ def lookup(asin):
         p = price_obj[0].get("Price", {}) or {}
         price = p.get("Amount") or ""
         currency = (p.get("Currency") or "")[:3]
+    # "Images.Primary.Large" is requested above but was never read back, so the
+    # single TOS-clean product-image source was fetched and thrown away. Money
+    # pages rendered zero <img> as a result. Amazon CDN images are the only
+    # images an Associate site may hotlink, and only via this resource.
+    image = ""
+    img_obj = ((item.get("Images", {}) or {}).get("Primary", {}) or {}).get("Large", {}) or {}
+    image = (img_obj.get("URL") or "").strip()
     return {
         "asin": asin,
         "title": title,
@@ -187,5 +194,6 @@ def lookup(asin):
         "reviews": None,
         "url": amazon.affiliate_url(asin),
         "currency": currency,
+        "image": image,
         "source": "paapi",
     }

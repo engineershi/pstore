@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
+import importlib
 import json
 import os
+import shutil
 import unittest
+import uuid
 
 import publish
 import social
@@ -331,13 +334,41 @@ class TestNativeScaffold(Base):
 
 
 class TestServerNativeWiring(unittest.TestCase):
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls):
+        # These touch server._get_setting / _set_setting. server.DB is a
+        # module-level constant read at import (server.py:72), so PSTORE_DB must
+        # be set *and* the module reloaded, or the calls land in whatever DB the
+        # previously-imported module captured — and the repo's tracked seed
+        # (app/pstore.db) would be mutated by a committed file.
+        cls._orig_db = os.environ.get("PSTORE_DB")
+        cls._db = os.path.join(
+            "/tmp", "pstore_test_publish_%s.db" % uuid.uuid4().hex[:8])
+        shutil.copy(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "..", "pstore.db"), cls._db)
+        os.environ["PSTORE_DB"] = cls._db
         import server as srv
-        self.srv = srv
-        self._orig_twitter = self.srv._get_setting("social.key.twitter")
+        importlib.reload(srv)
+        cls.server = srv
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._orig_db is None:
+            os.environ.pop("PSTORE_DB", None)
+        else:
+            os.environ["PSTORE_DB"] = cls._orig_db
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.remove(cls._db + suffix)
+            except OSError:
+                pass
+
+    def setUp(self):
+        self._orig_twitter = self.server._get_setting("social.key.twitter")
 
     def tearDown(self):
-        self.srv._set_setting("social.key.twitter", self._orig_twitter if self._orig_twitter else "")
+        self.server._set_setting(
+            "social.key.twitter", self._orig_twitter if self._orig_twitter else "")
 
     def test_publish_native_uses_pasted_keys(self):
         import server

@@ -24,12 +24,17 @@ COUNTRY_NAMES = {
 def _db():
     conn = sqlite3.connect(os.environ.get("PSTORE_DB", DB_DEFAULT), timeout=15)
     conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=15000")
-        conn.execute("PRAGMA synchronous=NORMAL")
-    except sqlite3.Error:
-        pass
+    # busy_timeout is set first and on its own so a locked file makes this
+    # connection wait rather than fail. journal_mode is deliberately NOT set
+    # here: it is a persistent file-level property that server._ensure_wal()
+    # converts once at startup, and re-issuing it on every read is what made
+    # hot page renders contend with the writer and fail with 'database is
+    # locked'.
+    for pragma in ("PRAGMA busy_timeout=15000", "PRAGMA synchronous=NORMAL"):
+        try:
+            conn.execute(pragma)
+        except sqlite3.Error:
+            pass
     return conn
 
 

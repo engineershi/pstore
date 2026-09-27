@@ -30,9 +30,16 @@ ENDPOINT = "https://api.indexnow.org/indexnow"
 
 
 def set_key(key):
-    """Set (or clear with "") the active IndexNow key for this process."""
+    """Set (or clear with "") the active IndexNow key for this process.
+
+    Clearing falls back to the build-time default rather than to an empty key.
+    Previously an empty value was stored as a real value, and because ``key()``
+    only tested ``is not None`` that empty string permanently shadowed the
+    default: the key file 404'd and every submission was silently unauthenticated
+    until the process restarted.
+    """
     global _RUNTIME_KEY
-    _RUNTIME_KEY = (key or "").strip().lower()
+    _RUNTIME_KEY = (key or "").strip().lower() or None
 
 
 def key():

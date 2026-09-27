@@ -33,15 +33,43 @@ CONCURRENCY = threading.BoundedSemaphore(64)
 class RateLimiter:
     """Sliding-window limit, keyed by (namespace, key). Thread-safe."""
 
+    _SWEEP_EVERY = 256  # requests between opportunistic sweeps
+
     def __init__(self, limit, window_sec):
         self.limit = limit
         self.window = window_sec
         self._hits = {}
         self._lock = threading.Lock()
+        self._sweeps = 0
+        self._last_sweep = 0.0
+
+    def _sweep_locked(self, now):
+        """Drop buckets whose whole window has passed. Without this the map
+        only ever grows: a client key is derived partly from the forwarded
+        chain, so anyone rotating X-Forwarded-For values mints a fresh key per
+        request and the limiter's memory grows for as long as the process does.
+
+        The cadence is a fixed request count, not `max(64, len(self._hits))`.
+        That looks self-tuning but can never fire: every distinct key bumps
+        both the counter and the map size, so `len - _sweeps` stays pinned and
+        the threshold always stays one map-growth ahead of the counter. A
+        rotating client then keeps every expired bucket alive forever. A fixed
+        stride bounds retained garbage at (stride x distinct keys per window),
+        and the time-based fallback reclaims it even when traffic stops."""
+        self._sweeps += 1
+        if self._sweeps < self._SWEEP_EVERY and now - self._last_sweep < self.window:
+            return
+        self._sweeps = 0
+        self._last_sweep = now
+        stale = [k for k, bucket in self._hits.items()
+                 if not bucket or now - bucket[-1] >= self.window]
+        for k in stale:
+            self._hits.pop(k, None)
 
     def hit(self, key):
         now = time.monotonic()
         with self._lock:
+            self._sweep_locked(now)
             bucket = [t for t in self._hits.get(key, []) if now - t < self.window]
             if len(bucket) < self.limit:
                 bucket.append(now)
