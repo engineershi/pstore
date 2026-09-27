@@ -8,10 +8,40 @@
   /* Social-post attribution: when the page was reached via a UTM-tagged link
      (utm_source=<platform>, utm_content=<post-code>), every click on it is
      credited to that exact post so /admin/social + /admin/analytics can score
-     per-post traffic and conversions. */
+     per-post traffic and conversions.
+
+     First-touch: the UTM is read from the URL of the page the visitor LANDED
+     on, then persisted for the session. Previously it was read from
+     `location.search` on every page view, so any visitor who followed an
+     internal link lost their source and their clicks fell through to
+     `baseSource` -> channel "organic". That made Pinterest/social/email
+     journeys indistinguishable from search in /api/funnel, and inflated
+     "organic" -- which is the number every channel decision is based on. A new
+     utm_source mid-session is ignored so the first touch wins. */
   var params = new URLSearchParams(location.search || "");
-  var utmSource = params.get("utm_source") || "";
-  var utmContent = params.get("utm_content") || "";
+  var _FT_KEY = "pstore_ft";
+  function _firstTouch() {
+    var us = params.get("utm_source") || "";
+    var uc = params.get("utm_content") || "";
+    try {
+      var saved = JSON.parse(sessionStorage.getItem(_FT_KEY) || "null");
+      /* First touch wins: once this session has a recorded source, keep it. A
+         stray utm on an internal page must not steal credit from the campaign
+         that actually started the visit. */
+      if (saved && saved.s) return saved;
+      if (us) {
+        saved = { s: us, c: uc, t: Date.now() };
+        sessionStorage.setItem(_FT_KEY, JSON.stringify(saved));
+        return saved;
+      }
+      return { s: "", c: "" };
+    } catch (e) {
+      return { s: us, c: uc };
+    }
+  }
+  var _ft = _firstTouch();
+  var utmSource = _ft.s || "";
+  var utmContent = _ft.c || "";
   /* A/B headline variant (set by the server on <main data-variant>: stick the
      variant id into click attribution even when there is no UTM content, so the
      analytics report can score which headline converts. */
