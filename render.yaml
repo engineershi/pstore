@@ -3,7 +3,8 @@ services:
     name: pstore
     runtime: docker
     repo: https://github.com/engineershi/pstore
-    plan: free
+    plan: starter
+    region: oregon
     dockerfilePath: ./Dockerfile
     healthCheckPath: /
     # NOTE ON PERSISTENCE — the single most important thing in this file.
@@ -14,25 +15,21 @@ services:
     # earnings, social posts and anything the operator added all revert to the
     # seed. Nothing errors, the site just quietly stops being the same site.
     #
-    # Render only supports persistent disks on a paid plan, so there is no disk
-    # block here that would work on `plan: free`. To fix this:
-    #   1. Move the service to a plan that supports disks.
-    #   2. Add the block below.
-    #   3. Leave PSTORE_DB set so the app uses the mounted path.
-    #
-    # disk:
-    #   name: pstore_data
-    #   mountPath: /data
-    #   sizeGB: 1
-    #
-    # Until then the app prints a WARNING at every boot naming this exact risk.
+    # The disk below is what prevents that, and it must stay enabled. Render
+    # only supports persistent disks on a paid plan, so `plan: starter` and
+    # this block belong together: setting the plan back to `free`, or deleting
+    # this block, silently discards the live database on the next deploy.
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
     envVars:
       - key: PORT
         value: "8765"
       - key: PSTORE_URL
         value: https://trypstore.com
-      # A mount point that is safe to set now: the seed is copied into it on
-      # first boot, so turning the disk on above needs no code change.
+      # The mounted path, matching disk.mountPath above. The seed is copied
+      # into it on first boot.
       - key: PSTORE_DB
         value: /data/pstore.db
       # Empty means every Amazon link renders UNTAGGED and earns ZERO
