@@ -1105,6 +1105,92 @@ class TestSocialSuite(unittest.TestCase):
             self._restore_drip_settings(saved)
 
 
+    def test_drip_does_not_spend_a_whole_day_on_one_product_family(self):
+        """High-demand near-duplicates must not eat every daily slot.
+
+        'best external hard drive', '...for backup' and '...for mac' are one
+        product on three pages. Ranking purely by demand put 4 hard drives and
+        5 water bottles in the next 12 slots -- 12 days of near-identical pins.
+        """
+        import datetime as _dt
+        import json as _json
+        saved = self._drip_settings()
+        now = _dt.datetime(2026, 9, 27, 10, 0, 0)
+        made = [("best external hard drive for backup", 9000000),
+                ("best external hard drive", 8000000),
+                ("best external hard drive for mac", 7000000),
+                ("best water bottle", 6000),
+                ("best protein powder for women", 5000),
+                ("best dog crate", 4000),
+                ("best yoga mat", 3000)]
+
+        def _prods(revs, asin):
+            return _json.dumps([{"asin": asin, "title": "Test " + asin,
+                                 "price": 29.99, "reviews": revs}])
+        try:
+            server._set_setting("social.key.pinterest.token", "pin-token")
+            server._set_setting("social.drip.daily", "4")
+            server._set_setting("social.drip.min_gap_days", "0")
+            server._set_setting("social.drip.last", "2000-01-01")
+            server._set_setting("social.drip.family_cap", "1")
+            with server._lock:
+                c = server._db()
+                for i, (kw, revs) in enumerate(made):
+                    c.execute(
+                        "INSERT OR REPLACE INTO niches "
+                        "(keyword, market, products, created_at) VALUES (?,?,?,?)",
+                        (kw, "com", _prods(revs, "B0%08d" % (500000 + i)),
+                         "2026-01-0%d 00:00:00" % (i + 1)))
+                c.commit()
+                c.close()
+            res = server._pin_drip(now=now)
+            self.assertEqual(res["scheduled"], 4)
+            with server._lock:
+                c = server._db()
+                rows = c.execute(
+                    "SELECT keyword FROM social_posts WHERE platform='Pinterest' "
+                    "AND status='scheduled' ORDER BY id").fetchall()
+                c.close()
+            got = [r["keyword"] for r in rows]
+            fams = [server._drip_family(k) for k in got]
+            self.assertEqual(
+                len(set(fams)), len(fams),
+                "one product family took several of today's slots: %r" % got)
+            self.assertIn(
+                "best external hard drive for backup", got,
+                "the highest-demand page should still win its slot")
+        finally:
+            with server._lock:
+                c = server._db()
+                try:
+                    for kw, _r in made:
+                        c.execute("DELETE FROM niches WHERE keyword=?", (kw,))
+                    c.commit()
+                except Exception:
+                    pass
+                c.close()
+            self._restore_drip_settings(saved)
+
+    def test_drip_family_collapses_near_duplicate_queries(self):
+        """The family key is the head noun phrase, plural- and year-tolerant."""
+        same = ["best external hard drive", "best external hard drive for mac",
+                "best external hard drive for backup"]
+        for kw in same:
+            self.assertEqual(server._drip_family(kw), "external hard drive")
+        self.assertEqual(server._drip_family("best water bottles for adults"),
+                         "water bottle")
+        self.assertEqual(server._drip_family("best water bottle"), "water bottle")
+        self.assertEqual(server._drip_family("best water flosser 2026"),
+                         "water flosser")
+        self.assertEqual(server._drip_family("best string lights for classroom"),
+                         "string light")
+        # Different products stay different.
+        self.assertNotEqual(server._drip_family("best dog crate"),
+                            server._drip_family("best dog harness"))
+        # A bare head term is its own family and must not go empty.
+        self.assertEqual(server._drip_family("keto"), "keto")
+        self.assertEqual(server._drip_family(""), "")
+
     def _drip_token(self, token):
         """Paste/clear the Pinterest token for the drip (returns prev for restore)."""
         prev = server._get_setting("social.key.pinterest.token")

@@ -514,6 +514,146 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
                 conn.execute("DELETE FROM email_sends")
                 conn.close()
 
+    def _stub_drop(self, price=9.99):
+        """Arm a real price drop and capture outbound mail. Returns the list."""
+        server.Handler._price_store(None).set_baseline("B012345678", 19.99)
+        self._saved_search = amazon.search
+        self._saved_send = mailer._send
+        self._saved_smtp = (mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD)
+        mailer.SMTP_HOST = "smtp.test.local"
+        mailer.SMTP_USER = "x@x"
+        mailer.SMTP_PASSWORD = "pw"
+        captured = []
+        amazon.search = lambda asin, top=1: (
+            [{"asin": asin, "title": "Keto Gummies", "price": price}], "stub")
+        mailer._send = lambda subject, body, to, attachments=None, pixel_url=None, **k: (
+            captured.append({"to": to, "subject": subject, "body": body}) or True)
+
+        def _restore():
+            amazon.search = self._saved_search
+            mailer._send = self._saved_send
+            (mailer.SMTP_HOST, mailer.SMTP_USER,
+             mailer.SMTP_PASSWORD) = self._saved_smtp
+            with server._lock:
+                conn = server._db()
+                conn.execute("DELETE FROM email_sends")
+                conn.close()
+            # The price store is a file shared by every test in the class, and
+            # the scanner treats an ASIN snapshotted TODAY as already done (that
+            # is its crash-resume optimisation). Leaving today's snapshot behind
+            # therefore makes a later scan skip this ASIN instead of fetching
+            # it, which silently breaks scan-timeout tests. Purge the entry.
+            _st = server.Handler._price_store(None)
+            _st._data.pop("B012345678", None)
+            _st.save()
+        self.addCleanup(_restore)
+        return captured
+
+    def test_pricedrop_send_dry_run_sends_nothing_and_reports_recipients(self):
+        """A dry run must answer with who *would* get what, deliver nothing, and
+        leave the dedup key unconsumed so a real send still works afterwards."""
+        self._seed()
+        captured = self._stub_drop()
+        with server._lock:
+            conn = server._db()
+            conn.execute("DELETE FROM email_sends")
+            conn.commit()
+            conn.close()
+        st, ct, body = self._raw("/api/pricedrop/send", method="POST",
+                                 body=json.dumps({"dry_run": True}).encode(),
+                                 cookie=self.cookie)
+        self.assertEqual(st, 200)
+        final = self._wait_pricedrop_send()
+        self.assertEqual(final["status"], "done", final)
+        self.assertTrue(final["dry_run"], "state should record it was a dry run")
+        self.assertEqual(captured, [], "a dry run must not deliver any mail")
+        with server._lock:
+            conn = server._db()
+            logged = conn.execute("SELECT COUNT(*) c FROM email_sends").fetchone()["c"]
+            conn.close()
+        self.assertEqual(logged, 0, "a dry run must not log a send")
+
+    def test_pricedrop_send_reaches_warm_subscribers(self):
+        """Price-drop mail used to go only to `hot`/`converted`.
+
+        An alert about the exact thing someone subscribed to does not need a
+        prior open to land, and on a young list the hot segment is often empty
+        -- which is how the send reached nobody at all while reporting success.
+        """
+        self._seed()
+        captured = self._stub_drop()
+        with server._lock:
+            conn = server._db()
+            conn.execute("DELETE FROM email_sends")
+            conn.commit()
+            conn.close()
+        # Default config must include warm.
+        st, ct, body = self._raw("/api/pricedrop/send", method="POST",
+                                 body=b"{}", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        final = self._wait_pricedrop_send()
+        self.assertEqual(final["status"], "done", final)
+        self.assertGreaterEqual(len(final["drops"]), 1)
+        to = {c["to"] for c in captured}
+        self.assertIn("warm@x", to,
+                      "warm@x never opened an email but is a price-drop target: %r" % (to,))
+        # cold@x (never opened, no clicks) stays out of it.
+        self.assertNotIn("cold@x", to)
+        # gone@x unsubscribed must never be mailed.
+        self.assertNotIn("gone@x", to)
+
+    def test_pricedrop_segments_setting_can_exclude_warm_again(self):
+        """The widened default must be reversible from settings, not a code edit."""
+        self._seed()
+        captured = self._stub_drop()
+        server._set_setting("pricedrop.segments", "hot,converted")
+        self.addCleanup(self._clear_pricedrop_segments)
+        with server._lock:
+            conn = server._db()
+            conn.execute("DELETE FROM email_sends")
+            conn.commit()
+            conn.close()
+        st, ct, body = self._raw("/api/pricedrop/send", method="POST",
+                                 body=b"{}", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        self._wait_pricedrop_send()
+        to = {c["to"] for c in captured}
+        self.assertNotIn("warm@x", to,
+                         "pricedrop.segments=hot,converted should exclude warm")
+
+    def test_pricedrop_blank_segments_setting_falls_back_to_the_default(self):
+        """A blank setting must not silently re-narrow the audience.
+
+        An empty string used to fall through to the old hot/converted pair, so
+        clearing the override quietly re-broke the widening -- which is how this
+        test failed in the full suite while passing on its own.
+        """
+        self._seed()
+        captured = self._stub_drop()
+        for blank in ("", "   ", ","):
+            with server._lock:
+                conn = server._db()
+                conn.execute("DELETE FROM email_sends")
+                conn.commit()
+                conn.close()
+            server._set_setting("pricedrop.segments", blank)
+            self._raw("/api/pricedrop/send", method="POST", body=b"{}",
+                      cookie=self.cookie)
+            self._wait_pricedrop_send()
+            to = {c["to"] for c in captured}
+            self.assertIn("warm@x", to,
+                          "segments=%r should fall back to the default" % blank)
+            self._clear_pricedrop_segments()
+            captured.clear()
+
+    def _clear_pricedrop_segments(self):
+        """Remove the override entirely (blank is not the same as unset)."""
+        with server._lock:
+            conn = server._db()
+            conn.execute("DELETE FROM settings WHERE key='pricedrop.segments'")
+            conn.commit()
+            conn.close()
+
     def test_pint_blitz_publishes_newest_niche_pinterest_kit(self):
         """The one-click Pinterest blitz builds + publishes a Pinterest kit for
         the newest saved niche with products and flips its social_post row to

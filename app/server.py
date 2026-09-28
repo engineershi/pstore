@@ -861,6 +861,10 @@ _AUTOSEND_LAST_KEY = "autosend.last"  # "YYYY-MM-DD:HH" marker so a slot runs on
 AUTOSEND_STATE_KEY = "autosend.state"  # json: {status,sent,last_run,last_status,next_run,errors}
 _PRICEDROP_STATE_KEY = "pricedrop.state"  # json progress for the background scraper
 _PRICEDROP_SEND_KEY = "pricedrop.send"    # json progress for the background drop-email push
+# Lifecycle segments that receive price-drop alerts. Single source of truth for
+# the default, so a blank setting falls back to this rather than to an older,
+# narrower pair. Comma-separated; overridable per install.
+_PRICEDROP_SEGMENTS_DEFAULT = ("hot", "converted", "warm")
 _PRICEDROP_ASIN_TIMEOUT = 35.0  # per-ASIN fetch budget; a stuck Amazon
 # call is skipped so one bad ASIN can never stall the whole scan
 # Concurrency for the price-drop sweep. The amazon module is lock-guarded and
@@ -1933,6 +1937,13 @@ _DRIP_STOP = frozenset((
     "on", "at", "no", "that", "your", "you", "vs", "or", "top", "cheap",
 ))
 
+# Qualifiers that open the trailing 'for whom / for what' clause of a
+# 'best X for Y' query. The product family is everything before the first one
+# (see _drip_family).
+_DRIP_QUALIFIER = frozenset((
+    "for", "with", "and", "in", "on", "at", "under", "to", "of", "vs", "or",
+))
+
 
 def _drip_is_broad_head(keyword):
     """True for a bare category word that a new domain cannot rank for.
@@ -1944,6 +1955,41 @@ def _drip_is_broad_head(keyword):
     """
     toks = [t for t in re.split(r"[^a-z0-9]+", (keyword or "").lower()) if t]
     return len([t for t in toks if t not in _DRIP_STOP]) <= 1
+
+
+def _drip_family(keyword):
+    """The product family a keyword belongs to, for de-duplicating a sweep.
+
+    'best external hard drive for backup', 'best external hard drive' and
+    'best external hard drive for mac' are one product on three pages. Ranking
+    purely by demand therefore emits near-duplicate pins: on the real corpus
+    4 of the next 12 slots were hard drives and 5 were water bottles. One pin
+    per family per day keeps the queue varied without giving up the demand
+    ordering, which is what actually picks the page.
+
+    The family is the head noun phrase: everything before the first qualifier
+    ('for', 'with', 'in', ...), minus a leading 'best' and a trailing year.
+    """
+    toks = [t for t in re.split(r"[^a-z0-9]+", (keyword or "").lower()) if t]
+    while toks and toks[0] in ("best", "top", "cheap"):
+        toks.pop(0)
+    while toks and toks[-1].isdigit():
+        toks.pop()
+    head = []
+    for t in toks:
+        if t in _DRIP_QUALIFIER:
+            break
+        head.append(t)
+    if not head:
+        head = toks
+    if not head:
+        return (keyword or "").strip().lower()
+    # Collapse a simple plural so "water bottle" and "water bottles" are one
+    # family: 'best water bottles for adults' is the same product page.
+    last = head[-1]
+    if len(last) > 3 and last.endswith("s") and not last.endswith("ss"):
+        head[-1] = last[:-1]
+    return " ".join(head)
 
 
 def _drip_demand(products):
@@ -3419,6 +3465,7 @@ def _pin_drip(now=None):
         cands.append({"slug": slug, "keyword": n["keyword"], "items": n["products"],
                       "count": count, "clicks": clicks, "created": n.get("created_at") or "",
                       "demand": _drip_demand(n["products"]),
+                      "family": _drip_family(n["keyword"]),
                       "broad": _drip_is_broad_head(n["keyword"])})
     # Pick the pins most likely to earn a click, not the ones created first.
     #
@@ -3449,7 +3496,25 @@ def _pin_drip(now=None):
     cands.sort(key=lambda c: (1 if c["broad"] else 0, -c["demand"],
                               1 if c["count"] else 0, -c["clicks"],
                               c["created"] or ""))
-    picked = cands[:daily]
+    # ...but take at most family_cap of any one product family per sweep, so a
+    # run of high-demand near-duplicates ("external hard drive" x4) cannot eat
+    # the whole day's slots. Backfilled down the ranked list, so the demand
+    # ordering still decides which page of each family gets the pin.
+    try:
+        family_cap = int(_get_setting("social.drip.family_cap", "1") or 1)
+    except (TypeError, ValueError):
+        family_cap = 1
+    family_cap = max(1, family_cap)
+    picked = []
+    seen_families = {}
+    for c in cands:
+        if len(picked) >= daily:
+            break
+        fam = c["family"]
+        if seen_families.get(fam, 0) >= family_cap:
+            continue
+        seen_families[fam] = seen_families.get(fam, 0) + 1
+        picked.append(c)
     ats = _next_peak_slots(now, len(picked))
     scheduled = 0
     for c, at in zip(picked, ats):
@@ -16858,10 +16923,20 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
         return row is not None
 
     def _dispatch_one_off(self, campaign, sub, kw, asin, subject, body_text,
-                          attachments=None, pixel_on=True, html_body=""):
+                          attachments=None, pixel_on=True, html_body="",
+                          dry_run=False):
         """Send a deduped one-off campaign email to a subscriber through the same
         tracked-link pipeline as the sequence. Returns True when actually sent.
-        `campaign` + subscriber + asin form the dedup key (INSERT OR IGNORE)."""
+        `campaign` + subscriber + asin form the dedup key (INSERT OR IGNORE).
+
+        dry_run stops after rendering: it reports what would be sent and to whom
+        without delivering, logging a send, or consuming the dedup key, so a
+        real send afterwards behaves exactly as if the preview had not run.
+        """
+        if dry_run:
+            return {"dry_run": True, "would_send": True, "campaign": campaign,
+                    "email": sub.get("email") or "", "subject": subject,
+                    "asin": asin or "", "keyword": kw or ""}
         if self._already_sent(campaign, sub["id"], asin):
             return False
         if _freq_capped_sids([sub["id"]]):
@@ -16935,7 +17010,8 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                 "running": True, "owner": _BOOT_ID, "status": "sending",
                 "sent": 0, "already_sent": 0, "drops": [], "candidates": 0,
                 "keyword": kw or None}))
-        threading.Thread(target=self._pricedrop_send_worker, args=(kw, min_pct),
+        threading.Thread(target=self._pricedrop_send_worker,
+                         args=(kw, min_pct, bool(body.get("dry_run"))),
                          daemon=True).start()
         return self._send(200, {"ok": True, "started": True, "running": True,
                                 "state": self._pricedrop_send_state()})
@@ -16948,16 +17024,19 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                  "already_sent": int(data.get("already_sent", 0)),
                  "candidates": int(data.get("candidates", 0)),
                  "drops": data.get("drops") or [],
+                 "preview": data.get("preview") or [],
+                 "dry_run": bool(data.get("dry_run")),
                  "keyword": data.get("keyword") or None,
                  "error": data.get("error", "")}
         if not state["running"] and state["status"] == "sending":
             state["status"] = "done"
         return state
 
-    def _pricedrop_send_worker(self, keyword, min_pct):
+    def _pricedrop_send_worker(self, keyword, min_pct, dry_run=False):
         """Background body of POST /api/pricedrop/send. Never raises."""
         try:
-            res = self._pricedrop_send(keyword=keyword, min_pct=min_pct) or {}
+            res = self._pricedrop_send(keyword=keyword, min_pct=min_pct,
+                                       dry_run=dry_run) or {}
         except Exception as exc:
             _set_setting(_PRICEDROP_SEND_KEY, json.dumps({
                 "running": False, "status": "error", "sent": 0,
@@ -16971,13 +17050,17 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                 "already_sent": int(res.get("already_sent") or 0),
                 "candidates": int(res.get("candidates") or 0),
                 "drops": res.get("drops") or [],
+                "preview": res.get("preview") or [],
+                "dry_run": bool(res.get("dry_run")),
                 "keyword": res.get("keyword") or None, "error": ""}))
 
-    def _pricedrop_send(self, keyword=None, min_pct=None, cap=None):
-        """Auto-push a 'price dropped' email to HOT + CONVERTED subscribers of any
-        niche that just had a real price drop. Deduped per (subscriber, ASIN).
+    def _pricedrop_send(self, keyword=None, min_pct=None, cap=None, dry_run=False):
+        """Auto-push a 'price dropped' email to the subscribers of any niche that
+        just had a real price drop. Deduped per (subscriber, ASIN).
 
-        Returns {ok, drops, candidates, sent, already_sent, keyword}.
+        Returns {ok, drops, candidates, sent, already_sent, keyword, preview}.
+        dry_run=True sends nothing and returns the `preview` list of who would
+        get what, which is the only sane way to try this against a real list.
         Best-effort and never raises.
 
         Takes its filter as arguments and never reads the request body: it runs
@@ -16986,6 +17069,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
         it there blocked on the idle keep-alive socket until the socket timeout.
         """
         cap = cap or 50
+        preview = []
         kw_filter = (keyword or "").strip().lower()
         try:
             min_pct = float(min_pct if min_pct is not None
@@ -16997,7 +17081,8 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
         rows = self._watched_products()
         if not rows:
             return {"ok": True, "drops": [], "candidates": 0, "sent": 0,
-                    "already_sent": 0, "keyword": kw_filter or None}
+                    "already_sent": 0, "keyword": kw_filter or None,
+                    "dry_run": bool(dry_run), "preview": []}
         fresh = {}
         _reviews = {}
         for row in rows:
@@ -17023,7 +17108,8 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             events_summary = {}
         if not drops:
             return {"ok": True, "drops": [], "candidates": 0, "sent": 0,
-                    "already_sent": 0, "keyword": kw_filter or None}
+                    "already_sent": 0, "keyword": kw_filter or None,
+                    "dry_run": bool(dry_run), "preview": []}
 
         # map each dropped ASIN back to its owning niche keyword
         asin_niche = {}
@@ -17034,8 +17120,23 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                     asin_niche[a] = n["keyword"]
 
         sent = candidates = already = errors = watcher_emails = 0
+        # Which lifecycle segments get price-drop mail. A drop on something a
+        # subscriber explicitly asked about is the one email that does not need
+        # a prior open to land, so the default includes `warm`: gating on `hot`
+        # engagement is backwards for an alert, and on a young list it is how
+        # the send found nobody at all while reporting success. Override with
+        # the pricedrop.segments setting.
+        #
+        # The setting is read as a plain comma-separated string. It must NOT be
+        # handed _PRICEDROP_SEGMENTS_DEFAULT as _get_setting's default: that
+        # stringifies the tuple, and "'hot', 'converted', 'warm'".split(",")
+        # yields segment names no subscriber can match, so the send silently
+        # reached nobody. A blank/unset value falls back to the constant here.
+        _raw_segs = str(_get_setting("pricedrop.segments", "") or "")
+        seg_names = [s.strip() for s in _raw_segs.split(",") if s.strip()] \
+            or list(_PRICEDROP_SEGMENTS_DEFAULT)
         all_members = self._segment_members(keyword=kw_filter or None,
-                                            segments_names=("hot", "converted"),
+                                            segments_names=tuple(seg_names),
                                             limit=5000)
         for sub in all_members:
             if sent + errors >= cap:
@@ -17053,6 +17154,12 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             if not mail["subject"]:
                 continue
             candidates += 1
+            if dry_run:
+                preview.append(self._dispatch_one_off(
+                    "pricedrop:" + pick_asin if pick_asin else "pricedrop",
+                    sub, kw, pick_asin, mail["subject"], mail["text"],
+                    html_body=mail.get("html") or "", dry_run=True))
+                continue
             if self._dispatch_one_off("pricedrop:" + pick_asin if pick_asin else "pricedrop",
                                       sub, kw, pick_asin,
                                       mail["subject"], mail["text"],
@@ -17089,6 +17196,12 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             if not mail["subject"]:
                 continue
             watcher_emails += 1
+            if dry_run:
+                preview.append(self._dispatch_one_off(
+                    "pricedrop:" + asin, sub, kw, asin,
+                    mail["subject"], mail["text"],
+                    html_body=mail.get("html") or "", dry_run=True))
+                continue
             if self._dispatch_one_off("pricedrop:" + asin, sub, kw, asin,
                                       mail["subject"], mail["text"],
                                       html_body=mail.get("html") or ""):
@@ -17097,7 +17210,8 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                 already += 1
         return {"ok": True, "drops": drops, "candidates": candidates,
                 "sent": sent, "already_sent": already, "errors": errors,
-                "keyword": kw_filter or None, "watcher_emails": watcher_emails}
+                "keyword": kw_filter or None, "watcher_emails": watcher_emails,
+                "dry_run": bool(dry_run), "preview": preview}
 
     def _weeklydigest_send(self, keyword=None, force=False, dry=False):
         """Send this ISO week's capstone money query — ONE weekly digest email per
