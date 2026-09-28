@@ -1221,6 +1221,35 @@ class PriceDropSendMode(TestSegmentsAndPricedropServer):
         self.assertIn("sends for real", payload["send_mode_label"])
         self.assertEqual(payload["send_modes"], list(server._PRICEDROP_SEND_MODES))
 
+    def test_saving_only_the_send_mode_does_not_disable_the_scan(self):
+        """Regression: a partial save used to flip the SCAN to manual.
+
+        POST /api/pricedrop/config always wrote pricedrop.auto from
+        body.get("auto", "") == "", so saving an unrelated field -- the send
+        mode -- turned auto-scanning off. Caught in production: a round-trip
+        test of the new selector silently stopped the 6-hourly scan.
+        """
+        st, _, body = self._raw("/api/pricedrop/config", method="POST",
+                                body=json.dumps({"auto": True,
+                                                 "interval_hours": 6}).encode(),
+                                cookie=self.cookie)
+        self.assertEqual(st, 200, body)
+        try:
+            self.assertEqual(server._get_setting("pricedrop.auto", "1"), "1")
+            for mode in server._PRICEDROP_SEND_MODES:
+                st, _, body = self._raw("/api/pricedrop/config", method="POST",
+                                        body=json.dumps({"send_mode": mode}).encode(),
+                                        cookie=self.cookie)
+                self.assertEqual(st, 200, body)
+                self.assertEqual(json.loads(body)["auto"], True, mode)
+                self.assertEqual(server._get_setting("pricedrop.auto", "1"), "1",
+                                 "sending only send_mode=%s disabled the scan" % mode)
+                self.assertEqual(server._pricedrop_auto_hours(), 6.0, mode)
+        finally:
+            server._set_setting("pricedrop.auto", "1")
+            server._set_setting("pricedrop.auto_interval", "6")
+            self._mode(None)
+
     def test_invalid_send_mode_is_rejected_and_changes_nothing(self):
         self._mode("manual")
         st, _, body = self._raw("/api/pricedrop/config", method="POST",

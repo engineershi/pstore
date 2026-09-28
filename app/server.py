@@ -16532,16 +16532,22 @@ mvLoad();"""
         auto_live). The two are independent: pausing scans does not stop the
         button, and holding the email does not stop drop detection."""
         body = self._body() or {}
-        auto = str(body.get("auto", "")).strip().lower() in ("1", "on", "true", "yes")
+        # Only write the keys actually present. This handler used to always
+        # write pricedrop.auto from body.get("auto", "") == "", so saving an
+        # UNRELATED field (the send mode) silently flipped the scan to manual.
+        # Turning every partial save into a full overwrite is how an operator
+        # quietly stops getting price drops without knowing why.
+        if "auto" in body:
+            auto = str(body.get("auto")).strip().lower() in ("1", "on", "true", "yes")
+            _set_setting("pricedrop.auto", "1" if auto else "0")
         interval = body.get("interval_hours")
         if interval not in (None, ""):
             try:
                 interval = max(0.5, float(interval))
             except (TypeError, ValueError):
                 interval = None
-        if interval is not None:
-            _set_setting("pricedrop.auto_interval", ("%g" % interval))
-        _set_setting("pricedrop.auto", "1" if auto else "0")
+            if interval is not None:
+                _set_setting("pricedrop.auto_interval", ("%g" % interval))
         send_mode = None
         if "send_mode" in body:
             send_mode = str(body.get("send_mode") or "").strip().lower()
@@ -16550,7 +16556,8 @@ mvLoad();"""
                                         "send_mode must be one of: %s"
                                         % ", ".join(_PRICEDROP_SEND_MODES)})
             _set_setting(_PRICEDROP_SEND_MODE_KEY, send_mode)
-        return self._send(200, {"ok": True, "auto": auto,
+        return self._send(200, {"ok": True,
+                                "auto": _get_setting("pricedrop.auto", "1") == "1",
                                 "interval_hours": _pricedrop_auto_hours(),
                                 "send_mode": _pricedrop_send_cfg()})
 
