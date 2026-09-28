@@ -471,7 +471,12 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
             conn.execute("DELETE FROM email_sends")
             conn.commit()
             conn.close()
-        server.Handler._price_store(None).set_baseline("B012345678", 19.99)
+        # The send reads the price the scanner recorded rather than crawling
+        # Amazon itself, so plant both: first-seen baseline and today's
+        # snapshot.
+        _st = server.Handler._price_store(None)
+        _st.set_baseline("B012345678", 19.99)
+        _st.record("B012345678", price=9.99, reviews=500)
         saved_search = amazon.search
         saved_send = mailer._send
         saved_smtp = (mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD)
@@ -515,8 +520,16 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
                 conn.close()
 
     def _stub_drop(self, price=9.99):
-        """Arm a real price drop and capture outbound mail. Returns the list."""
-        server.Handler._price_store(None).set_baseline("B012345678", 19.99)
+        """Arm a real price drop and capture outbound mail. Returns the list.
+
+        The price the send sees is the one the *scanner* left in the store, so
+        this helper plants exactly what _pricedrop_scan() records: a first-seen
+        baseline plus a current snapshot. amazon.search is kept stubbed and
+        counted so a test can prove the send never re-crawls Amazon itself.
+        """
+        st = server.Handler._price_store(None)
+        st.set_baseline("B012345678", 19.99)
+        st.record("B012345678", price=price, reviews=500)
         self._saved_search = amazon.search
         self._saved_send = mailer._send
         self._saved_smtp = (mailer.SMTP_HOST, mailer.SMTP_USER, mailer.SMTP_PASSWORD)
@@ -524,8 +537,12 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
         mailer.SMTP_USER = "x@x"
         mailer.SMTP_PASSWORD = "pw"
         captured = []
-        amazon.search = lambda asin, top=1: (
-            [{"asin": asin, "title": "Keto Gummies", "price": price}], "stub")
+        self.search_calls = []
+
+        def _search(asin, top=1):
+            self.search_calls.append(asin)
+            return ([{"asin": asin, "title": "Keto Gummies", "price": price}], "stub")
+        amazon.search = _search
         mailer._send = lambda subject, body, to, attachments=None, pixel_url=None, **k: (
             captured.append({"to": to, "subject": subject, "body": body}) or True)
 
@@ -572,6 +589,48 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
             logged = conn.execute("SELECT COUNT(*) c FROM email_sends").fetchone()["c"]
             conn.close()
         self.assertEqual(logged, 0, "a dry run must not log a send")
+
+    def test_pricedrop_send_does_not_recrawl_amazon(self):
+        """The send must reuse the prices the scanner already recorded.
+
+        It used to re-crawl every watched ASIN itself, serially, and to write
+        the whole price store once per ASIN. Against the live catalogue that is
+        ~2,600 sequential Amazon requests behind a lock: the first production
+        dry run was still "sending" after 20 minutes and never settled. The
+        scanner has already fetched and recorded all of it, so the send needs
+        zero requests.
+        """
+        self._seed()
+        captured = self._stub_drop()
+        st, ct, body = self._raw("/api/pricedrop/send", method="POST",
+                                 body=b"{}", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        final = self._wait_pricedrop_send()
+        self.assertEqual(final["status"], "done", final)
+        self.assertEqual(self.search_calls, [],
+                         "the send re-crawled Amazon: %r" % (self.search_calls[:5],))
+        # ...and it still found the drop, from the recorded snapshot.
+        self.assertGreaterEqual(len(final["drops"]), 1)
+        self.assertTrue(captured)
+
+    def test_pricedrop_send_reports_that_a_scan_is_needed(self):
+        """No recorded prices must be reported as needing a scan, not as
+        'no deals today' -- the two are very different to whoever is waiting."""
+        self._seed()
+        st0 = server.Handler._price_store(None)
+        saved = {k: st0._data.pop(k) for k in list(st0._data)}
+        st0.save()
+        try:
+            st, ct, body = self._raw("/api/pricedrop/send", method="POST",
+                                     body=b"{}", cookie=self.cookie)
+            self.assertEqual(st, 200)
+            final = self._wait_pricedrop_send()
+            self.assertEqual(final["status"], "done", final)
+            self.assertEqual(final["drops"], [])
+            self.assertTrue(final.get("needs_scan"))
+        finally:
+            st0._data.update(saved)
+            st0.save()
 
     def test_pricedrop_send_reaches_warm_subscribers(self):
         """Price-drop mail used to go only to `hot`/`converted`.

@@ -17026,6 +17026,8 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                  "drops": data.get("drops") or [],
                  "preview": data.get("preview") or [],
                  "dry_run": bool(data.get("dry_run")),
+                 "needs_scan": bool(data.get("needs_scan")),
+                 "scanned": int(data.get("scanned") or 0),
                  "keyword": data.get("keyword") or None,
                  "error": data.get("error", "")}
         if not state["running"] and state["status"] == "sending":
@@ -17052,6 +17054,10 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                 "drops": res.get("drops") or [],
                 "preview": res.get("preview") or [],
                 "dry_run": bool(res.get("dry_run")),
+                # Surfaced so "nothing was ever scanned" is distinguishable
+                # from "scanned, no deal today" in the admin panel.
+                "needs_scan": bool(res.get("needs_scan")),
+                "scanned": int(res.get("scanned") or 0),
                 "keyword": res.get("keyword") or None, "error": ""}))
 
     def _pricedrop_send(self, keyword=None, min_pct=None, cap=None, dry_run=False):
@@ -17085,21 +17091,40 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                     "dry_run": bool(dry_run), "preview": []}
         fresh = {}
         _reviews = {}
+        # Prices come from the scanner, never from a second crawl of Amazon.
+        #
+        # _pricedrop_scan() has already fetched every watched ASIN concurrently
+        # (8 workers, per-ASIN timeout, crash-resume) and recorded a snapshot
+        # for each. Re-crawling here meant one send made ~2,600 SERIAL Amazon
+        # requests -- and a PriceStore.record() per ASIN, each rewriting the
+        # whole price file -- so a single send ran for tens of minutes while
+        # holding _PRICEDROP_SEND_LOCK, which is how the first production dry
+        # run never settled. Reading the recorded snapshot is the same price
+        # the scanner already saw, and the same one the admin page displays,
+        # for zero requests and zero writes.
         for row in rows:
+            asin = str(row.get("asin") or "").strip().upper()
+            if not asin:
+                continue
             try:
-                items, _src = amazon.search(row["asin"], top=1)
-                if items:
-                    fresh[row["asin"]] = items[0].get("price")
-                    rv = items[0].get("reviews")
-                    if rv is not None:
-                        _reviews[row["asin"]] = rv
+                snaps = store.snapshots(asin)
             except Exception:
                 continue
-        for _a, _p in fresh.items():
-            try:
-                store.record(_a, price=_p, reviews=_reviews.get(_a))
-            except Exception:
+            if not snaps:
                 continue
+            latest = snaps[-1]
+            if latest.get("price") is not None:
+                fresh[asin] = latest.get("price")
+            if latest.get("reviews") is not None:
+                _reviews[asin] = latest.get("reviews")
+        if not fresh:
+            # Nothing has ever been scanned, so there is no observed price to
+            # alert on. Say so instead of returning a bare empty drop list that
+            # reads like "no deals today".
+            return {"ok": True, "drops": [], "candidates": 0, "sent": 0,
+                    "already_sent": 0, "keyword": kw_filter or None,
+                    "dry_run": bool(dry_run), "preview": [],
+                    "needs_scan": True, "scanned": 0}
         result = pricedrop.check(rows, fresh, store=store, min_drop_pct=min_pct)
         drops = result["drops"]
         try:
