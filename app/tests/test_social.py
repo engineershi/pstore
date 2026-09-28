@@ -2035,5 +2035,176 @@ class TestSocialSuite(unittest.TestCase):
         self.assertEqual(self_cred["referrals"], 0)       # own token proves nothing
 
 
+class TestPendingQueueCancel(unittest.TestCase):
+    """Pending-pin queue: the cancel endpoint flips scheduled, unclaimed rows
+    to 'cancelled' so the flush/drip/blitz never deliver them, while claimed
+    (in-flight) posts are left alone."""
+
+    IPKEY = "127.0.0.1|127.0.0.1"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.db = "/tmp/pstore_test_socq_%s.db" % uuid.uuid4().hex[:8]
+        shutil.copy(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "..", "pstore.db"), cls.db)
+        cls._env_backup = {k: os.environ.get(k) for k in (
+            "PSTORE_DB", "PSTORE_ADMIN_EMAIL", "PSTORE_ADMIN_PASSWORD",
+            "PSTORE_URL", "SOCIAL_WEBHOOK")}
+        os.environ["PSTORE_DB"] = cls.db
+        os.environ["PSTORE_ADMIN_EMAIL"] = "owner@test.example"
+        os.environ["PSTORE_ADMIN_PASSWORD"] = "test-pass-123"
+        import importlib
+        importlib.reload(server)
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        cls.PORT = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.cookie = cls._login()
+
+    @classmethod
+    def _login(cls):
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", cls.PORT, timeout=5)
+        conn.request("POST", "/admin/login",
+                     body=b"email=owner@test.example&password=test-pass-123",
+                     headers={"Content-Type": "application/x-www-form-urlencoded"})
+        resp = conn.getresponse()
+        sc = resp.getheader("Set-Cookie")
+        resp.read()
+        conn.close()
+        assert sc and sc.startswith("pstore_admin="), sc
+        return sc.split(";")[0]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.thread.join(timeout=2)
+        cls.httpd.server_close()
+        if os.path.exists(cls.db):
+            os.unlink(cls.db)
+        for k, v in cls._env_backup.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        import importlib
+        importlib.reload(server)
+
+    def setUp(self):
+        for lim, prefix in ((security.API_LIMITER, "api|"),
+                            (security.HTTP_LIMITER, "")):
+            lim.clear(prefix + self.IPKEY)
+        with server._lock:
+            conn = server._db()
+            conn.execute("DELETE FROM social_posts")
+            conn.commit()
+            conn.close()
+        now = datetime.datetime.utcnow()
+
+        def _seed(slug, keyword, status, claimed=False, at_min=6):
+            at = (now + datetime.timedelta(minutes=at_min)).strftime("%Y-%m-%d %H:%M:%S")
+            with server._lock:
+                conn2 = server._db()
+                conn2.execute(
+                    "INSERT INTO social_posts (slug, keyword, platform, utm_content, "
+                    "status, scheduled_at, claimed_at) VALUES (?,?,?,?,?,?,?)",
+                    (slug, keyword, "Pinterest", slug + "-v1", status, at,
+                     "1" if claimed else ""))
+                conn2.commit()
+                conn2.close()
+
+        # two stale old-rule repeats + one sane long-tail + one claimed (in-flight)
+        _seed("keto-bread", "keto", "scheduled", at_min=30)
+        _seed("yoga-pants", "yoga", "scheduled", at_min=90)
+        _seed("best-air-fryer", "best air fryer 2026", "scheduled", at_min=10)
+        _seed("keto-burn", "keto burn supplement", "publishing", claimed=True)
+
+    def _call(self, method, path, body=None):
+        import http.client
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", self.PORT, timeout=8)
+            hdrs = {"Cookie": self.cookie}
+            if body is not None:
+                hdrs["Content-Type"] = "application/json"
+            conn.request(method, path, body=body, headers=hdrs)
+            resp = conn.getresponse()
+            data = resp.read()
+            conn.close()
+        finally:
+            pass
+        if resp.status != 200:
+            self.fail("HTTP %s %s -> %d %r" % (method, path, resp.status, data))
+        return json.loads(data)
+
+    def _ids(self):
+        with server._lock:
+            conn = server._db()
+            rows = conn.execute(
+                "SELECT id, slug, status FROM social_posts "
+                "WHERE status IN ('scheduled','publishing')").fetchall()
+            conn.close()
+        return {r["slug"]: (r["id"], r["status"]) for r in rows}
+
+    def test_queue_lists_pending_with_broad_flag(self):
+        d = self._call("GET", "/api/social/queue?limit=50")
+        self.assertTrue(d["ok"])
+        self.assertEqual(d["total"], 3)  # publishing/claimed row is out of reach
+        by_slug = {r["slug"]: r for r in d["rows"]}
+        self.assertTrue(by_slug["keto-bread"]["broad"])
+        self.assertTrue(by_slug["yoga-pants"]["broad"])
+        self.assertFalse(by_slug["best-air-fryer"]["broad"])
+        self.assertNotIn("keto-burn", by_slug)
+
+    def test_cancel_flips_unclaimed_scheduled_rows(self):
+        ids = self._ids()
+        keto, _ = ids["keto-bread"]
+        yoga, _ = ids["yoga-pants"]
+        burn, burn_st = ids["keto-burn"]  # publishing + claimed: refused
+        self.assertEqual(burn_st, "publishing")
+        d = self._call("POST", "/api/social/queue/cancel",
+                       json.dumps({"ids": [keto, yoga, burn]}).encode())
+        self.assertEqual(d, {"ok": True, "cancelled": 2, "refused": 1})
+        with server._lock:
+            conn = server._db()
+            rows = {r["slug"]: r["status"] for r in conn.execute(
+                "SELECT slug, status FROM social_posts").fetchall()}
+            conn.close()
+        self.assertEqual(rows["keto-bread"], "cancelled")
+        self.assertEqual(rows["yoga-pants"], "cancelled")
+        self.assertEqual(rows["keto-burn"], "publishing")
+        self.assertEqual(rows["best-air-fryer"], "scheduled")
+
+    def test_cancelled_rows_leave_queue_and_pending_count(self):
+        ids = self._ids()
+        keto, _ = ids["keto-bread"]
+        self._call("POST", "/api/social/queue/cancel",
+                   json.dumps({"ids": [keto]}).encode())
+        d = self._call("GET", "/api/social/queue")
+        self.assertEqual(d["total"], 2)
+        self.assertNotIn("keto-bread", {r["slug"] for r in d["rows"]})
+        with server._lock:
+            conn = server._db()
+            n = conn.execute("SELECT COUNT(*) AS n FROM social_posts "
+                             "WHERE status='scheduled'").fetchone()["n"]
+            conn.close()
+        self.assertEqual(n, 2)  # flush/pending count no longer sees it either
+
+    def test_cancel_requires_admin_and_valid_ids(self):
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.PORT, timeout=8)
+        conn.request("POST", "/api/social/queue/cancel",
+                     body=json.dumps({"ids": [1]}).encode(),
+                     headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        data = resp.read()
+        conn.close()
+        self.assertIn(b"unauthorized", data)  # no session -> login wall
+        ids = self._ids()
+        keto, _ = ids["keto-bread"]
+        d = self._call("POST", "/api/social/queue/cancel",
+                       json.dumps({"ids": ["nope"]}).encode())
+        self.assertFalse(d["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()

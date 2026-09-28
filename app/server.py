@@ -1967,6 +1967,44 @@ def _drip_board_card_html():
         seo._clean(last), seo._clean(run_state), horizon, b["daily"])
 
 
+def _drip_queue_card_html():
+    """Pending-pin review card for /admin/social: every scheduled, unclaimed
+    post, with stale repeats (bare head terms, scheduled before the drip
+    learned to rank demand first) highlighted, and a cancel control for the
+    ones the operator does not want posted."""
+    rows = _social_queue_rows(120)
+    if not rows:
+        return ("<section class='card pin-health-card'><h2>⏭️ Pending pins</h2>"
+                "<p class='hint'>No pending unclaimed pins to review.</p></section>")
+    items = []
+    for r in rows:
+        kw = (r.get("keyword") or "").strip()
+        broad = _drip_is_broad_head(kw)
+        family = _drip_family(kw)
+        stale = broad and len(family) <= 1
+        warn = " bad" if stale else ""
+        items.append(
+            "<li%s><label style='display:flex;gap:8px;align-items:center;min-width:0'>"
+            "<input type='checkbox' class='dq-check' value='%d'>"
+            "<code>%s</code><span style='overflow:hidden;text-overflow:ellipsis'>"
+            "%s · %s</span></label></li>"
+            % (warn, r["id"], seo._clean(kw),
+               seo._clean(r.get("slug") or ""), seo._clean(r.get("scheduled_at") or "")))
+    return """<section class="card pin-health-card"><h2>⏭️ Pending pins — cancel stale repeats</h2>
+<p class="hint" style="margin-top:-4px">Rows scheduled under the old ordering
+(<code>keto</code>/<code>yoga</code> repeats and other bare head terms, marked in red)
+are the least winnable posts — they were queued before the drip learned to rank
+buyer demand first. Tick the ones you don't want posted; cancelled rows stay in
+the log but are never delivered.</p>
+<ul class="pin-health bad" id="dq_rows">%s</ul>
+<div class="row" style="margin-top:8px">
+<button class="warm" id="dq_cancel">✖ Cancel selected</button>
+<button class="btnline" id="dq_all">Cancel all listed</button>
+<span id="dqout" class="msg" style="margin-left:10px"></span>
+</div>
+</section>""" % "".join(items)
+
+
 _DRIP_STOP = frozenset((
     "for", "with", "and", "the", "of", "to", "in", "a", "an", "best", "under",
     "on", "at", "no", "that", "your", "you", "vs", "or", "top", "cheap",
@@ -2268,6 +2306,40 @@ def _pending_social_count():
         ).fetchone()["n"]
         conn.close()
     return n
+
+
+def _social_queue_rows(limit=200):
+    """Pending, still-destructible scheduled posts (claimed rows are live and
+    out of reach). Ordered so the oldest due posts surface first; a NULL
+    scheduled_at stays pinned to the back. Returns a plain dict list."""
+    try:
+        with _lock:
+            conn = _db()
+            try:
+                rows = conn.execute(
+                    "SELECT id, slug, keyword, platform, utm_content, scheduled_at, "
+                    "created_at FROM social_posts "
+                    "WHERE status='scheduled' AND COALESCE(claimed_at,'')='' "
+                    "ORDER BY (scheduled_at IS NULL), scheduled_at, id LIMIT ?",
+                    (max(1, int(limit)),)).fetchall()
+                return [dict(r) for r in rows]
+            finally:
+                conn.close()
+    except Exception:
+        return []
+
+
+def _social_queue_total():
+    with _lock:
+        conn = _db()
+        try:
+            n = conn.execute(
+                "SELECT COUNT(*) AS n FROM social_posts "
+                "WHERE status='scheduled' AND COALESCE(claimed_at,'')=''"
+            ).fetchone()["n"]
+            return int(n or 0)
+        finally:
+            conn.close()
 
 
 def _flush_due_social(hook=None, now=None):
@@ -6309,6 +6381,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._seo_snippet(path[len("/seo/snippet/"):])
             if path == "/api/social":
                 return self._social_api(q)
+            if path == "/api/social/queue":
+                return self._social_queue_api(q)
             if path == "/api/social/publish-all/state":
                 return self._social_publish_all_progress()
             if path == "/api/socialengines":
@@ -6518,6 +6592,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._social_blitz()
             if parsed.path == "/api/social/amplify":
                 return self._social_amplify()
+            if parsed.path == "/api/social/queue/cancel":
+                return self._social_queue_cancel()
             if parsed.path == "/api/social/topics":
                 return self._social_topics()
             if parsed.path == "/api/telegram/state":
@@ -11342,6 +11418,60 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
             return self._send(200, b)
         return self._send(200, _drip_board())
 
+    def _social_queue_api(self, q=None):
+        """GET /api/social/queue — the pending, unclaimed scheduled posts, each
+        flagged so the operator can see which ones are stale bare-head repeats
+        (scheduled before the drip ranked demand first)."""
+        q = q or {}
+        try:
+            limit = int((q.get("limit") or [""])[0])
+        except (TypeError, ValueError):
+            limit = 200
+        rows = _social_queue_rows(max(1, min(limit, 500)))
+        out = []
+        for r in rows:
+            kw = (r.get("keyword") or "").strip()
+            out.append({"id": r["id"], "slug": r.get("slug"), "keyword": kw,
+                        "platform": r.get("platform"), "code": r.get("utm_content"),
+                        "at": r.get("scheduled_at"), "created": r.get("created_at"),
+                        "broad": bool(_drip_is_broad_head(kw))})
+        return self._send(200, {"ok": True, "total": _social_queue_total(),
+                                "rows": out})
+
+    def _social_queue_cancel(self):
+        """POST /api/social/queue/cancel — body {ids: [...]}. Flips pending
+        scheduled posts to 'cancelled' so the flush/drip/biltz never deliver
+        them. The guard (status='scheduled' AND unclaimed) is per-row: anything
+        already claimed/publishing is left alone and counted in `refused`; the
+        rows keep their log entry for the status histogram."""
+        body = self._body()
+        if not isinstance(body, dict):
+            return self._send(200, {"ok": False, "error": "json body required"})
+        ids = body.get("ids") or []
+        if isinstance(ids, (int, str)):
+            ids = [ids]
+        try:
+            ids = [int(i) for i in ids][:500]
+        except (TypeError, ValueError):
+            return self._send(200, {"ok": False, "error": "ids must be integers"})
+        if not ids:
+            return self._send(200, {"ok": False, "error": "no ids given"})
+        cancelled = 0
+        with _lock:
+            conn = _db()
+            try:
+                for i in ids:
+                    cur = conn.execute(
+                        "UPDATE social_posts SET status='cancelled' "
+                        "WHERE id=? AND status='scheduled' "
+                        "AND COALESCE(claimed_at,'')=''", (i,))
+                    cancelled += cur.rowcount
+                conn.commit()
+            finally:
+                conn.close()
+        return self._send(200, {"ok": True, "cancelled": cancelled,
+                                "refused": len(ids) - cancelled})
+
     def _schedule_times(self, count, hours=24, now=None):
         """Spread `count` posts across the next `hours`, but snap each slot to a
         high-engagement window (peak-slot biasing) so a niche's batch lands when
@@ -11665,6 +11795,10 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
             drip_board_html = _drip_board_card_html()
         except Exception:
             drip_board_html = ""
+        try:
+            drip_queue_html = _drip_queue_card_html()
+        except Exception:
+            drip_queue_html = ""
         body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Social — pstore</title><link rel="stylesheet" href="/style.css">
@@ -11718,6 +11852,7 @@ ul.pin-health.bad li {{ border-color:#e6b0a5; }}
 </header>
 <main>
 {drip_board_html}
+{drip_queue_html}
 {pin_health_html}
 <section class="card"><h2>📣 Tracked post kits</h2>
 <p class="hint" style="margin-top:-4px">Webhook: {webhook_state}</p>
@@ -11854,6 +11989,26 @@ async function dripsave() {{
 }}
 if ($("drip_run")) $("drip_run").onclick = driprun;
 if ($("drip_save")) $("drip_save").onclick = dripsave;
+async function dqcancel(ids){{
+  $("dqout").textContent = "Cancelling " + ids.length + " pin(s)…";
+  const r = await fetch("/api/social/queue/cancel", {{method:"POST", headers:{{"Content-Type":"application/json"}},
+    body: JSON.stringify({{ids: ids}})}});
+  const d = await r.json().catch(()=>({{ok:false}}));
+  $("dqout").textContent = d && d.ok
+    ? "Cancelled " + d.cancelled + " pin(s)" + (d.refused ? " (" + d.refused + " were already in flight — left alone)." : ".")
+    : ((d && d.error) || "Cancel failed.");
+  setTimeout(()=>location.reload(), 1000);
+}}
+if ($("dq_cancel")) $("dq_cancel").onclick = function(){{
+  const ids = Array.prototype.map.call(document.querySelectorAll(".dq-check:checked"), b=>parseInt(b.value,10));
+  if (!ids.length) {{ $("dqout").textContent = "Tick at least one pin first."; return; }}
+  dqcancel(ids);
+}};
+if ($("dq_all")) $("dq_all").onclick = function(){{
+  const ids = Array.prototype.map.call(document.querySelectorAll(".dq-check"), b=>parseInt(b.value,10));
+  if (!ids.length) {{ $("dqout").textContent = "Queue is already empty."; return; }}
+  dqcancel(ids);
+}};
 }}
 async function ampl(){{
   $("ampout").textContent = "Amplifying winners…";
