@@ -1187,6 +1187,145 @@ class TestSegmentsAndPricedropServer(unittest.TestCase):
         self.assertIn("showNudge", js)
         self.assertIn('setItem("pstore_nudged", "1")', js)
 
+class PriceDropSendMode(TestSegmentsAndPricedropServer):
+    """pricedrop.send_mode: manual / auto_dry / auto_live.
+
+    The drop EMAIL had no control at all -- it rode the daily sequence autosend
+    and fired LIVE to every matching subscriber, which with the live config
+    (autosend on at 09/13/17 UTC) meant real mail to real addresses with no
+    preview and no way to hold it back.
+    """
+
+    def _mode(self, value):
+        with server._lock:
+            conn = server._db()
+            conn.execute("DELETE FROM settings WHERE key=?", (server._PRICEDROP_SEND_MODE_KEY,))
+            if value is not None:
+                conn.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)",
+                             (server._PRICEDROP_SEND_MODE_KEY, value))
+            conn.commit()
+            conn.close()
+        return server._pricedrop_send_cfg()
+
+    def test_send_mode_round_trips_through_the_config_api(self):
+        for mode in server._PRICEDROP_SEND_MODES:
+            st, ct, body = self._raw("/api/pricedrop/config", method="POST",
+                                     body=json.dumps({"send_mode": mode}).encode(),
+                                     cookie=self.cookie)
+            self.assertEqual(st, 200, body)
+            self.assertEqual(json.loads(body)["send_mode"], mode)
+            self.assertEqual(server._pricedrop_send_cfg(), mode)
+        st, _, body = self._raw("/api/pricedrop/state", cookie=self.cookie)
+        payload = json.loads(body)
+        self.assertEqual(payload["send_mode"], "auto_live")
+        self.assertIn("sends for real", payload["send_mode_label"])
+        self.assertEqual(payload["send_modes"], list(server._PRICEDROP_SEND_MODES))
+
+    def test_invalid_send_mode_is_rejected_and_changes_nothing(self):
+        self._mode("manual")
+        st, _, body = self._raw("/api/pricedrop/config", method="POST",
+                                body=json.dumps({"send_mode": "yolo"}).encode(),
+                                cookie=self.cookie)
+        self.assertEqual(st, 400, body)
+        self.assertIn("send_mode", json.loads(body)["error"])
+        self.assertEqual(server._pricedrop_send_cfg(), "manual")
+
+    def test_unset_send_mode_preserves_pre_toggle_behaviour(self):
+        """Deploying the toggle must not silently change what sends. Before it
+        existed the drop mail fired live whenever the sequence autosend was on,
+        so an unset mode resolves to exactly that (and to manual when autosend
+        is off)."""
+        saved_hours = server._AUTOSEND_HOURS
+        try:
+            server._AUTOSEND_HOURS = [9]
+            server._set_setting("autosend.enabled", "1")
+            self.assertEqual(self._mode(None), "auto_live")
+            server._set_setting("autosend.enabled", "0")
+            self.assertEqual(self._mode(None), "manual")
+        finally:
+            server._set_setting("autosend.enabled", "")
+            server._AUTOSEND_HOURS = saved_hours
+        self._mode(None)
+
+    def test_autosend_slot_respects_the_send_mode(self):
+        """The scheduled slot must not send in manual, must not deliver in
+        auto_dry, and must deliver in auto_live."""
+        import server as srv
+        calls = []
+
+        def _fake_send(self, keyword=None, min_pct=None, cap=None, dry_run=False):
+            calls.append({"dry_run": bool(dry_run)})
+            return {"ok": True, "sent": 0, "drops": [], "candidates": 0}
+        saved_send = srv.Handler._pricedrop_send
+        saved_tg = srv.Handler._telegram_feed
+        saved_hours = srv._AUTOSEND_HOURS
+        saved_marker = srv._AUTOSEND_LAST_KEY
+        saved_seq = srv.Handler._sequence_send
+        tg_dry = []
+        srv.Handler._pricedrop_send = _fake_send
+        srv.Handler._telegram_feed = lambda self, drops=None, dry=False, cap=20: (
+            tg_dry.append(bool(dry)) or {"sent": 0})
+        srv.Handler._sequence_send = lambda self: {"payload": {"ok": True, "sent": 0, "errors": 0}}
+        import datetime as dt
+        srv._AUTOSEND_HOURS = [dt.datetime.utcnow().hour]
+        try:
+            for mode, want_send, want_dry in (("manual", False, None),
+                                              ("auto_dry", True, True),
+                                              ("auto_live", True, False)):
+                calls[:] = []
+                tg_dry[:] = []
+                self._mode(mode)
+                srv._AUTOSEND_LAST_KEY = "autosend.mode_test_%s" % mode
+                srv._autosend_tick()
+                self.assertEqual(bool(calls), want_send,
+                                 "mode=%s should%s send" % (mode, "" if want_send else " NOT"))
+                if want_send:
+                    self.assertEqual(calls[0]["dry_run"], want_dry, mode)
+                    # A preview must not leak to Telegram either.
+                    self.assertEqual(tg_dry and tg_dry[0], want_dry, mode)
+        finally:
+            srv.Handler._pricedrop_send = saved_send
+            srv.Handler._telegram_feed = saved_tg
+            srv.Handler._sequence_send = saved_seq
+            srv._AUTOSEND_HOURS, srv._AUTOSEND_LAST_KEY = saved_hours, saved_marker
+            self._mode(None)
+
+    def test_console_reports_the_send_mode_as_config_not_as_health(self):
+        """The send mode is an operator choice, so it must be reported in the
+        config block. Folding it into heartbeat health let a deliberate
+        "manual" overwrite a genuine autosend error status, and the existing
+        heartbeat regression caught exactly that."""
+        st, _, body = self._raw("/api/system", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        self._mode("auto_dry")
+        try:
+            st, _, body = self._raw("/api/system", cookie=self.cookie)
+            payload = json.loads(body)
+            self.assertEqual(payload["config"]["pricedrop_send_mode"], "auto_dry")
+            self.assertIn("delivers nothing",
+                          payload["config"]["pricedrop_send_mode_label"])
+            # ...and a deliberate manual mode never marks a healthy loop down.
+            self._mode("manual")
+            st, _, body = self._raw("/api/system", cookie=self.cookie)
+            by_name = {h["name"]: h for h in json.loads(body)["completed"]}
+            self.assertNotEqual(by_name["autosend"]["status"], "manual")
+        finally:
+            self._mode(None)
+
+    def test_pricedrop_page_offers_both_send_modes_and_a_dry_run_button(self):
+        st, ct, body = self._raw("/admin/pricedrop", cookie=self.cookie)
+        self.assertEqual(st, 200)
+        page = body.decode("utf-8", "replace")
+        self.assertIn('id="send-mode"', page)
+        for mode in server._PRICEDROP_SEND_MODES:
+            self.assertIn('value="%s"' % mode, page)
+        self.assertIn("sendDrops(true)", page)
+        self.assertIn("sendDrops(false)", page)
+        self.assertIn("send_mode", page)
+        # The button used to promise a segment list that no longer matches
+        # what actually sends.
+        self.assertNotIn("Email hot + converted leads", page)
+
 
 if __name__ == "__main__":
     unittest.main()

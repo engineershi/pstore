@@ -857,6 +857,41 @@ _AUTOSEND_HOURS = [int(h) for h in (os.environ.get("AUTOSEND_HOURS") or "").spli
                    if h.strip().isdigit()]  # UTC hours the sequence auto-sends (empty=off)
 _AUTOSEND_LIMIT = int((os.environ.get("AUTOSEND_LIMIT") or "0") or 0) \
     or mailer.MAX_EMAILS_PER_RUN
+# How the price-drop SEND is driven, independent of the scan. The scan has its
+# own pricedrop.auto toggle; this governs the EMAIL, which used to have no
+# control at all -- it rode the daily sequence autosend slot and fired LIVE to
+# every matching subscriber, with no preview and no way to hold it back.
+#   manual    -- only the admin-page button sends
+#   auto_dry  -- scheduled runs every day but deliver nothing; they report who
+#                WOULD have been mailed, so the list can be previewed safely
+#   auto_live -- scheduled runs deliver for real
+_PRICEDROP_SEND_MODES = ("manual", "auto_dry", "auto_live")
+_PRICEDROP_SEND_MODE_KEY = "pricedrop.send_mode"
+_PRICEDROP_SEND_MODE_LABELS = {
+    "manual": "Manual only — emails go out only when you press the button",
+    "auto_dry": "Automatic (preview) — runs on schedule, delivers nothing",
+    "auto_live": "Automatic (live) — runs on schedule and sends for real",
+}
+
+def _pricedrop_send_cfg():
+    """Effective price-drop SEND mode: manual / auto_dry / auto_live.
+
+    An unset value deliberately RESOLVES to whatever the machine did before
+    this toggle existed rather than to a hardcoded default, so deploying it
+    changes nobody's behaviour by surprise: the daily autosend slot used to
+    send live whenever the sequence autosend was enabled. Resolving from
+    _autosend_cfg() means that stays true, and switching the sequence autosend
+    off still silences the drop mail until an operator picks a mode.
+    """
+    raw = (_get_setting(_PRICEDROP_SEND_MODE_KEY) or "").strip().lower()
+    if raw in _PRICEDROP_SEND_MODES:
+        return raw
+    try:
+        return "auto_live" if _autosend_cfg()["enabled"] else "manual"
+    except Exception:
+        return "manual"
+
+
 _AUTOSEND_LAST_KEY = "autosend.last"  # "YYYY-MM-DD:HH" marker so a slot runs once/day
 AUTOSEND_STATE_KEY = "autosend.state"  # json: {status,sent,last_run,last_status,next_run,errors}
 _PRICEDROP_STATE_KEY = "pricedrop.state"  # json progress for the background scraper
@@ -15113,6 +15148,7 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             content_hours = 24
         pd_auto = _get_setting("pricedrop.auto", "1") == "1"
         pd_hours = _pricedrop_auto_hours()
+        pd_send_mode = _pricedrop_send_cfg()
         cadence = {
             "http": ("HTTP server", 60),
             "content": ("Daily content engine (pages + kits)", content_hours * 3600),
@@ -15486,6 +15522,11 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                 "inbound": mailer.inbound_configured(),
                 "autosend_hours": autosend_state.get("hours") or _AUTOSEND_HOURS,
                 "autosend_on": autosend_state.get("status") != "disabled",
+                # Reported as config, NOT as a health status: the send mode is
+                # an operator choice, and folding it into heartbeat health
+                # masked a real autosend error behind a reassuring word.
+                "pricedrop_send_mode": pd_send_mode,
+                "pricedrop_send_mode_label": _PRICEDROP_SEND_MODE_LABELS[pd_send_mode],
                 "social_destination": social_dest,
                 "webhook": bool(_SOCIAL_WEBHOOK or _get_setting("social.webhook")),
                 "webhook_health": dict(wh_stats),
@@ -16486,7 +16527,10 @@ mvLoad();"""
 
     def _pricedrop_config(self):
         """POST /api/pricedrop/config — flip the watcher between manual-only and
-        automatic (auto scans every pricedrop.auto_interval hours)."""
+        automatic (auto scans every pricedrop.auto_interval hours), and pick how
+        the price-drop EMAIL is driven (pricedrop.send_mode: manual / auto_dry /
+        auto_live). The two are independent: pausing scans does not stop the
+        button, and holding the email does not stop drop detection."""
         body = self._body() or {}
         auto = str(body.get("auto", "")).strip().lower() in ("1", "on", "true", "yes")
         interval = body.get("interval_hours")
@@ -16498,17 +16542,30 @@ mvLoad();"""
         if interval is not None:
             _set_setting("pricedrop.auto_interval", ("%g" % interval))
         _set_setting("pricedrop.auto", "1" if auto else "0")
+        send_mode = None
+        if "send_mode" in body:
+            send_mode = str(body.get("send_mode") or "").strip().lower()
+            if send_mode not in _PRICEDROP_SEND_MODES:
+                return self._send(400, {"ok": False, "error":
+                                        "send_mode must be one of: %s"
+                                        % ", ".join(_PRICEDROP_SEND_MODES)})
+            _set_setting(_PRICEDROP_SEND_MODE_KEY, send_mode)
         return self._send(200, {"ok": True, "auto": auto,
-                                "interval_hours": _pricedrop_auto_hours()})
+                                "interval_hours": _pricedrop_auto_hours(),
+                                "send_mode": _pricedrop_send_cfg()})
 
     def _pricedrop_state_api(self):
         """GET /api/pricedrop/state — watcher config + last auto/manual heartbeat
         so the console and pricedrop page share one source of truth."""
         pd = self._price_run_state()
+        mode = _pricedrop_send_cfg()
         return self._send(200, {
             "ok": True,
             "auto": _get_setting("pricedrop.auto", "1") == "1",
             "interval_hours": _pricedrop_auto_hours(),
+            "send_mode": mode,
+            "send_mode_label": _PRICEDROP_SEND_MODE_LABELS[mode],
+            "send_modes": list(_PRICEDROP_SEND_MODES),
             "last_run": pd.get("last_run"),
             "state": pd,
             "send": self._pricedrop_send_state(),
@@ -16578,18 +16635,33 @@ mvLoad();"""
             "if(tries>600){m.textContent='Timed out waiting for the scan \u2014 refresh to see results.';return;}\n"
             "setTimeout(poll,2000);};\n"
             "poll();}\n"
-            "async function sendDrops(){const m=document.querySelector('#msg');\n"
-            "m.textContent='Checking + pushing\u2026';let r,d;"
-            "try{r=await fetch('/api/pricedrop/send',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});d=await r.json();}"
-            "catch(e){m.textContent='\u2717 Could not reach the server.';return;}\n"
+            "async function sendDrops(dry){const m=document.querySelector('#msg');\n"
+            "m.textContent=(dry?'Building preview\\u2026':'Checking + pushing\\u2026');let r,d;\n"
+            "try{r=await fetch('/api/pricedrop/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dry_run:!!dry})});d=await r.json();}\n"
+            "catch(e){m.textContent='\\u2717 Could not reach the server.';return;}\n"
             "if(!d||!d.ok){m.textContent='\\u2717 '+((d&&d.error)||'push failed')+'';return;}\n"
+            "if(d.started===false){m.textContent='A send is already running \\u2014 refresh in a moment.';return;}\n"
             "let tries=0;\n"
             "const poll=async()=>{let st;try{st=await (await fetch('/api/pricedrop/state')).json();}catch(e){}\n"
             "const s=(st&&st.send)||null;\n"
-            "if(s&&!s.running){m.textContent=(s.status==='error')?'\\u2717 '+((s.error)||'push failed'):'\\u2713 Emailed '+(s.sent||0)+' hot/converted leads (already sent '+(s.already_sent||0)+')';return;}\n"
+            "if(s&&!s.running){paintSend(s);m.textContent=(s.status==='error')?'\\u2717 '+((s.error)||'push failed')\n"
+            ":(s.dry_run?'\\u2717 Preview failed':(s.needs_scan?'\\u26a0 Nothing has been scanned yet \\u2014 run a price-drop check first.':'\\u2713 Emailed '+(s.sent||0)+' lead(s) ('+(s.already_sent||0)+' already sent, '+(s.candidates||0)+' candidates)'));\n"
+            "if(s.dry_run&&!s.needs_scan){const pv=s.preview||[];\n"
+            "m.textContent=pv.length?('\\u2713 Preview: '+pv.length+' recipient(s) would get it. Nothing sent.'):'\\u2713 Preview: '+((s.drops||[]).length)+' drop(s) but nobody to send to \\u2014 no subscriber follows a niche with a drop right now.';}\n"
+            "return;}\n"
             "if(tries++>900){m.textContent='Still running \\u2014 refresh to see results.';return;}\n"
             "setTimeout(poll,2000);};\n"
             "poll();}\n"
+            "function paintSend(s){const el=document.querySelector('#send-state');if(!el)return;\n"
+            "const bits=[];\n"
+            "if(s.dry_run)bits.push('Last run: <b>preview only</b>');\n"
+            "else if(s.status==='done')bits.push('Last run: <b>'+(s.sent||0)+' email(s) sent</b>');\n"
+            "if(s.drops&&s.drops.length)bits.push((s.drops.length)+' drop(s) detected');\n"
+            "if(s.candidates!=null)bits.push((s.candidates)+' candidate recipient(s)');\n"
+            "if(s.already_sent)bits.push((s.already_sent)+' skipped (already sent)');\n"
+            "if(s.needs_scan)bits.push('nothing scanned yet');\n"
+            "if(s.error)bits.push('\\u2717 '+s.error);\n"
+            "el.innerHTML=bits.join(' \\u00b7 ');}\n"
             "async function addEvent(){const m=document.querySelector('#ev-msg');m.textContent='Saving\u2026';\n"
             "const body=JSON.stringify({action:'add',name:document.querySelector('#ev-name').value,emoji:document.querySelector('#ev-emoji').value,start:document.querySelector('#ev-start').value,end:document.querySelector('#ev-end').value,hashtags:document.querySelector('#ev-tags').value});\n"
             "let r,d;try{r=await fetch('/api/pricedrop/events',{method:'POST',headers:{'Content-Type':'application/json'},body});d=await r.json();}\n"
@@ -16603,13 +16675,17 @@ mvLoad();"""
             "let d;try{const r=await fetch('/api/pricedrop/state');d=await r.json();}catch(e){return;}\n"
             "document.querySelector('#auto-on').checked=!!d.auto;\n"
             "document.querySelector('#auto-hrs').value=(d.interval_hours||6);\n"
+            "const sm=document.querySelector('#send-mode');if(sm&&d.send_mode)sm.value=d.send_mode;\n"
+            "const sn=document.querySelector('#send-mode-note');if(sn&&d.send_mode_label)sn.innerHTML='Currently: <b>'+d.send_mode_label+'</b>';\n"
+            "try{const ss=await (await fetch('/api/pricedrop/state')).json();paintSend(ss&&ss.send);}catch(e){}\n"
             "document.querySelector('#cfg-status').textContent=d.auto?('Auto scan every '+(d.interval_hours||6)+'h'+(d.last_run?' \u2014 last run '+d.last_run:'')):'Manual only \u2014 use the buttons below.';\n"
             "}\n"
             "async function saveCfg(){const m=document.querySelector('#cfg-status');m.textContent='Saving\u2026';\n"
-            "const body=JSON.stringify({auto:document.querySelector('#auto-on').checked?'1':'0',interval_hours:document.querySelector('#auto-hrs').value});\n"
+            "const se=document.querySelector('#send-mode');\n"
+            "const body=JSON.stringify({auto:document.querySelector('#auto-on').checked?'1':'0',interval_hours:document.querySelector('#auto-hrs').value,send_mode:se?se.value:undefined});\n"
             "let r,d;try{r=await fetch('/api/pricedrop/config',{method:'POST',headers:{'Content-Type':'application/json'},body});d=await r.json();}\n"
             "catch(e){m.textContent='\u2717 Could not save.';return;}\n"
-            "m.textContent=(r.ok?'\u2713 Saved \u2014 auto '+(d.auto?'ON':'OFF')+' every '+(d.interval_hours||6)+'h':'\u2717 '+((d&&d.error)||'failed'));}\n"
+            "m.textContent=(r.ok?('\u2713 Saved \u2014 scans '+(d.auto?'auto every '+(d.interval_hours||6)+'h':'manual')+'; emails: '+(d.send_mode_label||d.send_mode||'?')):'\u2717 '+((d&&d.error)||'failed'));}\n"
             "loadCfg();")
         store = self._price_store()
         allb = store.all()
@@ -16712,6 +16788,16 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
 <span>hours apart</span>
 <button class="warm" onclick="saveCfg()">💾 Save watcher settings</button>
 </div>
+<p class="hint" style="margin-top:14px">Drop <b>emails</b> are controlled separately from the scan, so you can keep finding deals on a schedule while holding every send until you are ready.</p>
+<div class="actions" role="group" aria-label="Price-drop email mode">
+<select id="send-mode" aria-label="Price-drop email mode" style="max-width:100%;padding:8px 10px;border:1px solid var(--inputs-bd);border-radius:8px;background:var(--inputs-bg);color:var(--tx)">
+<option value="manual">✋ Manual only — emails go out only when you press the button</option>
+<option value="auto_dry">🔍 Automatic (preview) — runs on schedule, delivers nothing</option>
+<option value="auto_live">🚀 Automatic (live) — runs on schedule and sends for real</option>
+</select>
+<button class="warm" onclick="saveCfg()">💾 Save email mode</button>
+</div>
+<p class="hint" style="margin-top:10px" id="send-mode-note"></p>
 <p id="cfg-status" class="msg"></p></section>
 <section class="card"><h2>🏷 Watched prices</h2>
 <p class="hint">Baselines are stored on first sight. A drop of &ge; {pricedrop.DEFAULT_MIN_DROP_PCT}% and &ge; ${pricedrop.DEFAULT_MIN_DROP_ABS} counts as a real deal.</p>
@@ -16719,8 +16805,10 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
 <p class="hint" style="margin-top:12px"><b>Run a check</b> to re-scrape current prices and flag who just dropped:</p>
 <div class="actions" role="group" aria-label="Price-drop actions">
 <button class="warm" onclick="runCheck()">🔄 Run price-drop check</button>
-<button class="ghost" onclick="sendDrops()">📨 Email hot + converted leads</button>
+<button class="ghost" onclick="sendDrops(false)">📨 Email price-drop leads now</button>
+<button class="ghost" onclick="sendDrops(true)">👁 Preview who would get it</button>
 </div>
+<p class="hint" style="margin-top:10px" id="send-state"></p>
 <p id="msg" class="msg"></p></section>
 {hotfinder}
 <section class="card" id="out"><h2>✨ Deals right now</h2><p class="hint">Nothing yet — run a check to see drops.</p></section>
@@ -19914,19 +20002,32 @@ def _autosend_tick():
     # Same daily slot also fires price-drop alerts captured via "Track this
     # price" cards — highest-intent emails (someone watching a product wants
     # the exact moment it's on sale). Best-effort, separate send budget.
+    #
+    # Governed by pricedrop.send_mode so the operator can hold the price-drop
+    # mail without touching the sequence autosend (and vice versa). In auto_dry
+    # the send is computed and previewed but nothing leaves the building —
+    # including the Telegram digest, which is a real delivery channel too.
     alerts = 0
     drops = []
+    tg_sent = 0
+    send_mode = _pricedrop_send_cfg()
     try:
-        res2 = Handler._pricedrop_send(stub)
-        alerts = ((res2 or {}).get("sent") or 0)
-        drops = (res2 or {}).get("drops") or []
+        if send_mode == "manual":
+            _set_setting("pricedrop.send_skipped", "manual")
+        else:
+            dry = (send_mode == "auto_dry")
+            res2 = Handler._pricedrop_send(stub, dry_run=dry)
+            alerts = ((res2 or {}).get("sent") or 0)
+            drops = (res2 or {}).get("drops") or []
+            _set_setting("pricedrop.send_skipped", "")
     except Exception:
         alerts = 0
     # Telegram subscribers get the same drops as a compact chat digest (one
-    # message per bot user, only when something is actually on sale).
-    tg_sent = 0
+    # message per bot user, only when something is actually on sale). Kept
+    # silent on a dry run -- a preview that posts to Telegram is not a preview.
     try:
-        tgres = Handler._telegram_feed(stub, drops=drops)
+        tgres = Handler._telegram_feed(stub, drops=drops,
+                                       dry=(send_mode != "auto_live"))
         tg_sent = int(tgres.get("sent") or 0)
     except Exception:
         tg_sent = 0
@@ -19934,7 +20035,7 @@ def _autosend_tick():
     _set_setting(AUTOSEND_STATE_KEY, json.dumps({
         "status": "sent" if ok else "fail", "sent": sent, "errors": errors,
         "hours": cfg["hours"], "limit": cfg["limit"], "last_run": marker,
-        "price_alerts": alerts, "tg_sent": tg_sent}))
+        "price_alerts": alerts, "tg_sent": tg_sent, "drop_mode": send_mode}))
     return "sent" if ok else "fail"
 
 
