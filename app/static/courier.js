@@ -111,6 +111,14 @@
     var email = form.querySelector("[name=email]");
     var first_name = form.querySelector("[name=first_name]");
     var keyword = form.querySelector("[name=keyword]");
+    /* Read the form's OWN hidden source before the page's. Every capture
+       carries one: the PDF gate sends "niche-gate"/"topic-gate"/"landing-gate",
+       the plain opt-in sends the page's own value. This used to read only
+       <main data-source>, so every signup was recorded as a bare "niche" or
+       "topic": gate conversions were indistinguishable from opt-ins, and all
+       1,852 long-tail sub-topics were indistinguishable from their 491 parent
+       hubs in the subscriber table. */
+    var src = form.querySelector("[name=source]");
     var note = form.querySelector(".courier-msg");
     var val = (email && email.value || "").trim();
     if (!val) {
@@ -139,7 +147,7 @@
         email: val,
         first_name: (first_name && first_name.value || "").trim(),
         keyword: (keyword && keyword.value) || slug,
-        source: (main && main.dataset.source) || "niche",
+        source: (src && src.value) || (main && main.dataset.source) || "niche",
         utm_source: utmSource,
         utm_content: utmContent,
         ref: params.get("ref") || ""
@@ -374,7 +382,15 @@
   }
   function buildNudge() {
     if (typeof document.body === "undefined") return null;
-    var kw = main ? (main.getAttribute("data-keyword") || slug) : slug;
+    /* Only a product niche has a data-keyword to promise a guide FOR. The index
+       hubs (/, /blog, /stories) have none, and this used to fall back to the
+       slug -- inventing the keyword "blog" or "stories". /subscribe stored that
+       as the lead's interest, the welcome email found no niche for it, and the
+       lead was sent the largest niche on the site as a guide. Generic "picks"
+       is the honest opt-in: no specific promise that a follow-up email can
+       quietly break. */
+    var real = main ? (main.getAttribute("data-keyword") || "") : "";
+    var kw = real || "picks";
     var card = document.createElement("div");
     card.id = "courier-nudge";
     card.className = "courier-nudge";
@@ -382,12 +398,15 @@
     card.setAttribute("aria-label", "Get the free guide");
     card.innerHTML =
       '<button type="button" class="courier-nudge-x" aria-label="Close">\u00d7</button>' +
-      '<div class="courier-nudge-title">\U0001f4e9 The best ' + escHtml(kw) + ' — ranked</div>' +
+      '<div class="courier-nudge-title">' +
+        (real ? "\U0001f4e9 The best " + escHtml(real) + " \u2014 ranked"
+              : "\U0001f4e9 One ranked guide, every niche") + '</div>' +
       '<p class="courier-nudge-sub">Picks from live Amazon data in a free guide. Drop your email and it\u2019s yours.</p>' +
       '<form class="courier courier-nudge-form">' +
       '<input type="email" name="email" placeholder="you@example.com" required autocomplete="email">' +
       '<button type="submit" class="warm">Send me the guide</button>' +
       '<input type="hidden" name="keyword" value="' + escAttr(kw) + '">' +
+      '<input type="hidden" name="source" value="nudge">' +
       '<p class="courier-msg" style="display:none;font-size:12.5px;margin:6px 0 0"></p></form>' +
       '<p class="courier-nudge-foot">No spam \u2014 unsubscribe any time.</p>';
     card.querySelector(".courier-nudge-x").addEventListener("click", function () {

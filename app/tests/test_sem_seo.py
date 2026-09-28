@@ -1087,7 +1087,11 @@ class TestBlogPagination(unittest.TestCase):
     def test_page_1_indexable_newest_24(self):
         html = seo.render_blog(self._niches(50), page=1).decode()
         self.assertEqual(html.count('<article class="card">'), 24)
-        self.assertEqual(html.count("<h2>"), 24)
+        # One <h2> beyond the 24 cards: the capture gate's heading. Counted
+        # inside <article> so adding or removing the gate doesn't silently
+        # change what this pagination test means.
+        cards = html[html.index('<article class="card">'):html.index("</main>")]
+        self.assertEqual(cards.count("<h2>"), 24)
         self.assertNotIn("noindex,nofollow", html)
         self.assertIn("application/ld+json", html)
         self.assertIn('rel="next"', html)

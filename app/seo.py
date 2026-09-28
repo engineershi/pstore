@@ -414,6 +414,24 @@ def _masthead(links, cta=("/#top-picks", "Today's top picks")):
                market_switcher_html()))
 
 
+def _capture_cta(has_gate):
+    """Masthead CTA target for the crawlable guide pages.
+
+    The button is labelled "Get the free guide", so it has to land on the form
+    that actually gives the guide -- lead_gate_html()'s #gate, whose button is
+    "Send me the free guide ->". It pointed at #courier instead, which is the
+    plain opt-in headed "Updates when these <kw> picks change" and whose button
+    is "Notify me": the headline promise and the form underneath it disagreed,
+    on all 491 niche pages plus their long-tail children. Visitors who believed
+    the button were opted into a different thing than they were offered.
+
+    Falls back to #courier when the page renders no gate (no products), where
+    #gate would be a dead anchor.
+    """
+    return (("#gate", "Get the free guide") if has_gate
+            else ("#courier", "Get the free guide"))
+
+
 def _footer():
     return f"""<footer>
   <div class="foot-wrap">
@@ -647,6 +665,7 @@ def optin_html(keyword, source="niche", anchor=""):
     <input type="text" name="first_name" placeholder="First name (optional)" autocomplete="given-name" maxlength="80">
     <input type="email" name="email" placeholder="you@example.com" required autocomplete="email">
     <input type="hidden" name="keyword" value="{kw}">
+    <input type="hidden" name="source" value="{_clean(source or 'niche')}">
     <button type="submit" class="warm">Notify me</button>
   </div>
   <p class="courier-msg"></p>
@@ -883,7 +902,7 @@ def render_niche(keyword, niche, saved_niches=None, ab_headline=None, ab_variant
                           ("Stories", "/stories", False),
                           ("One-pager", "/lp/" + _slugify(keyword), False),
                           ("Disclosure", "/disclosure", False)],
-                         cta=("#courier", "Get the free guide"))
+                         cta=_capture_cta(bool(items)))
     body = f"""
 {masthead}
 {banner_slot}{style_slot}
@@ -945,12 +964,18 @@ def score_order(items):
 
 
 def render_topic(term, parent_keyword, niche, parent_slug, style_pack=None,
-                 hold=False):
+                 hold=False, saved_niches=None):
     """Long-tail page (/n/<parent>/<term>): reframes the parent niche's ranked
     picks around a related autosuggest term so Google sees a distinct intent.
     Shares the niche's product data (still relevant), URL-canonical for the term,
     and links back to the parent hub. Each generated term is a unique indexable
-    URL — the core of the aggressive long-tail play."""
+    URL — the core of the aggressive long-tail play.
+
+    `saved_niches` drives editorial.related_html. Without it these pages linked
+    out to exactly one URL (the parent hub), so 1,852 of the 3,333 indexable
+    URLs were crawl dead ends: nothing to deepen into, and no route from a
+    sub-topic to a sibling or to a money page. /n/ hubs already passed their
+    saved_niches; the topic renderer never got the argument."""
     items = niche.get("products") or []
     term_slug = _slugify(term)
     canonical = "/n/%s/%s" % (_slugify(parent_keyword), term_slug)
@@ -986,7 +1011,7 @@ def render_topic(term, parent_keyword, niche, parent_slug, style_pack=None,
     masthead = _masthead([("Home", "/", False), ("Blog", "/blog", False),
                           (_clean(parent_keyword.title()), hub, False),
                           ("Disclosure", "/disclosure", False)],
-                         cta=("#courier", "Get the free guide"))
+                         cta=_capture_cta(bool(items)))
     body = f"""
 {masthead}
 {banner_slot}{style_slot}
@@ -1003,6 +1028,7 @@ def render_topic(term, parent_keyword, niche, parent_slug, style_pack=None,
   {lead_gate_html(term or parent_keyword, "topic") if items else ""}
   {editorial.comparison_html(items, term or parent_keyword) if items else ""}
   {editorial.methodology_html()}
+  {editorial.related_html(term or parent_keyword, saved_niches or [])}
   <p class="hint">This is a focused sub-topic of our <a href="{_clean(hub)}">full {_clean(parent_keyword)} guide</a>.</p>
 </div>
 {optin_html(term or parent_keyword, "niche", anchor="courier")}
@@ -1061,7 +1087,7 @@ def render_priceband(amount, parent_keyword, parent_slug, items,
     masthead = _masthead([("Home", "/", False), ("Blog", "/blog", False),
                           (_clean(parent_keyword.title()), hub, False),
                           ("Disclosure", "/disclosure", False)],
-                         cta=("#courier", "Get the free guide"))
+                         cta=_capture_cta(bool(band)))
     body = f"""
 {masthead}
 <main data-niche="{_clean(_slugify(parent_keyword))}" data-source="topic" data-keyword="{_clean(term_label)}" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
@@ -1128,7 +1154,7 @@ def render_vs(title_a, title_b, a_asin, b_asin, parent_keyword, parent_slug,
     masthead = _masthead([("Home", "/", False), ("Blog", "/blog", False),
                           (_clean(parent_keyword.title()), hub, False),
                           ("Disclosure", "/disclosure", False)],
-                         cta=("#courier", "Get the free guide"))
+                         cta=_capture_cta(bool(cand)))
     body = f"""
 {masthead}
 <main data-niche="{_clean(_slugify(parent_keyword))}" data-source="topic" data-keyword="{_clean(term_label)}" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
@@ -1243,6 +1269,10 @@ def render_blog(saved_niches, page=1, per_page=BLOG_PAGE_SIZE):
 </article>"""
     if not cards:
         cards = '<section class="card"><h2>Fresh guides on the way</h2><p class="hint">We\'re ranking new niches now. Check back soon or <a href="/">browse the picks</a>.</p></section>'
+    # /blog is the index every guide is reachable from, and it was the one
+    # crawlable page with no way to capture anyone. A reader who lands on the
+    # index, scans a list, and leaves had no offer to accept.
+    capture = lead_gate_html("picks", "blog")
     nav = ""
     if total_pages > 1:
         prev_link = ('<a class="blog-prev" href="/blog?p=%d" rel="prev">&larr; Newer</a>'
@@ -1254,7 +1284,7 @@ def render_blog(saved_niches, page=1, per_page=BLOG_PAGE_SIZE):
                % (prev_link, page, total_pages, next_link))
     masthead = _masthead([("Home", "/", False), ("Niches", "/#niches", False),
                           ("Blog", "/blog", True), ("Stories", "/stories", False)],
-                         cta=("/#top-picks", "Today's top picks"))
+                         cta=("#gate", "Get the free guide"))
     body = f"""{masthead}
 <main data-niche="blog" data-source="blog" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
 <section class="hero-home">
@@ -1263,6 +1293,7 @@ def render_blog(saved_niches, page=1, per_page=BLOG_PAGE_SIZE):
   <p class="hero-sub">Live price, rating and review signals decide the pick for each niche — honest
   methodology, verified before you click, and no filler anywhere.</p>
 </section>
+{capture}
 {cards}
 {nav}</main>
 """.encode("utf-8")
@@ -1655,14 +1686,19 @@ def render_stories_gallery(saved_niches):
         cards = ('<section class="card"><h2>Fresh stories on the way</h2>'
                  '<p class="hint">We are ranking new niches now — the reel fills up as guides ship. '
                  '<a href="/">Browse the picks</a>.</p></section>')
+    # /stories was the only hub with no capture form; its masthead CTA sent
+    # visitors to the homepage's #top-picks anchor to sign up elsewhere. Now
+    # that the gate is on this page, the CTA points at it, as it does on /n/.
+    capture = lead_gate_html("picks", "stories")
     masthead = _masthead([("Home", "/", False), ("Niches", "/#niches", False),
                           ("Blog", "/blog", False), ("Stories", "/stories", True)],
-                         cta=("/#top-picks", "Today's top picks"))
+                         cta=("#gate", "Get the free guide"))
     body = f"""{masthead}
 <main data-niche="stories" data-source="stories" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
 <section class="hero-home"><p class="eyebrow">The stories reel</p>
 <h1>Every ranked guide, <em>made swipeable</em>.</h1>
 <p class="hero-sub">Verdict up top, live price per pick, honest takes. Fast to share, easy to read.</p></section>
+{capture}
 <div class="features" style="align-items:stretch">{cards}</div>
 </main>
 """.encode("utf-8")

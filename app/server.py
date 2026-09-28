@@ -2768,6 +2768,16 @@ def _default_niche_items():
     return "", []
 
 
+# Opt-in keywords that make no promise about one niche, so serving them the
+# largest niche's guide is a reasonable default. Anything else is a specific
+# request (a /n hub, a long-tail sub-topic) and must never be silently
+# substituted with a different guide.
+_GENERIC_OPTIN_KEYWORDS = frozenset((
+    "picks", "niche", "blog", "stories", "newsletter", "updates",
+    "general", "home", "deals", "top", "best",
+))
+
+
 def _send_welcome_email(subscriber_id, keyword):
     """Best-effort immediate email #1 for a just-opted-in lead (welcome + the
     niche's lead-magnet PDF). Runs on a background thread from /subscribe so the
@@ -2798,6 +2808,15 @@ def _send_welcome_email(subscriber_id, keyword):
             except Exception:
                 continue
         if not items:
+            # No guide for the keyword this lead actually asked for. _default_niche_items()
+            # will hand back whichever niche happens to hold the most products, and
+            # serving that to someone who never mentioned it is worse than sending
+            # nothing: the mail contradicts the promise that earned the address, and
+            # the sub_interests row below then records an interest the visitor never
+            # expressed. Only a lead who opted in generically ("picks", or no keyword
+            # at all) can be served the fallback without inventing an interest.
+            if kw.lower() not in _GENERIC_OPTIN_KEYWORDS:
+                return
             fkw, fitems = _default_niche_items()
             if not fitems:
                 return  # nothing to sell anywhere yet — retried when products land
@@ -8145,7 +8164,8 @@ document.addEventListener("click", function (e) {{
                         res = None
                 if res is None:
                     res = seo.render_topic(term, niche["keyword"], niche,
-                                           parent_slug, style_pack=tpl_pack)
+                                           parent_slug, style_pack=tpl_pack,
+                                           saved_niches=all_niches)
                 if amazon.CACHE_TTL > 0:
                     _render_cache_put(key, res, RENDER_CACHE_DEFAULT_TTL)
                     return self._send_cached(res, "text/html; charset=utf-8")

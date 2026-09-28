@@ -466,7 +466,8 @@ def _section_html(section, ctx):
     <div class="gift">🎁</div>
     <h2>{e(headline)}</h2>
     {sub_html}
-    <form class="courier gate-form" style="max-width:430px;margin:14px auto 0">
+    <form class="courier gate-form" action="/subscribe" method="post"
+          style="max-width:430px;margin:14px auto 0">
       <input type="text" name="first_name" placeholder="First name" autocomplete="given-name">
       <input type="email" name="email" placeholder="you@email.com" required autocomplete="email">
       <input type="hidden" name="keyword" value="{e(kw)}">
@@ -474,6 +475,8 @@ def _section_html(section, ctx):
       <button type="submit">{e(btn)}</button>
       <p class="gate-msg courier-msg" style="display:none"></p>
     </form>
+    <noscript><p class="hint">JavaScript is off, so this form posts normally — you will
+    get the guide by email. Prefer that? Write to <a href="/contact">us</a>.</p></noscript>
     <a class="cta" id="gate-unlock" href="#" rel="noopener"
        style="display:none;margin-top:14px">⬇ {e(pdf_head)}</a>
     {pdf_sub_html}
