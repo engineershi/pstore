@@ -140,6 +140,72 @@ def _db_is_persistent():
         return os.path.ismount(path)
 
 
+_REVENUE_INTEGRITY_CACHE = {"at": 0.0, "result": None}
+
+
+def revenue_integrity(max_age=300):
+    """Prove that an outbound Amazon link actually carries the affiliate tag.
+
+    Checking that PSTORE_TAG is non-empty is not enough. The tag can be present
+    in the environment and still fail to reach the link: a paid-campaign session
+    override can blank it, a marketplace rewrite can drop it, or the value can
+    be a malformed id Amazon will never credit. Untagged links look identical to
+    tagged ones, so the site keeps "working" and the month-end Associates report
+    is the first place anyone finds out. This builds a real link from a real
+    ASIN and inspects the result.
+
+    Cached, because it is called from the admin dashboard and /admin/system.
+    """
+    now = time.time()
+    cached = _REVENUE_INTEGRITY_CACHE
+    if cached["result"] is not None and now - cached["at"] < max_age:
+        return cached["result"]
+
+    tag = (amazon.AFFILIATE_TAG or "").strip()
+    paid = _get_setting("paid.tag", os.environ.get("PSTORE_PAID_TAG", "")) or ""
+    res = {"ok": False, "tag": tag, "problems": [], "sample": ""}
+    if not tag and not paid:
+        res["problems"].append(
+            "No affiliate tag is set. Every Amazon link renders UNTAGGED and "
+            "earns ZERO commission. Set PSTORE_TAG (or the base tag under "
+            "/admin/keys) and redeploy.")
+
+    asin = ""
+    try:
+        with _lock:
+            conn = _db()
+            row = conn.execute(
+                "SELECT products FROM niches WHERE products IS NOT NULL "
+                "AND products NOT IN ('[]','{}') LIMIT 1").fetchone()
+            conn.close()
+        if row:
+            prods = json.loads(row["products"] or "[]")
+            if isinstance(prods, list) and prods:
+                if isinstance(prods[0], dict):
+                    asin = str(prods[0].get("asin") or "")
+                else:
+                    asin = str(prods[0])
+    except Exception:
+        asin = ""
+
+    if asin:
+        try:
+            url = amazon.affiliate_url(asin)
+            res["sample"] = url
+            if tag and ("tag=" + tag) not in url:
+                res["problems"].append(
+                    "A built Amazon link does not carry the configured tag. "
+                    "Rendered: %s — check PSTORE_TAG and any paid-campaign "
+                    "session override." % url)
+        except Exception as exc:
+            res["problems"].append("Could not build an affiliate URL: %s" % exc)
+
+    res["ok"] = not res["problems"]
+    cached["at"] = now
+    cached["result"] = res
+    return res
+
+
 def _db_durability_warnings():
     """Loud, specific warnings for the two ways this deployment can quietly lose
     every subscriber, click, setting and earnings row in the database.
@@ -1272,6 +1338,58 @@ def _refresh_stale_candidates(now):
     return out
 
 
+def _enrich_products(products):
+    """Fill in missing product fields — above all the product image — from
+    PA-API before the row is persisted.
+
+    `paapi.lookup()` used to be called from exactly one place in the codebase
+    (the settings self-test), never from mining, refresh or the save path. So
+    even with valid credentials the `image` key was never populated and every
+    ranking page rendered zero <img>: the image pipeline shipped on 2026-09-26
+    was inert in production. PA-API also pays an API commission on top of the
+    click commission, so leaving it unused forfeits money twice over.
+
+    No-ops when PA-API is not configured, so the scraping fallback is untouched.
+    Batched 10 per call (the GetItems maximum) and never raises.
+    """
+    try:
+        if not paapi.ready():
+            return products
+        items = list(products or [])
+        if not items:
+            return items
+        wanted, order = {}, []
+        for i, it in enumerate(items):
+            if not isinstance(it, dict):
+                continue
+            asin = str(it.get("asin") or "").strip().upper()
+            if not asin:
+                continue
+            need = not it.get("image") or not it.get("price") or not it.get("title")
+            if not need:
+                continue
+            order.append(i)
+            if asin not in wanted:
+                wanted[asin] = None
+        asins = [a for a in wanted if a]
+        found = paapi.items_by_asin(asins) if asins else {}
+        for a in asins:
+            wanted[a] = found.get(a)
+        for i in order:
+            cur = items[i]
+            add = wanted.get(str(cur.get("asin") or "").strip().upper())
+            if not add:
+                continue
+            # Only ever ADD. Never overwrite a value the scraper already got:
+            # a live scraped price beats a cached PA-API price for freshness.
+            for field in ("image", "price", "currency", "title", "stars", "reviews"):
+                if not cur.get(field) and add.get(field):
+                    cur[field] = add[field]
+        return items
+    except Exception:
+        return products
+
+
 def _refresh_niche(keyword):
     """Re-mine a single saved niche in place. Returns a dict with the updated
     data, or None if the keyword isn't a saved niche. Never raises: on failure
@@ -1297,7 +1415,7 @@ def _refresh_niche(keyword):
             conn.execute(
                 "UPDATE niches SET products=?, score=?, saturation=?, updated_at=datetime('now') "
                 "WHERE keyword=?",
-                (json.dumps(data.get("products") or []),
+                (json.dumps(_enrich_products(data.get("products") or [])),
                  data.get("score"), data.get("saturation"), keyword))
             conn.commit()
             conn.close()
@@ -2173,10 +2291,66 @@ def _claim_due_social(c, rows, stamp):
             "WHERE id=? AND status='scheduled'", (stamp, r["id"]))
 
 
+def _social_images_blob(kit):
+    """The image fields of a kit, as a JSON blob for social_posts.images.
+    Only the fields that carry real raster media are kept."""
+    out = {}
+    for k in ("image_png", "pin_image"):
+        v = (kit or {}).get(k)
+        if v:
+            out[k] = str(v)
+    # 'image' is the SVG share card; keep it only as a last-resort fallback and
+    # never let it be mistaken for the raster Pinterest/Instagram asset.
+    return json.dumps(out) if out else ""
+
+
 def _social_kits(rows):
-    return [{"platform": r["platform"], "name": r["name"] or "",
-             "body": r["body"] or "", "link": r["link"] or "",
-             "slug": r["slug"] or "", "keyword": r["keyword"] or ""} for r in rows]
+    """Rebuild full post kits from queued `social_posts` rows.
+
+    This function used to hand back six bare fields and nothing else, so every
+    kit delivered to a native platform arrived with no image at all. The
+    consequences were concrete, not cosmetic:
+
+      * Instagram — `publish.py` needs `image_png or pin_image or image` and
+        returns "Instagram needs an image URL in the kit." when all three are
+        empty, so every Instagram post FAILED and silently fell through to the
+        webhook.
+      * Telegram — sends a photo only when `image_png or image` is present, so
+        every channel post went out as bare text with no share card.
+      * Pinterest — fell back to scraping the landing page's og:image, which is
+        an SVG and is rejected as a pin source.
+
+    `social.post_kits()` has always populated these fields, but the *queue* path
+    rebuilds kits from the database row instead, which is why the images
+    vanished on delivery. Two sources are consulted, in order:
+
+    1. `social_posts.images`, whatever was persisted at schedule time — this is
+       what preserves drip repin variants (`.v2`, `.v3`, ...) that a plain
+       reconstruction would flatten back to `.png`.
+    2. otherwise the canonical rasters, derived from the slug. These are
+       deterministic and therefore cover every row queued before the column
+       existed.
+    """
+    kits = []
+    for r in rows:
+        slug = r["slug"] or ""
+        kit = {"platform": r["platform"], "name": r["name"] or "",
+               "body": r["body"] or "", "link": r["link"] or "",
+               "slug": slug, "keyword": r["keyword"] or ""}
+        raw = r["images"] if "images" in r.keys() else None
+        if raw:
+            try:
+                kit.update(json.loads(raw) or {})
+            except Exception:
+                pass
+        if slug and not kit.get("pin_image"):
+            kit["pin_image"] = social.pint_image_png_url(seo.BASE_URL, slug)
+        if slug and not kit.get("image_png"):
+            kit["image_png"] = social.og_image_png_url(seo.BASE_URL, slug)
+        if slug and not kit.get("image"):
+            kit["image"] = social.og_image_url(seo.BASE_URL, slug)
+        kits.append(kit)
+    return kits
 
 
 def _deliver_claimed_social(rows, hook):
@@ -2443,6 +2617,36 @@ def _set_consolidation_holds(slugs):
 _HOLD_PATH_RE = re.compile(r"^/(?:n|lp|stories)/([a-z0-9-]+)(?:/|$)")
 
 
+_LP_INDEX_CACHE = {"at": 0.0, "value": None}
+
+
+def _lp_pages_indexable():
+    """Should /lp/<slug> landing pages be indexed?
+
+    Default NO, which is a business decision rather than a technical one.
+    Landing pages are conversion destinations — they receive paid clicks, email
+    clicks, Telegram hits and social pins — and none of that needs them in the
+    index. Meanwhile all 511 of them sit at ~97% mutual similarity and target
+    the same intent as the /n/<slug> hub we actually need to rank, so indexing
+    them splits our own authority. Measured: 511 pages, 97% identical, zero
+    impressions.
+
+    Pages stay fully live and keep every link, form and CTA; they are simply
+    excluded from search. Flip `seo.lp_index` to 1 to restore the old behaviour
+    in one setting, with no redeploy of content.
+    """
+    cached = _LP_INDEX_CACHE
+    now = time.time()
+    if cached["value"] is not None and now - cached["at"] < 60:
+        return cached["value"]
+    raw = _get_setting("seo.lp_index")
+    val = (raw is not None
+           and str(raw).strip().lower() in ("1", "on", "true", "yes"))
+    cached["at"] = now
+    cached["value"] = val
+    return val
+
+
 def _path_is_held(path):
     """True when a request path belongs to a niche parked by consolidation.
 
@@ -2461,6 +2665,278 @@ def _path_is_held(path):
     return bool(m) and m.group(1) in _consolidation_holds()
 
 
+_LP_PATH_RE = re.compile(r"^/lp(/|$)")
+
+
+_CANNIBAL_CACHE = {"at": 0.0, "val": None}
+
+
+def _asin_set(products):
+    """The set of ASINs behind a niche's product block."""
+    out = set()
+    for p in (products or []):
+        if isinstance(p, dict):
+            a = str(p.get("asin") or "").strip().upper()
+            if a:
+                out.add(a)
+    return out
+
+
+def _jaccard(a, b):
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    if not inter:
+        return 0.0
+    return inter / float(len(a | b))
+
+
+def _slug_qualifier_tokens():
+    """Tokens that qualify a product term rather than name a different product.
+
+    Used only for *reporting* which family a page belongs to — never to auto-hold.
+    `best griddle` vs `best air fryer` are different products; `best griddle` vs
+    `best electric griddle` are the same page twice.
+    """
+    return frozenset((
+        "ft", "feet", "inch", "inches", "cm", "meter", "m", "g", "kg", "lb",
+        "lbs", "oz", "quart", "liter", "litre", "ml", "size", "pack", "count",
+        "set", "piece", "pieces", "pair", "kit", "electric", "portable",
+        "heavy", "duty", "large", "small", "medium", "extra", "pro",
+        "professional", "commercial", "foldable", "collapsible", "adjustable",
+        "rechargeable", "cordless", "wireless", "waterproof", "stainless",
+        "steel", "nonstick", "budget", "cheap", "premium", "under", "over",
+        "with", "without", "for", "to", "a", "the", "and", "of", "in", "on",
+        "accessories", "accessory", "replacement", "cover", "case", "liner",
+        "holder", "stand", "rack", "tray", "parts", "reviews", "review",
+        "vs", "versus", "near", "me", "2025", "2024", "2026",
+    ))
+
+
+def _niche_clicks_by_slug():
+    """{slug: click_count} with long-tail topic clicks folded into their parent
+    niche. One query — used to pick the keeper and to protect proven winners."""
+    with _lock:
+        conn = _db()
+        parent_for = {}
+        try:
+            for tr in conn.execute(
+                    "SELECT parent_slug, slug FROM topics").fetchall():
+                parent_for[tr["slug"]] = tr["parent_slug"]
+        except Exception:
+            pass
+        rows = conn.execute(
+            "SELECT slug, COUNT(*) AS clicks FROM clicks "
+            "WHERE slug != '' AND asin != '' GROUP BY slug").fetchall()
+        conn.close()
+    out = {}
+    for r in rows:
+        slug = r["slug"]
+        # fold topic -> parent, then parent -> itself (transitively safe because
+        # parent_of is a shallow two-level tree)
+        slug = parent_for.get(slug, slug)
+        out[slug] = out.get(slug, 0) + (r["clicks"] or 0)
+    return out
+
+
+def _cannibalization_report(min_overlap=0.8, min_products=3, use_cache=True):
+    """Find saved niches that are the same page wearing different keywords.
+
+    The audit measured 92% of live niches competing with each other and zero
+    impressions. The overwhelming majority of that is not a judgement call: it
+    is two rows whose product blocks are the same ASINs, which means Amazon
+    returns one identical set for both keywords and both pages render the same
+    cards with one word changed. That is duplication regardless of which
+    product vertical the owner eventually picks, so it is safe to park.
+
+    Detection is deliberately conservative — it auto-qualifies only on
+    *objective product-set overlap*:
+      * both niches must carry at least `min_products` ASINs (a 2-product
+        overlap is noise, not evidence), and
+      * their ASIN sets must share at least `min_overlap` Jaccard similarity.
+
+    Anything weaker (shared head noun, adjacent modifiers, a vertical overlap
+    such as `griddle`/`air fryer`) is returned in `families` for a human to
+    look at but is NEVER held automatically. Killing a vertical is a business
+    decision and this function refuses to make it.
+
+    Never holds a niche that has earned real outbound clicks — pageviews can be
+    wrong, but a click already converted is money and is left alone. Never
+    holds every member of a family, so each intent keeps a representative.
+    """
+    key = (min_overlap, min_products)
+    now = time.time()
+    if (use_cache and _CANNIBAL_CACHE["val"] is not None
+            and _CANNIBAL_CACHE.get("key") == key
+            and now - _CANNIBAL_CACHE["at"] < 120):
+        return _CANNIBAL_CACHE["val"]
+
+    niches = _niches_rows()
+    holds = _consolidation_holds()
+    clicks = _niche_clicks_by_slug()
+
+    # --- slug collisions, reported separately --------------------------------
+    # Two keywords can slugify to the same URL ("back-pain" / "back pain"), in
+    # which case the second row has no page of its own — it is shadowed by the
+    # first and can never receive impressions. That is hard duplication, but the
+    # right remedy is deleting the dead row, not holding the slug: holding would
+    # noindex the one page that *does* render. Deletion is irreversible and a
+    # slug hold is not, so this is surfaced for a human rather than auto-applied.
+    by_slug = {}
+    for n in niches:                      # _niches_rows is ordered by id ASC,
+        slug = seo._slugify(n.get("keyword") or "")
+        if not slug or slug in holds:
+            continue
+        by_slug.setdefault(slug, []).append(n)
+
+    collisions = []
+    for slug, rows in by_slug.items():
+        if len(rows) > 1:
+            ranked = sorted(
+                rows, key=lambda n: (-clicks.get(slug, 0),
+                                     len(n.get("keyword") or ""),
+                                     n.get("keyword") or ""))
+            collisions.append({
+                "slug": slug,
+                "keywords": [r.get("keyword") for r in rows],
+                "keep": ranked[0].get("keyword"),
+                "shadowed": [r.get("keyword") for r in ranked[1:]],
+                "same_products": len({
+                    frozenset(_asin_set(r.get("products")))
+                    for r in rows}) == 1,
+            })
+
+    live = []
+    for slug, rows in by_slug.items():
+        # representative = the one with clicks, else the shortest keyword
+        n = sorted(rows, key=lambda r: (-clicks.get(slug, 0),
+                                        len(r.get("keyword") or ""),
+                                        r.get("keyword") or ""))[0]
+        a = _asin_set(n.get("products"))
+        if len(a) >= min_products:
+            live.append({"slug": slug, "keyword": n.get("keyword"),
+                         "asins": a, "clicks": clicks.get(slug, 0)})
+
+    # Union-find over the pairwise overlap graph.
+    parent = {x["slug"]: x["slug"] for x in live}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    pairs = 0
+    for i in range(len(live)):
+        for j in range(i + 1, len(live)):
+            ov = _jaccard(live[i]["asins"], live[j]["asins"])
+            if ov >= min_overlap:
+                union(live[i]["slug"], live[j]["slug"])
+                pairs += 1
+
+    groups = {}
+    for x in live:
+        groups.setdefault(find(x["slug"]), []).append(x)
+
+    def keeper_score(x):
+        """Rank a keeper: real clicks first, then money per click, then the
+        shortest/most-generic term (a bare `best griddle` outranks
+        `best griddle 50ft electric` for head demand), deterministic last."""
+        cat = earnings.classify(x["keyword"])
+        try:
+            ppc = earnings.per_click_value(cat) if cat else 0.0
+        except Exception:
+            ppc = 0.0
+        return (-x["clicks"], -(ppc or 0.0), len(x["slug"].split("-")),
+                len(x["keyword"]), x["slug"])
+
+    dup_groups, hold_slugs = [], []
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        members.sort(key=keeper_score)
+        keeper = members[0]
+        # Protect proven winners: `keeper_score` already sorts clicked pages
+        # first, so a member with real outbound clicks can only ever be the
+        # keeper. Everything else in the group is a candidate for parking. The
+        # keeper is always kept, so no intent loses its last representative.
+        losers = [m for m in members[1:] if m["clicks"] == 0]
+        if not losers:
+            continue
+        dup_groups.append({
+            "keeper": keeper["slug"],
+            "keeper_keyword": keeper["keyword"],
+            "hold": [m["slug"] for m in losers],
+            "hold_keywords": [m["keyword"] for m in losers],
+            "members": [{"slug": m["slug"], "keyword": m["keyword"],
+                         "clicks": m["clicks"],
+                         "products": len(m["asins"])} for m in members],
+        })
+        hold_slugs.extend(m["slug"] for m in losers)
+
+    # Reporting only: head-noun families, to show what a human still owes us.
+    quals = _slug_qualifier_tokens()
+    fam = {}
+    for x in live:
+        core = tuple(t for t in x["slug"].split("-") if t not in quals)
+        if core:
+            fam.setdefault(core, []).append(x["slug"])
+    families = [
+        {"family": "-".join(k), "pages": v}
+        for k, v in sorted(fam.items(), key=lambda kv: -len(kv[1]))
+        if len(v) > 1
+    ]
+
+    result = {
+        "live_niches": len(live),
+        "overlap_threshold": min_overlap,
+        "min_products": min_products,
+        "duplicate_pairs": pairs,
+        "groups": sorted(dup_groups, key=lambda g: -len(g["hold"])),
+        "holdable": sorted(set(hold_slugs)),
+        "collisions": collisions,
+        "families": families[:60],
+        "family_count": len(families),
+    }
+    _CANNIBAL_CACHE.update({"key": key, "at": now, "val": result})
+    return result
+
+
+def _apply_cannibalization_holds(min_overlap=0.8, min_products=3,
+                                 dry_run=True):
+    """Park the objectively-duplicated niches found by the report.
+
+    Reversible in one click: the holds are a comma-separated setting, and
+    clearing it restores full indexability. Pages stay live throughout — they
+    are only removed from the index and the sitemap, so a wrong call costs
+    rankings, not conversions.
+    """
+    rep = _cannibalization_report(min_overlap, min_products, use_cache=False)
+    existing = _consolidation_holds()
+    fresh = [s for s in rep["holdable"] if s not in existing]
+    if dry_run:
+        return {"ok": True, "dry_run": True, "would_hold": fresh,
+                "would_hold_count": len(fresh),
+                "keeper_map": {g["keeper"]: g["hold"] for g in rep["groups"]},
+                "overlap_threshold": min_overlap,
+                "min_products": min_products}
+    if not fresh:
+        return {"ok": True, "dry_run": False, "held": [], "held_count": 0,
+                "message": "no new duplicates found"}
+    merged = sorted(set(existing) | set(fresh))
+    _set_setting("seo.consolidation.holds", ",".join(merged))
+    _HOLDS_CACHE.update({"key": "seo.consolidation.holds", "at": 0.0, "val": None})
+    _CANNIBAL_CACHE.update({"val": None, "at": 0.0})
+    return {"ok": True, "dry_run": False, "held": fresh,
+            "held_count": len(fresh), "total_holds": len(merged),
+            "overlap_threshold": min_overlap, "min_products": min_products}
+
+
 _ROBOTS_META_RE = re.compile(
     rb"<meta\s+name=[\"']robots[\"']\s+content=[\"'][^\"']*[\"']\s*/?>", re.I)
 _ROBOTS_NONE_RE = re.compile(rb"<meta\s+name=[\"']robots[\"']", re.I)
@@ -2468,7 +2944,7 @@ _NOINDEX_META = b'<meta name="robots" content="noindex, follow">'
 
 
 def _force_noindex(body, path):
-    """Force noindex on a held page's robots meta.
+    """Force noindex where the page should not compete in search.
 
     Applied as a chokepoint in the GET dispatcher instead of a `hold=True`
     argument on each renderer. `render_niche`/`render_topic` already accept the
@@ -2476,10 +2952,21 @@ def _force_noindex(body, path):
     would silently escape consolidation. Centralising it means a route added
     later inherits the behaviour instead of needing a remember-to-thread-this
     edit. Idempotent, so double-applying is harmless.
+
+    Two independent reasons a page is forced here:
+      * its niche is held by topical consolidation, or
+      * it is a /lp/ landing page and landing pages are not indexable
+        (`seo.lp_index`, default off). Both stay fully live for visitors.
     """
-    if not _path_is_held(path):
-        return body
     if not body:
+        return body
+    p = path or ""
+    why = None
+    if _path_is_held(p):
+        why = "consolidation"
+    elif not _lp_pages_indexable() and _LP_PATH_RE.match(p):
+        why = "landing-page"
+    if why is None:
         return body
     if not _ROBOTS_NONE_RE.search(body):
         # No robots meta at all -- insert one so the page is unambiguously
@@ -3046,9 +3533,94 @@ def _content_schedule_slots(count, hours=24, now=None):
     return out
 
 
+_CONTENT_ON = ("1", "on", "true", "yes")
+
+# Fail-closed page ceiling for the content engine. 3,526 indexable URLs at
+# ~220/day produced zero Search Console impressions; 400 is a deliberately
+# conservative "enough pages to rank, few enough to be credible" corpus for a
+# single-vertical site. Raise it only after consolidating to one vertical.
+DEFAULT_CONTENT_MAX_PAGES = 400
+
+
+def _indexable_url_estimate():
+    """How many URLs the sitemap would publish right now.
+
+    Mirrors Handler._sitemap exactly (dedupes colliding slugs, skips
+    product-less niches, skips consolidation holds, skips topics whose parent
+    is not live) so the content engine's ceiling cannot disagree with what
+    crawlers are actually handed.
+    """
+    with _lock:
+        conn = _db()
+        try:
+            nrows = conn.execute(
+                "SELECT keyword, products FROM niches").fetchall()
+            tro = conn.execute(
+                "SELECT parent_slug, slug FROM topics").fetchall()
+        finally:
+            conn.close()
+    holds = _consolidation_holds()
+    live = set()
+    for r in nrows:
+        prods = (r["products"] or "").strip()
+        if not prods or prods in ("[]", "{}"):
+            continue
+        try:
+            kw = seo._slugify(r["keyword"])
+        except Exception:
+            kw = "niche"
+        if kw in holds or kw in live:
+            continue
+        live.add(kw)
+    # home + /blog + /stories + static pages
+    total = 3 + len(seo.STATIC_PAGES)
+    total += len(live)                       # /n/<slug>
+    total += len(live)                       # /stories/<slug>
+    if _lp_pages_indexable():
+        total += len(live)                   # /lp/<slug>, indexable only
+    total += sum(1 for t in tro if t["parent_slug"] in live)
+    return total
+
+
 def _content_enabled():
+    """The unattended content loop is **opt-in**.
+
+    It used to read an unset setting as ON, so the engine ran forever with no
+    operator ever turning it on. That is how the catalogue reached 511 niches /
+    1,985 sub-pages / 3,526 indexable URLs while Search Console reported zero
+    impressions: the loop kept manufacturing near-duplicate pages that competed
+    with each other. Page generation is now fail-closed — you get nothing until
+    you explicitly ask for it.
+    """
     flag = _get_setting("content.enabled")
-    return flag == "" or str(flag).strip().lower() in ("1", "on", "true", "yes")
+    if flag is None:
+        return False
+    return str(flag).strip().lower() in _CONTENT_ON
+
+
+def _content_page_budget_exhausted(built_this_run):
+    """Hard ceiling on total indexable pages, so no combination of settings can
+    reproduce the flood. ``content.max_pages`` counts everything the sitemap
+    would publish (niches + topics + landings + stories); once the corpus is at
+    or above the ceiling the engine builds no more pages, regardless of the
+    daily cap.
+
+    An **unset** setting means DEFAULT_CONTENT_MAX_PAGES. Only an explicit
+    stored value can raise or remove the ceiling, so "never configured" is a
+    safe state rather than an unbounded one.
+    """
+    raw = _get_setting("content.max_pages")
+    if raw is None:
+        cap = DEFAULT_CONTENT_MAX_PAGES
+    else:
+        try:
+            cap = int(float(raw))
+        except Exception:
+            cap = DEFAULT_CONTENT_MAX_PAGES
+    if cap <= 0:
+        return False, 0, 0
+    total = _indexable_url_estimate()
+    return (total >= cap), total, cap
 
 
 def _content_config():
@@ -3059,10 +3631,15 @@ def _content_config():
             return default
     cfg = {
         "enabled": _content_enabled(),
-        "pages_day": _int("content.pages_day", 5),
+        # Page generation defaults to OFF for the same reason the loop does:
+        # every extra auto-generated page dilutes topical authority. Raise this
+        # deliberately, per day, after the vertical is consolidated.
+        "pages_day": _int("content.pages_day", 0),
         "kits_day": _int("content.kits_day", 5),
         "hours": max(1, _int("content.hours", 24)),
         "loop_hours": max(1, _int("content.loop_hours", 24)),
+        "max_pages": (DEFAULT_CONTENT_MAX_PAGES if _get_setting("content.max_pages") is None
+                      else _int("content.max_pages", DEFAULT_CONTENT_MAX_PAGES)),
     }
     only = (_get_setting("content.only") or "").strip()
     cfg["only"] = [k.strip().lower() for k in only.split(",") if k.strip()]
@@ -3118,11 +3695,12 @@ def _content_queue_kits(parent_slug, keyword, kits, hours):
                 continue
             conn.execute(
                 "INSERT INTO social_posts "
-                "(slug, keyword, platform, name, body, link, utm_content, status, scheduled_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
+                "(slug, keyword, platform, name, body, link, utm_content, status, "
+                "scheduled_at, images) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (kit.get("slug") or parent_slug, keyword, kit.get("platform") or "x",
                  kit.get("name") or "", kit.get("body") or "", kit.get("link") or "",
-                 kit.get("utm_content") or "", "scheduled", at))
+                 kit.get("utm_content") or "", "scheduled", at,
+                 _social_images_blob(kit)))
             queued += 1
         conn.commit()
         conn.close()
@@ -3145,6 +3723,14 @@ def _content_run(now=None, limit=None):
     try:
         candidates = _content_candidates(cfg)
         pages_left = limit if limit is not None else cfg["pages_day"]
+        # Ceiling beats any daily cap: it is the guard that cannot be defeated
+        # by leaving a large pages_day behind in settings.
+        exhausted, corpus, cap = _content_page_budget_exhausted(0)
+        summary["corpus_pages"] = corpus
+        summary["max_pages"] = cap
+        if exhausted:
+            summary["pages_blocked"] = "corpus at/over content.max_pages"
+            pages_left = 0
         kits_left = cfg["kits_day"]
         for n in candidates:
             if pages_left <= 0 and kits_left <= 0:
@@ -3531,8 +4117,11 @@ def _schedule_drip_pin(c, at):
             else:
                 conn.execute(
                     "INSERT INTO social_posts (slug, keyword, platform, name, body, link, "
-                    "utm_content, status, scheduled_at) VALUES (?,?,?,?,?,?,?, 'scheduled', ?)",
-                    (slug, c["keyword"], "Pinterest", name, body, link, code, at))
+                    "utm_content, status, scheduled_at, images) "
+                    "VALUES (?,?,?,?,?,?,?, 'scheduled', ?, ?)",
+                    (slug, c["keyword"], "Pinterest", name, body, link, code, at,
+                     _social_images_blob({"pin_image": social.pint_image_png_url(
+                         seo.BASE_URL, slug, variant)})))
             conn.commit()
             conn.close()
     except Exception:
@@ -3951,6 +4540,16 @@ def _ensure_db_schema(conn):
     )""")
     try:
         conn.execute("ALTER TABLE social_posts ADD COLUMN scheduled_at TEXT")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        # Persist the kit's image URLs. Delivery rebuilds kits from these rows
+        # (_social_kits), so without this the scheduled/drip path lost
+        # image/image_png/pin_image entirely: Pinterest fell back to scraping
+        # og:image off the landing page, which is an SVG that Pinterest v5
+        # rejects, and Instagram returned "skipped" with no image at all.
+        conn.execute("ALTER TABLE social_posts ADD COLUMN images TEXT")
         conn.commit()
     except Exception:
         pass
@@ -4551,6 +5150,12 @@ class Handler(BaseHTTPRequestHandler):
             "scraper": amazon.scraper_status(),
             "paapi": paapi.status(),
             "consolidation": {"holds": sorted(_consolidation_holds())},
+            "lp_index": _lp_pages_indexable(),
+            "index_health": {
+                "indexable_urls": _indexable_url_estimate(),
+                "page_ceiling": DEFAULT_CONTENT_MAX_PAGES,
+                "cannibalizable": len(_cannibalization_report()["holdable"]),
+            },
             "social": {
                 "webhook": bool(_get_setting("social.webhook")),
                 "keys": {
@@ -6453,6 +7058,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._analytics_api()
             if path == "/api/pin-health":
                 return self._pin_health_api(q)
+            if path == "/api/cannibalization":
+                return self._cannibalization_api()
             if path == "/api/subjects":
                 return self._subjects_api(q)
             if path == "/api/mail":
@@ -6671,6 +7278,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._variants_autoclean()
             if parsed.path == "/api/subjects/autoclean":
                 return self._send(200, self._subjects_autoclean())
+            if parsed.path == "/api/cannibalization":
+                return self._cannibalization_api()
             if parsed.path == "/api/ai/models":
                 return self._ai_models()
             if parsed.path == "/api/ai/fill":
@@ -6884,6 +7493,17 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 except (TypeError, ValueError):
                     v = 0.0
                 _set_setting("email.freq.min_gap_hours", str(v))
+        # Landing-page index policy. Off by default: /lp/ pages are conversion
+        # destinations that sat at 97% mutual similarity against the /n/ hubs
+        # and earned zero impressions, so indexing them only split our own
+        # authority. Posting 1 restores the previous behaviour immediately.
+        seo_blk = body.get("seo")
+        if isinstance(seo_blk, dict) and "lp_index" in seo_blk:
+            raw = seo_blk.get("lp_index")
+            on = str("" if raw is None else raw).strip().lower() in (
+                "1", "on", "true", "yes")
+            _set_setting("seo.lp_index", "1" if on else "")
+            _LP_INDEX_CACHE.update({"value": None, "at": 0.0})
         # Topical consolidation. A held niche stays live for visitors but is
         # served noindex and dropped from sitemap.xml, so the site stops
         # competing with itself. `holds` is the whole set, so posting it
@@ -7217,7 +7837,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         keyword = str(body.get("keyword") or "").strip()
         if not keyword:
             return self._send(400, {"error": "keyword required"})
-        products = json.dumps(body.get("products") or [])
+        products = json.dumps(_enrich_products(body.get("products") or []))
         with _lock:
             conn = _db()
             cur = conn.execute(
@@ -7516,7 +8136,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                     "INSERT INTO niches (keyword, market, score, saturation, products) "
                     "VALUES (?,?,?,?,?)",
                     (n["keyword"], amazon.MARKET, n.get("score"), n.get("saturation"),
-                     json.dumps(n["products"])))
+                     json.dumps(_enrich_products(n["products"]))))
                 conn.commit()
                 conn.close()
             existing_kw.add(k)
@@ -7583,7 +8203,12 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             seen.add(kw)
             lm = (r["updated_at"] or r["created_at"] or "")[:10] or "2026-08-28"
             entries.append((f"/n/{kw}", lm))
-            entries.append((f"/lp/{kw}", lm))
+            # /lp/ pages are noindex unless the operator explicitly opts back
+            # in (seo.lp_index). Never list a page we hand the crawler as
+            # noindex: that contradiction is exactly what the sitemap exists
+            # to prevent, and we have 511 landing pages that are 97% identical.
+            if _lp_pages_indexable():
+                entries.append((f"/lp/{kw}", lm))
             entries.append((f"/stories/{kw}", lm))
             live.add(kw)
         with _lock:
@@ -8140,6 +8765,60 @@ document.addEventListener("click", function (e) {{
         return self._send(200, {"keyword": kw,
                                 "subjects": self._subjects_for(kw),
                                 "stats": self._subject_stats(kw)})
+
+    def _cannibalization_api(self):
+        """GET  — report which saved niches are the same page twice.
+        POST — park the objectively-duplicated ones (body: apply=1).
+
+        92% mutual overlap and zero impressions is the measured state of this
+        site, so this is the highest-value single lever available. `apply` is a
+        separate explicit POST on purpose: the report is free to run, the write
+        has to be asked for. `dry_run` still defaults true on the write so a
+        careless client cannot silently park a page.
+        """
+        if self.command == "GET":
+            # A GET carries its parameters in the query string, not a body.
+            try:
+                q = urllib.parse.parse_qs(
+                    urllib.parse.urlsplit(getattr(self, "path", "")).query)
+            except Exception:
+                q = {}
+            def _qnum(key, default, cast):
+                raw = (q.get(key) or [""])[0].strip()
+                if not raw:
+                    return default
+                try:
+                    return cast(raw)
+                except Exception:
+                    return default
+            rep = _cannibalization_report(
+                _qnum("overlap", 0.8, float), _qnum("min_products", 3, int),
+                use_cache=False)
+            return self._send(200, rep)
+        body = _body()
+        apply_now = bool(body.get("apply"))
+        ov = body.get("overlap")
+        mp = body.get("min_products")
+        try:
+            ov = float(ov) if ov not in (None, "") else 0.8
+        except Exception:
+            ov = 0.8
+        try:
+            mp = int(mp) if mp not in (None, "") else 3
+        except Exception:
+            mp = 3
+        res = _apply_cannibalization_holds(ov, mp, dry_run=not apply_now)
+        if apply_now and res.get("held"):
+            # Parking a page only matters once Google recrawls it and sees the
+            # new noindex, so ping exactly the URLs whose state changed. Every
+            # route carrying the keyword needs it: the /n/ hub, its /lp/ and
+            # /stories/ siblings and any long-tail topics under it.
+            paths = []
+            for slug in res["held"]:
+                paths += ["/n/%s" % slug, "/lp/%s" % slug,
+                          "/stories/%s" % slug]
+            _fire_indexnow_urls(paths)
+        return self._send(200, res)
 
     def _subjects_autoclean(self, min_sends=None):
         """Email-subject A/B auto-cleanup: for each keyword + email_index, once a
@@ -13406,7 +14085,7 @@ fresh();
         except Exception as e:
             return self._send(200, {"ok": False, "error": "mine failed: %s" % str(e)[:200]})
         n = res["niche"] or {}
-        products = json.dumps(n.get("products") or [])
+        products = json.dumps(_enrich_products(n.get("products") or []))
         with _lock:
             conn = _db()
             cur = conn.execute(
@@ -15551,6 +16230,13 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
             # silently: untagged links still look perfect and earn nothing.
             issues.append("No affiliate tag set — every Amazon link is rendering "
                           "UNTAGGED and earns ZERO commission (set PSTORE_TAG)")
+        else:
+            # Env var present is not proof the tag reaches the link.
+            ri = revenue_integrity()
+            if not ri["ok"]:
+                for _p in ri["problems"]:
+                    if "No affiliate tag" not in _p:
+                        issues.append("Revenue integrity: " + _p)
         if not paapi.ready():
             issues.append("PA-API not configured — prices fall back to scraping "
                           "and can go stale (optional but recommended)")
@@ -19492,7 +20178,13 @@ if ($("o_adopt")) $("o_adopt").onclick = async () => {{
             finally:
                 conn.close()
         def cat(r):
-            return ""
+            # Was `return ""` for every row, which valued a 20% jewelry page
+            # and a 4% cable page identically and ranked the operator's
+            # effort toward the cheapest niches on the site. Classifying the
+            # slug restores the real commission rate *and* a realistic average
+            # order value per category (app/earnings.CATEGORY_AOV), which moves
+            # per-click value on this catalogue by ~4x on identical traffic.
+            return earnings.classify(r.get("slug") or "")
         payload = earnings.priority_rows([
             {"niche": r["slug"], "clicks": r["clicks"]} for r in rows], cat)
         months = []
@@ -19508,9 +20200,15 @@ if ($("o_adopt")) $("o_adopt").onclick = async () => {{
         return {
             "ranked": payload["ranked"], "total_est": payload["total_est"],
             "real": real,
-            "note": ("Ranked by estimated commission = clicks x $%.0f AOV x %.1f%% x %.1f%% order rate."
-                     % (earnings.avg_order(""), earnings.commission_pct(""),
-                        earnings.order_rate("") * 100))}
+            "note": ("Ranked per niche by estimated commission = clicks x "
+                     "category AOV x category commission %% x %.2f%% order "
+                     "rate. Each slug is classified to its Amazon commission "
+                     "category (app/earnings.CATEGORY_RULES), so a jewelry or "
+                     "electronics-accessory page outranks a 4%% grocery page on "
+                     "the same number of clicks. Flat global fallback: $%.0f "
+                     "AOV x %.1f%%."
+                     % (earnings.order_rate("") * 100,
+                        earnings.avg_order(""), earnings.commission_pct("")))}
 
     def _earnings_priority(self, q):
         """Earnings-driven prioritization: rank every built niche by its projected
@@ -20376,8 +21074,10 @@ def main():
     amazon.set_tag(os.environ.get("PSTORE_TAG", ""))
     if not amazon.AFFILIATE_TAG:
         # Every product link renders untagged without a tag, so the whole site
-        # silently earns nothing. render.yaml ships PSTORE_TAG pinned to an empty
-        # value, which is exactly how this happens unnoticed -- say so loudly.
+        # silently earns nothing. render.yaml ships PSTORE_TAG with sync:false
+        # so Render prompts rather than accepting an empty value -- say so loudly
+        # anyway, because an empty tag is the one failure that costs 100% of
+        # revenue while every page still looks perfect.
         print("WARNING: PSTORE_TAG is empty — every Amazon link is rendering "
               "UNTAGGED and earns ZERO commission. Set PSTORE_TAG to your "
               "Associates tracking ID (e.g. yourtag-20) in the host env and "

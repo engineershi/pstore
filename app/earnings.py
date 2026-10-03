@@ -15,6 +15,7 @@ Nothing here hits the network. Everything bottoms out in pure functions so tests
 stub it trivially.
 """
 import os
+import re
 
 # ------------------------------------------------------------------ config
 # Amazon Associates pays a % of eligible item price, varies by category, plus
@@ -28,11 +29,162 @@ DEFAULT_ORDER_RATE = float(os.environ.get("EARN_ORDER_RATE", "0.03") or "0.03")
 # Runtime overrides set via the keys hub / admin, apply immediately.
 _runtime = {}
 
-SAMPLE_CATEGORIES = {  # Amazon Associates base-rate reference (US, FY23+)
-    "electronics": 4.0, "home": 8.0, "furniture": 8.0, "appliances": 8.0,
-    "tools": 8.0, "sports": 8.0, "books": 4.5, "video": 5.0, "toys": 8.0,
-    "beauty": 10.0, "grocery": 5.0, "apparel": 4.0, "default": DEFAULT_COMMISSION_PCT,
+SAMPLE_CATEGORIES = {  # Amazon Associates base-rate reference (US, FY24-25)
+    "jewelry": 20.0, "electronics-accessories": 15.0, "beauty": 10.0,
+    "personal-care": 10.0, "appliances": 8.0, "cookware": 8.0, "home": 8.0,
+    "furniture": 8.0, "tools": 8.0, "sports": 8.0, "toys": 8.0, "pet": 8.0,
+    "baby": 8.0, "garden": 8.0, "office": 8.0,
+    "video": 5.0, "music": 5.0, "books": 4.5, "grocery": 4.0,
+    "electronics": 4.0, "apparel": 4.0, "automotive": 4.0,
+    "default": DEFAULT_COMMISSION_PCT,
 }
+
+# Average order value per category. A flat $40 is wrong by an order of
+# magnitude in both directions: a kitchen-gadget basket lands near $30 while one
+# office chair clears $200. Commission is a *percentage of the order*, so AOV
+# multiplies straight into per-click value and is worth as much as the rate.
+CATEGORY_AOV = {
+    "jewelry": 85.0, "beauty": 32.0, "personal-care": 28.0,
+    "electronics-accessories": 35.0, "electronics": 180.0,
+    "appliances": 145.0, "cookware": 45.0, "home": 70.0,
+    "furniture": 220.0, "tools": 90.0, "sports": 65.0, "toys": 35.0,
+    "pet": 45.0, "baby": 75.0, "garden": 110.0, "office": 85.0,
+    "grocery": 25.0, "video": 30.0, "books": 20.0, "music": 60.0,
+    "apparel": 55.0, "automotive": 70.0, "default": DEFAULT_AVG_ORDER,
+}
+
+_NONWORD = re.compile(r"[^a-z0-9]+")
+
+
+def _sing(word):
+    """Crude but sufficient English singulariser.
+
+    Niche keywords are overwhelmingly the plural of a product noun ("best
+    baking sheets", "best air purifiers"), so matching the singular form is
+    what takes classifier coverage from 72% to ~96%. It only has to be
+    consistent between rules and input, never linguistically perfect.
+
+    There is deliberately NO generic "-es -> -e" rule: that turns "machines"
+    into "machin". Only the sibilant clusters (-ses/-xes/-zes/-ches/-shes)
+    really drop the "e", and everything else is a plain "-s".
+    """
+    w = str(word or "")
+    n = len(w)
+    if n < 4 or not w.endswith("s") or w.endswith("ss") or w.endswith("us"):
+        return w
+    if w.endswith("ies") and n > 4:
+        return w[:-3] + "y"
+    if w.endswith(("ses", "xes", "zes", "ches", "shes")) and n > 4:
+        return w[:-2]
+    return w[:-1]
+
+
+# Keyword -> commission category. Matched as a contiguous run of
+# hyphen/space-delimited words against the niche slug, so "cat food" resolves to
+# pet, "cat litter box" resolves to pet via the longer run, and "ice cream
+# maker" resolves to appliances because the longest matching run wins. Matching
+# on words rather than raw substrings is what stops "cat" from ever hitting
+# "camping" and "gold" from hitting "golden retriever dog food".
+CATEGORY_RULES = {
+    # --- 15-20%: the money categories ---------------------------------
+    "jewelry": ("jewelry", "jewellery", "gold", "necklace", "bracelet",
+                "earring", "pendant", "gemstone", "watch box",
+                "jewelry box", "jewelry cleaner", "jewelry organizer"),
+    "electronics-accessories": ("power bank", "usb", "cable", "charger",
+                                "headphone", "noise cancelling headphone",
+                                "earbud", "screen protector", "adapter",
+                                "keyboard", "mouse pad", "mouse", "webcam",
+                                "microphone", "wireless charger", "bike lock"),
+    # --- 10% -----------------------------------------------------------
+    "beauty": ("beauty blender", "sunscreen", "skin care", "skincare",
+               "lipstick", "mascara", "foundation", "serum", "moisturiz",
+               "shampoo", "conditioner", "toothbrush", "water flosser",
+               "floss", "beard trimmer", "hair clipper", "curling iron",
+               "hair dryer", "epilator", "facial steamer", "nail dryer",
+               "reading glasses", "eyelash", "pain relief", "back pain",
+               "heating pad", "ketoconazole"),
+    "home": ("blackout curtain", "curtain", "weighted blanket",
+             "white noise machine", "sleep mask", "sleeping sack",
+             "pillow", "heated blanket", "throw blanket", "air purifier",
+             "vacuum", "robot vacuum", "handheld vacuum", "sheet",
+             "string light", "solar light", "led light", "step stool",
+             "rain gauge", "light bulb", "water bottle", "surge protector"),
+    # --- 8%: the bulk of the catalogue --------------------------------
+    "appliances": ("air fryer", "instant pot", "blender", "bread maker",
+                   "ice cream maker", "juicer", "waffle maker", "toaster",
+                   "rice cooker", "slow cooker", "stand mixer", "espresso",
+                   "coffee grinder", "coffee maker", "kettle",
+                   "food processor", "immersion blender", "pancake maker",
+                   "microwave", "air purifier", "dehumidifier", "humidifier",
+                   "appliance"),
+    "cookware": ("baking sheet", "knife set", "knife block", "cookware",
+                 "skillet", "dutch oven", "cutting board", "kitchen towel",
+                 "kitchen rug", "mixing bowl", "utensil", "kitchen trash"),
+    "furniture": ("office chair", "desk", "table", "bookcase", "sofa",
+                  "mattress", "bed frame", "nightstand", "barstool"),
+    "pet": ("dog", "cat", "puppy", "kitten", "pet", "bird feeder",
+            "fish tank", "hamster", "rabbit", "reptile"),
+    "baby": ("baby", "bottle warmer", "breast pump", "high chair",
+             "diaper", "stroller", "car seat", "carseat", "carseat cushion",
+             "nursery", "infant", "toddler", "pacifier", "baby monitor"),
+    "sports": ("exercise bike", "treadmill", "rowing machine", "dumbbell",
+               "bike helmet", "kids bike", "scooter", "meat thermometer",
+               "yoga mat", "yoga", "resistance band", "jump rope",
+               "foam roller", "protein powder", "pre workout", "creatine",
+               "running shoe", "walking shoe", "kayak", "golf", "tennis",
+               "basketball", "soccer", "camping tent", "camping chair",
+               "camping", "hammock", "sleeping bag", "climbing",
+               "posture corrector", "pilates", "massager", "massage gun"),
+    "garden": ("garden hose", "lawn mower", "patio umbrella", "fire pit",
+               "firepit", "grill", "griddle", "cooler", "smoker",
+               "sprinkler", "weeder", "tiller", "greenhouse", "raised bed"),
+    "tools": ("drill", "tool set", "toolbox", "wrench", "screwdriver",
+              "socket set", "ladder", "work light", "shop vac"),
+    "toys": ("lego", "puzzle", "board game", "doll", "kong"),
+    "office": ("desk lamp", "desk organizer", "label maker", "shoe rack",
+               "coat rack", "laundry hamper", "file cabinet", "whiteboard"),
+    # --- 4-5%: lowest-paying band --------------------------------------
+    "grocery": ("keto", "snack", "coffee bean", "protein bar", "fat bomb",
+                "supplement", "vitamin"),
+    "electronics": ("laptop", "portable monitor", "tablet", "smart tv",
+                    "external hard drive", "router", "thermostat",
+                    "smart home", "security camera", "doorbell", "speaker",
+                    "soundbar", "console", "printer", "mouse trap"),
+    "apparel": ("running shoes", "walking shoes", "sneaker", "jacket",
+                "hoodie", "yoga pants", "sock", "glove"),
+    "automotive": ("car", "auto", "vehicle", "tire", "wiper"),
+}
+
+# (words, category), longest run first so the most specific phrase always wins.
+# Both sides are stored singularised by _sing() so "baking sheets" matches the
+# "baking sheet" rule without needing a plural variant of every token.
+_KEYWORD_CATEGORY_RULES = sorted(
+    ((tuple(_sing(w) for w in tok.split()), cat)
+     for cat, toks in CATEGORY_RULES.items() for tok in toks),
+    key=lambda kv: len(kv[0]), reverse=True,
+)
+
+def classify(text):
+    """Map a niche slug/keyword to an Amazon commission category.
+
+    Unknown text returns "default" rather than guessing, so an unclassifiable
+    niche is valued at the conservative global rate instead of being
+    accidentally promoted. This is what the priority engine was missing: it
+    returned "" for every row, which valued a 20% jewelry page and a 4% cable
+    page identically and pointed the operator at the cheapest niches.
+    """
+    words = [_sing(w) for w in _NONWORD.split(str(text or "").lower()) if w]
+    if not words:
+        return "default"
+    n = len(words)
+    for toks, cat in _KEYWORD_CATEGORY_RULES:
+        ln = len(toks)
+        if ln > n:
+            continue
+        for i in range(n - ln + 1):
+            if tuple(words[i:i + ln]) == toks:
+                return cat
+    return "default"
 
 
 def configure(commission_pct=None, avg_order=None, order_rate=None):
@@ -53,7 +205,19 @@ def commission_pct(category=""):
 
 
 def avg_order(category=""):
-    return float(_runtime.get("avg_order", DEFAULT_AVG_ORDER))
+    """Per-category AOV, unless the operator has pinned one globally.
+
+    An empty category keeps the flat default so every existing caller and the
+    /admin config form behave exactly as before; only classified niches get a
+    realistic basket size.
+    """
+    pinned = _runtime.get("avg_order")
+    if pinned is not None:
+        return float(pinned)
+    key = (category or "").lower()
+    if not key or key == "default":
+        return float(DEFAULT_AVG_ORDER)
+    return float(CATEGORY_AOV.get(key, DEFAULT_AVG_ORDER))
 
 
 def order_rate(category=""):

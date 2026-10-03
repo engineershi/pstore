@@ -111,6 +111,17 @@ class TestHeldNicheRouteFamily(unittest.TestCase):
             # looks exactly like "the hold did not work".
             conn.close()
 
+    def _set_lp_index(self, on):
+        """Toggle the landing-page index policy (see seo.lp_index)."""
+        req = urllib.request.Request(
+            "http://127.0.0.1:%d/api/settings" % self.port,
+            data=json.dumps({"seo": {"lp_index": "1" if on else ""}}).encode(),
+            headers={"Content-Type": "application/json", "Cookie": self.cookie},
+            method="POST")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            r.read()
+        server._LP_INDEX_CACHE.update({"value": None, "at": 0.0})
+
     def _set_holds(self, holds):
         req = urllib.request.Request(
             "http://127.0.0.1:%d/api/settings" % self.port,
@@ -253,6 +264,16 @@ class TestHeldNicheRouteFamily(unittest.TestCase):
             self.assertIn("noindex", r, "%s -> %r" % (p, r))
 
     def test_kept_niche_family_stays_indexable(self):
+        """A niche that consolidation did NOT park must stay in the index.
+
+        Landing pages are indexed here so this test exercises the hold axis
+        alone. They are noindex by default under the independent `seo.lp_index`
+        policy (511 near-identical pages splitting our own authority), which is
+        covered by tests/test_growth_safety.py — without the opt-in, asserting
+        indexability on /lp/ would be asserting a decision we deliberately
+        reversed.
+        """
+        self._set_lp_index(True)
         self._set_holds([HELD])
         for p in ("/n/%s" % KEPT, "/lp/%s" % KEPT):
             st, html = self._get(p)

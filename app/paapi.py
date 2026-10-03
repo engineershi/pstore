@@ -156,23 +156,17 @@ def get_items(asin_list):
         return None
 
 
-def lookup(asin):
-    """Fetch one ASIN and normalize it to the same dict shape the scraper uses
-    so callers can use either source transparently. Returns ``None`` on any
-    missing/disabled/failed path."""
-    data = get_items([asin])
-    if not data:
-        return None
-    item = None
-    for it in (data.get("ItemsResult", {}) or {}).get("Items", []) or []:
-        if (it or {}).get("ASIN") == asin:
-            item = it
-            break
+def normalize_item(item):
+    """Turn one raw GetItems entry into the same dict shape the scraper uses,
+    so callers can treat either source transparently. Pure — no network."""
     if not item:
+        return None
+    asin = str(item.get("ASIN") or "").strip().upper()
+    if not asin:
         return None
     info = item.get("ItemInfo", {}) or {}
     title = ((info.get("Title", {}) or {}).get("DisplayValue")) or ""
-    price_obj = ((item.get("Offers", {}) or {}).get("Listings") or [])
+    price_obj = ((item.get("Offers", {}) or {}).get("Listings", []) or [])
     price = ""
     currency = ""
     if price_obj:
@@ -197,3 +191,37 @@ def lookup(asin):
         "image": image,
         "source": "paapi",
     }
+
+
+def items_by_asin(asin_list):
+    """Fetch and normalize a list of ASINs in GetItems-sized batches.
+    Returns {ASIN: normalized_dict}. Empty when PA-API is unconfigured or every
+    call fails. Never raises."""
+    asins = [str(a).strip().upper() for a in (asin_list or []) if a]
+    out = {}
+    for k in range(0, len(asins), 10):
+        data = get_items(asins[k:k + 10])
+        if not data:
+            continue
+        for raw in (data.get("ItemsResult", {}) or {}).get("Items", []) or []:
+            norm = normalize_item(raw)
+            if norm:
+                out[norm["asin"]] = norm
+    return out
+
+
+def lookup(asin):
+    """Fetch one ASIN and normalize it to the same dict shape the scraper uses
+    so callers can use either source transparently. Returns ``None`` on any
+    missing/disabled/failed path."""
+    data = get_items([asin])
+    if not data:
+        return None
+    item = None
+    for it in (data.get("ItemsResult", {}) or {}).get("Items", []) or []:
+        if (it or {}).get("ASIN") == asin:
+            item = it
+            break
+    if not item:
+        return None
+    return normalize_item(item)

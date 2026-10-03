@@ -993,10 +993,25 @@ class TestRoutes(unittest.TestCase):
         self.assertEqual(st, 200)
         self.assertIn(b"<loc>", body)
         self.assertNotIn(b"/admin</loc>", body)
-        self.assertIn(b"/lp/keto-snacks</loc>", body)
+        self.assertIn(b"/n/keto-snacks</loc>", body)
         self.assertIn(b"/blog</loc>", body)
         for page in seo.STATIC_PAGES:
             self.assertIn(("/%s</loc>" % page).encode(), body)
+
+    def test_sitemap_excludes_noindexed_landing_pages(self):
+        """The sitemap must never list a page we serve as noindex.
+
+        511 landing pages sat at 97% mutual similarity competing with the /n/
+        hubs; they are conversion destinations, not search destinations. They
+        are noindex by default and must therefore be absent here. The opt-in
+        is asserted in test_growth_safety, which owns the policy.
+        """
+        st, ctype, body = self._get("/sitemap.xml")
+        self.assertEqual(st, 200)
+        self.assertNotIn(b"/lp/", body,
+                         "noindexed /lp/ pages must not be in the sitemap")
+        # the hub they duplicated stays listed -- that is the whole point
+        self.assertIn(b"/n/keto-snacks</loc>", body)
 
     def test_sitemap_has_no_duplicate_urls(self):
         st, _, body = self._get("/sitemap.xml")

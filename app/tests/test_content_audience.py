@@ -132,6 +132,8 @@ class TestContentAndAudience(unittest.TestCase):
 
     def test_engine_builds_pages_and_queues_kits_then_stops(self):
         server._set_setting("content.only", "keto snacks")
+        server._set_setting("content.enabled", "1")
+        server._set_setting("content.pages_day", "6")
         try:
             summary = server._content_run(limit=6)
             self.assertTrue(summary["on"])
@@ -180,6 +182,51 @@ class TestContentAndAudience(unittest.TestCase):
             self.assertEqual(summary["kits_queued"], 0)
         finally:
             server._set_setting("content.enabled", "")
+
+    def test_engine_is_off_unless_explicitly_enabled(self):
+        """Regression: the loop used to read an unset setting as ON, so it ran
+        forever with nobody opting in and drove the catalogue to 3,526
+        indexable URLs at ~220/day while Search Console showed zero
+        impressions. Fail-closed is the contract now."""
+        with server._lock:
+            conn = server._db()
+            conn.execute("DELETE FROM settings WHERE key='content.enabled'")
+            conn.commit()
+            conn.close()
+        self.assertFalse(server._content_enabled())
+        summary = server._content_run(limit=6)
+        self.assertFalse(summary["on"])
+        self.assertEqual(summary["pages_built"], 0)
+        self.assertEqual(summary["kits_queued"], 0)
+
+    def test_page_ceiling_blocks_generation_even_with_a_big_daily_cap(self):
+        """A daily cap alone is not a guard - the old flood kept running because
+        pages_day was generous. content.max_pages is the hard ceiling that
+        cannot be defeated by leaving a large pages_day behind."""
+        server._set_setting("content.enabled", "1")
+        server._set_setting("content.pages_day", "500")
+        server._set_setting("content.max_pages", "1")
+        try:
+            exhausted, total, cap = server._content_page_budget_exhausted(0)
+            self.assertTrue(exhausted)
+            self.assertEqual(cap, 1)
+            self.assertGreaterEqual(total, 1)
+            summary = server._content_run(limit=None)
+            self.assertIn("max_pages", summary.get("pages_blocked", ""))
+            self.assertEqual(summary["pages_built"], 0)
+        finally:
+            server._set_setting("content.enabled", "")
+            server._set_setting("content.pages_day", "")
+            server._set_setting("content.max_pages", "")
+
+    def test_corpus_estimate_matches_sitemap(self):
+        """The ceiling counts the same URLs the sitemap publishes, otherwise the
+        guard and the crawler disagree."""
+        with server._lock:
+            conn = server._db()
+            n = conn.execute("SELECT COUNT(*) c FROM niches").fetchone()["c"]
+            conn.close()
+        self.assertGreaterEqual(server._indexable_url_estimate(), n)
 
     def test_engine_respects_only_filter(self):
         server._set_setting("content.only", "nonexistent-niche-xyz")
