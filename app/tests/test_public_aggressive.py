@@ -128,11 +128,47 @@ class TestTopics(unittest.TestCase):
         self.assertIn('data-ev="sticky"', html)
         self.assertIn("prices pulled live", html.lower())
 
-    def test_sitemap_includes_topic(self):
-        sitemap = server.Handler._sitemap(server.Handler.__new__(server.Handler)).decode("utf-8")
-        topics = server.Handler._topics_for(server.Handler.__new__(server.Handler), "keto-snacks")
-        if topics:
-            self.assertIn("/n/keto-snacks/%s" % topics[0]["slug"], sitemap)
+    def _sitemap_text(self):
+        return server.Handler._sitemap(
+            server.Handler.__new__(server.Handler)).decode("utf-8")
+
+    def test_sitemap_excludes_relabelled_topic(self):
+        """A nested /n/<parent>/<term> served by render_topic re-renders the
+        PARENT's product list under the child's H1 -- all 27 children of
+        /n/best-lawn-mower shipped the parent's identical 8 lawn-mower ASINs on
+        2026-10-03, at 89.6% body-text similarity and self-canonical. Those
+        pages render noindex and canonicalise to the parent (see
+        server._thin_topic_paths), so listing them would contradict the page
+        handed to the crawler."""
+        sitemap = self._sitemap_text()
+        topics = server.Handler._topics_for(
+            server.Handler.__new__(server.Handler), "keto-snacks")
+        thin = server._thin_topic_paths()
+        for t in topics:
+            path = "/n/keto-snacks/%s" % t["slug"]
+            if path in thin:
+                self.assertNotIn(path, sitemap)
+            else:
+                self.assertIn(path, sitemap)
+
+    def test_sitemap_keeps_price_band_topic(self):
+        """price-band and vs head-to-head pages DO earn their URL: one filters
+        the parent's picks by price, the other pins two named ASINs. The thin
+        gate must not swallow them."""
+        server._THIN_TOPIC_SET_CACHE.update({"val": {"/n/keto-snacks/x"}, "at": 9e9})
+        server._THIN_TOPIC_CACHE.update({"value": False, "at": 9e9})
+        try:
+            with server._lock:
+                c = server._db()
+                c.execute("INSERT OR IGNORE INTO topics "
+                          "(parent_slug, term, slug) VALUES (?,?,?)",
+                          ("keto-snacks", "keto snacks under $25", "under-25"))
+                c.commit(); c.close()
+            self.assertIn("/n/keto-snacks/under-25", self._sitemap_text())
+            self.assertNotIn("/n/keto-snacks/x", self._sitemap_text())
+        finally:
+            server._THIN_TOPIC_SET_CACHE.update({"val": None, "at": 0.0})
+            server._THIN_TOPIC_CACHE.update({"value": None, "at": 0.0})
 
     def test_opportunities_expose_longtail_tree(self):
         # prove a click so the winner appears

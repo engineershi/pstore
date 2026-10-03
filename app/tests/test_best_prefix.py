@@ -83,7 +83,18 @@ class TestNicheH1(unittest.TestCase):
     def test_keyword_starting_with_best_is_not_doubled(self):
         html = seo.render_niche("best camping tent 2 person", {"products": ITEMS})
         self.assertNotIn("Best best", _h1(html))
-        self.assertIn("best camping tent 2 person", _h1(html))
+        # The H1 is title-cased (editorial._title_kw): mined keywords arrive
+        # lower-case from autosuggest and a lower-case H1 gets rewritten by
+        # Google, so compare case-insensitively -- the intent of this test is
+        # the single leading "Best", not the casing.
+        self.assertIn("best camping tent 2 person", _h1(html).lower())
+
+    def test_h1_is_title_cased_not_raw_slug_case(self):
+        """A lower-case H1 reads as a slug, not a headline, and Google
+        rewrites it. Guard the casing explicitly so it cannot regress."""
+        h1 = _h1(seo.render_niche("best lawn mower battery",
+                                  {"products": ITEMS}))
+        self.assertEqual(h1, "Best Lawn Mower Battery: Ranked Picks")
 
     def test_plain_keyword_still_gets_best(self):
         self.assertTrue(_h1(seo.render_niche("camping tent",
@@ -118,7 +129,13 @@ class TestTopicH1(unittest.TestCase):
         html = seo.render_topic("keto bars", "keto snacks",
                                 {"products": ITEMS}, "keto-snacks")
         self.assertNotIn("Best best", _h1(html))
-        self.assertIn("keto bars", _h1(html))
+        self.assertIn("keto bars", _h1(html).lower())
+
+    def test_topic_h1_is_title_cased(self):
+        self.assertEqual(
+            _h1(seo.render_topic("best keto snack bars", "keto snacks",
+                                 {"products": ITEMS}, "keto-snacks")),
+            "Best Keto Snack Bars")
 
     def test_no_doubled_best_anywhere_in_topic_page(self):
         """Full-page sweep: the bug reached the H1, the lede, the <h2>, the

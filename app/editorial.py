@@ -41,6 +41,40 @@ def _best_prefixed(keyword):
     return kw if _BEST_LEAD.match(kw) else "Best %s" % kw
 
 
+def _title_kw(keyword):
+    """Title Case a stored keyword for use in an H1 or headline.
+
+    Mined keywords are stored exactly as Amazon's autosuggest returns them:
+    lower case ("best lawn mower battery"). Emitting that verbatim produced H1s
+    reading "best lawn mower battery" on every long-tail page — Google rewrites
+    them, and the page loses the headline it paid for. Sentence-case every word
+    EXCEPT small words that conventionally stay lower inside a title, and never
+    touch an acronym the operator typed deliberately (all-caps tokens of 2+).
+
+    Returns the input unchanged when there is nothing to capitalise.
+    """
+    kw = (keyword or "").strip()
+    if not kw:
+        return kw
+    small = {"a", "an", "and", "as", "at", "but", "by", "for", "from", "in",
+             "into", "nor", "of", "on", "onto", "or", "over", "per", "so",
+             "the", "to", "up", "via", "vs", "with", "yet"}
+    out = []
+    words = kw.split()
+    last = len(words) - 1
+    for i, word in enumerate(words):
+        bare = word.strip(".,:;!?'\"()[]")
+        if len(bare) > 1 and bare.isupper():
+            out.append(word)            # deliberate acronym: DSLR, HDMI, USB-C
+            continue
+        low = bare.lower()
+        if i > 0 and i < last and low in small:
+            out.append(low)              # "Best Lawn Mower for Small Yards"
+        else:
+            out.append(low[:1].upper() + low[1:] if low else word)
+    return " ".join(out)
+
+
 def _bare_kw(keyword):
     """Strip a leading "best" so a template that already says "the best ..."
     doesn't produce "the best best ...".
@@ -668,15 +702,36 @@ def quick_picks_band(saved_niches, count=3):
     """A 'Quick Verdict' band for the home hero: the best-scoring product from
     the best-scoring niches, each with its ranked badge, live price/rating, one
     line of reasoning and a primary CTA. Answer-first — a shopper gets a
-    decision-ready pick above the fold without scrolling into a long review."""
+    decision-ready pick above the fold without scrolling into a long review.
+
+    Products are de-duplicated by ASIN across the whole band. Near-duplicate
+    niche rows are the norm on this site (variant keywords like "knife set" and
+    "knife sets 2026" both exist as their own row), and two of them resolving
+    to the same top product put the identical item in the #1 and #2 slots at the
+    same price with the same rating and near-identical reasoning — under two
+    contradictory verdict labels, on the highest-traffic page on the site. Skip
+    the repeat and keep walking down the pool so the band always shows `count`
+    genuinely different products."""
     pools = []
+    seen_asins = set()
     for n in (saved_niches or []):
         prods = n.get("products") or []
-        top = best_pick(prods)
-        if not top:
+        scored = score_items(prods)
+        if not scored:
             continue
         kw = n.get("keyword") or n.get("name") or ""
-        pools.append((top, score_items(prods)[0][1], kw))
+        for item, item_score in scored:
+            asin = (item.get("asin") or "").strip().upper()
+            # No ASIN on the row: fall through to a title key rather than
+            # dropping the niche, but never let two unidentifiable products
+            # share a slot either.
+            key = asin or ("~name:" + (
+                item.get("title") or item.get("name") or "").strip().lower())
+            if key in seen_asins:
+                continue
+            seen_asins.add(key)
+            pools.append((item, item_score, kw))
+            break
     pools.sort(key=lambda t: t[1], reverse=True)
     if not pools:
         return ""

@@ -16,7 +16,7 @@ import amazon
 from datetime import datetime
 
 import editorial
-from editorial import _bare_kw, _best_prefixed
+from editorial import _bare_kw, _best_prefixed, _title_kw
 
 SITE_NAME = "pstore"
 SITE_DESC = "Hand-picked Amazon product picks by niche."
@@ -272,10 +272,17 @@ def _product_graph(items, page_url=None, slug=None):
         if not have_price or not stars or not reviews:
             continue
         node = {"@type": "Product", "name": it.get("title")}
+        # `image` must be a picture OF THIS PRODUCT. Falling back to the page's
+        # /og/<slug>.png share card put the same brand image on all 8 products
+        # of every ranking page (measured live across /n/keto on 2026-10-03),
+        # which is invalid Product markup: Google requires a representative
+        # product image and treats a mismatched one as misleading, suppressing
+        # the merchant-listing rich result we already have price, rating and
+        # reviewCount for. An absent image costs a thumbnail; a false one risks
+        # the whole page. So emit the product's own image when PA-API has given
+        # us one and otherwise say nothing.
         if it.get("image"):
             node["image"] = it["image"]
-        elif slug:
-            node["image"] = "%s/og/%s.png" % (BASE_URL, slug)
         if it.get("title"):
             node["description"] = it["title"]
         if it.get("asin"):
@@ -894,7 +901,7 @@ def render_niche(keyword, niche, saved_niches=None, ab_headline=None, ab_variant
     head = _head(title, desc, canonical, canonical, jsonld=jsonld, og_image=og,
                  noindex=bool(hold) or not bool(items))
     headline = ab_headline or _clip_words(
-        "%s: ranked picks" % _best_prefixed(keyword), 110)
+        "%s: Ranked Picks" % _title_kw(_best_prefixed(keyword)), 110)
     ab_attr = (' data-variant="%s"' % ab_variant) if ab_variant else ""
     banner_slot = (style_pack or {}).get("banner") or ""
     style_slot = (style_pack or {}).get("css") or ""
@@ -1018,11 +1025,11 @@ def render_topic(term, parent_keyword, niche, parent_slug, style_pack=None,
 <main data-niche="{_clean(term_slug)}" data-source="topic" data-keyword="{_clean(term or parent_keyword)}" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
 <div class="card">
   {editorial.breadcrumbs_html(term or parent_keyword)}
-  <h1>{_clean(_clip_words(_best_prefixed(term or parent_keyword), 110))}</h1>
-  <p class="lede">You searched for {_clean(_best_prefixed(term or parent_keyword))}. Here are the same products our
-  {_clean(parent_keyword)} guide ranks — scored live on rating, review volume and price.</p>
+  <h1>{_clean(_clip_words(_title_kw(_best_prefixed(term or parent_keyword)), 110))}</h1>
+  <p class="lede">You searched for {_clean(_title_kw(_best_prefixed(term or parent_keyword)))}. Here are the same products our
+  {_clean(_title_kw(parent_keyword))} guide ranks — scored live on rating, review volume and price.</p>
   {editorial.trust_block_html()}
-  <h2>Top {_clean(_bare_kw(term or parent_keyword))} picks</h2>
+  <h2>Top {_clean(_title_kw(_bare_kw(term or parent_keyword)))} Picks</h2>
   {ranked}
   {editorial.upsell_block(items, term or parent_keyword)}
   {lead_gate_html(term or parent_keyword, "topic") if items else ""}

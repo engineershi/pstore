@@ -2667,6 +2667,107 @@ def _path_is_held(path):
 
 _LP_PATH_RE = re.compile(r"^/lp(/|$)")
 
+# --- thin long-tail topic pages -------------------------------------------
+# /n/<parent>/<term> has three renderers, and only two of them earn their
+# existence:
+#   * "under-<amt>"  -> seo.render_priceband, filters the parent's own picks by
+#     price. A distinct answer to a distinct query.
+#   * "<a> vs <b>"   -> seo.render_vs, pins two named ASINs head to head.
+#   * anything else  -> seo.render_topic, which is a RELABEL: it re-renders the
+#     PARENT niche's product list under the child's H1.
+# That third branch is the bug this gate closes. render_topic is handed
+# `niche` = the parent record (see _niche_page), so every autosuggest child
+# ships its parent's exact ASINs. Measured live on 2026-10-03: all 27 children
+# of /n/best-lawn-mower served the parent's identical 8 lawn-mower ASINs,
+# including /n/best-lawn-mower/best-lawn-mower-blade-sharpener and
+# .../best-lawn-mower-battery, at 89.6% body-text similarity to the parent and
+# self-canonical. 1,963 such pages were in the sitemap.
+#
+# A relabel is not a long-tail page, so it must not compete for one. These pages
+# stay fully live for visitors (every CTA, price and link still works, and
+# equity flows to the parent via the canonical) but stop being indexed and stop
+# being listed, which is the same treatment the consolidation hold already gives
+# a parked niche. The operator can opt back in with seo.thin_topics=1 once the
+# topics engine mines real inventory per term instead of inheriting the parent.
+_THIN_TOPIC_CACHE = {"at": 0.0, "value": None}
+_THIN_TOPIC_RE = re.compile(r"^/n/([^/]+)/([^/]+)/?$")
+_VS_TERM_RE = re.compile(r"\(@([A-Z0-9]{10})\|@([A-Z0-9]{10})\)")
+_THIN_TOPIC_SET_CACHE = {"at": 0.0, "val": None}
+
+
+def _thin_topics_indexable():
+    """True when the operator has opted the relabelled topic pages back into the
+    index (default off). Cached like the sibling toggles so a request does not
+    hit the settings table for every nested URL."""
+    now = time.time()
+    cached = _THIN_TOPIC_CACHE
+    if cached["value"] is not None and now - cached["at"] < 60:
+        return cached["value"]
+    raw = _get_setting("seo.thin_topics")
+    val = (raw is not None
+           and str(raw).strip().lower() in ("1", "on", "true", "yes"))
+    cached["at"] = now
+    cached["value"] = val
+    return val
+
+
+def _thin_topic_paths():
+    """Set of "/n/<parent>/<topic>" paths served by the relabelling
+    render_topic branch.
+
+    The discriminator is the topic's stored `term`, not its slug: the slug of a
+    head-to-head topic ("carbe-diem-vs-keto-pint") is indistinguishable from an
+    autosuggest term that happens to contain "vs", because _slugify strips the
+    "(@ASIN)" markers render_vs keys off. So read the row. Both branches are
+    decided the same way in _niche_page — under-<amt> goes to render_priceband,
+    a term carrying two "(@ASIN)" markers goes to render_vs, everything else
+    falls through to render_topic and inherits the parent's products.
+
+    Cached for a minute: the topics table is ~2k rows and this is consulted on
+    every public GET, so a per-request query is not acceptable.
+    """
+    now = time.time()
+    cached = _THIN_TOPIC_SET_CACHE
+    if cached["val"] is not None and now - cached["at"] < 60:
+        return cached["val"]
+    out = set()
+    try:
+        with _lock:
+            conn = _db()
+            rows = conn.execute("SELECT parent_slug, slug, term FROM topics").fetchall()
+            conn.close()
+        for r in rows:
+            term = (r["term"] or "").strip()
+            tslug = (r["slug"] or "").strip().lower()
+            if not tslug:
+                continue
+            if re.match(r"^under-\d+$", tslug):
+                continue                      # price-band: real differentiation
+            if _VS_TERM_RE.search(term):
+                continue                      # vs head-to-head: two named ASINs
+            out.add("/n/%s/%s" % (r["parent_slug"], tslug))
+    except Exception:
+        return cached["val"] or set()
+    cached["at"] = now
+    cached["val"] = out
+    return out
+
+
+def _path_is_thin_topic(path):
+    """True when `path` is a nested /n/<parent>/<term> page whose only content
+    is the parent's product list re-headed with the child's term."""
+    if _thin_topics_indexable():
+        return False
+    m = _THIN_TOPIC_RE.match(path or "")
+    return bool(m) and (path or "").rstrip("/") in _thin_topic_paths()
+
+
+def _thin_topic_parent(path):
+    """The parent hub a thin topic page should canonicalise to."""
+    m = _THIN_TOPIC_RE.match(path or "")
+    return "/n/%s" % m.group(1) if m else ""
+
+
 
 _CANNIBAL_CACHE = {"at": 0.0, "val": None}
 
@@ -2940,6 +3041,8 @@ def _apply_cannibalization_holds(min_overlap=0.8, min_products=3,
 _ROBOTS_META_RE = re.compile(
     rb"<meta\s+name=[\"']robots[\"']\s+content=[\"'][^\"']*[\"']\s*/?>", re.I)
 _ROBOTS_NONE_RE = re.compile(rb"<meta\s+name=[\"']robots[\"']", re.I)
+_CANONICAL_RE = re.compile(
+    rb"<link\s+rel=[\"']canonical[\"']\s+href=[\"'][^\"']*[\"']\s*/?>", re.I)
 _NOINDEX_META = b'<meta name="robots" content="noindex, follow">'
 
 
@@ -2964,10 +3067,23 @@ def _force_noindex(body, path):
     why = None
     if _path_is_held(p):
         why = "consolidation"
+    elif _path_is_thin_topic(p):
+        why = "thin-topic"
     elif not _lp_pages_indexable() and _LP_PATH_RE.match(p):
         why = "landing-page"
     if why is None:
         return body
+    # A thin topic is a relabel of its parent, so the canonical has to point at
+    # the parent as well — noindex alone still tells Google "this URL is
+    # distinct but deprioritised", which is exactly the claim that is false.
+    # Rewriting the canonical consolidates the signal onto the hub that actually
+    # has its own inventory.
+    if why == "thin-topic":
+        parent = _thin_topic_parent(p)
+        if parent:
+            body = _CANONICAL_RE.sub(
+                b'<link rel="canonical" href="' + (seo.BASE_URL + parent).encode() + b'">',
+                body, count=1)
     if not _ROBOTS_NONE_RE.search(body):
         # No robots meta at all -- insert one so the page is unambiguously
         # noindex rather than merely absent from the sitemap.
@@ -8213,13 +8329,21 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             live.add(kw)
         with _lock:
             conn = _db()
-            tro = conn.execute("SELECT parent_slug, slug, created_at FROM topics").fetchall()
+            tro = conn.execute(
+                "SELECT parent_slug, slug, term, created_at FROM topics").fetchall()
             conn.close()
+        thin = _thin_topic_paths()
         for t in tro:
             # Long-tail pages resolve products via their parent niche; if the
             # parent is gone (or currently product-less) the page goes noindex,
             # so it has no business in the sitemap.
             if t["parent_slug"] not in live:
+                continue
+            # Relabelled topics serve the parent's ASINs under the child's H1
+            # (see _thin_topic_paths). They render noindex and canonicalise to
+            # the parent, so listing them would contradict the page we hand the
+            # crawler — the exact mismatch the sitemap exists to prevent.
+            if "/n/%s/%s" % (t["parent_slug"], (t["slug"] or "").lower()) in thin:
                 continue
             lm = (t["created_at"] or "")[:10] or "2026-08-28"
             entries.append((f"/n/{t['parent_slug']}/{t['slug']}", lm))
@@ -14298,7 +14422,7 @@ fresh();
                     "AND lower(keyword)=?", (kw.lower(),)).fetchone()[0] or 0
                 nclicks = conn.execute(
                     "SELECT COUNT(*) FROM clicks WHERE lower(slug)=?", (slug,)).fetchone()[0] or 0
-                nest = earnings.estimate(nclicks, "")
+                nest = earnings.estimate(nclicks, earnings.classify(slug))
                 by_niche.append({
                     "slug": slug, "keyword": kw,
                     "views": nviews, "leads": nleads, "clicks": nclicks,
@@ -14327,13 +14451,24 @@ fresh();
                                 "commission_est": round(est["commission_est"], 2),
                                 "orders_est": est["orders_est"]})
         chan_totals.sort(key=lambda x: x["commission_est"], reverse=True)
-        total_comm_est = round(sum(x["commission_est"] for x in chan_totals), 2)
-        total_orders_est = sum(x["orders_est"] for x in chan_totals)
         real_ledger = [{"month": r["month"], "orders": r["orders"],
                         "earnings": r["earnings"]} for r in month_rows]
         real_summary = earnings.monthly_summary(real_ledger)
         # which channel leaks the most at the final click->earn step
         best_channel = chan_totals[0] if chan_totals else None
+        # Stage 5 sums the PER-NICHE estimates rather than the per-channel ones,
+        # so it carries the same category pricing as the by_niche rows and the
+        # "total" can never disagree with the breakdown above it. A channel has
+        # no category of its own, so summing chan_totals would silently fall
+        # back to the flat 4% / $40 default and understate a jewellery- or
+        # tools-heavy catalogue by ~4x on identical traffic.
+        if by_niche:
+            total_comm_est = round(sum(x["commission_est"] for x in by_niche), 2)
+            total_orders_est = sum(x["orders_est"] for x in by_niche)
+        else:
+            est = earnings.estimate(all_clicks, "")
+            total_comm_est = round(est["commission_est"], 2)
+            total_orders_est = est["orders_est"]
         stages = [
             {"n": 1, "name": "1 · Attract", "emoji": "🌐",
              "metric": "Landing / topic page views", "value": attract,
@@ -14349,9 +14484,9 @@ fresh();
              "note": "Every tracked tap to Amazon across all channels."},
             {"n": 5, "name": "5 · Earn", "emoji": "🤑",
              "metric": "Estimated commission", "value": total_comm_est,
-             "note": "Projected from %s clicks at %.1f%% AOV-$%.0f × %.2f%% order-rate." %
-                     (all_clicks, earnings.commission_pct(""), earnings.avg_order(""),
-                      earnings.order_rate("") * 100)},
+             "note": "Projected from %s clicks, each priced at its own category's "
+                     "Amazon rate and average order value (%.2f%% order-rate)."
+                     % (all_clicks, earnings.order_rate("") * 100)},
         ]
         # conversion rates between consecutive stages (0 guard)
         def rate(i):
@@ -20184,7 +20319,17 @@ if ($("o_adopt")) $("o_adopt").onclick = async () => {{
             # slug restores the real commission rate *and* a realistic average
             # order value per category (app/earnings.CATEGORY_AOV), which moves
             # per-click value on this catalogue by ~4x on identical traffic.
-            return earnings.classify(r.get("slug") or "")
+            #
+            # Read `niche` FIRST. The rows built below are
+            # `{"niche": ..., "clicks": ...}` — there is no "slug" key on
+            # them, so the original `r.get("slug") or ""` silently classified
+            # every row as "" and the whole correction was dead code: /admin/
+            # priority and /api/earnings/priority still reported a flat 4% /
+            # $40 for a gold-jewelry page (real rate 20% / $85). priority_rows
+            # itself accepts either key, so read both and prefer whichever
+            # actually carries the slug text.
+            return earnings.classify(
+                r.get("niche") or r.get("slug") or "")
         payload = earnings.priority_rows([
             {"niche": r["slug"], "clicks": r["clicks"]} for r in rows], cat)
         months = []
