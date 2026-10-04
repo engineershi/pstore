@@ -3079,6 +3079,41 @@ _CANONICAL_RE = re.compile(
 _NOINDEX_META = b'<meta name="robots" content="noindex, follow">'
 
 
+def _noindex_reason(path):
+    """Why `path` serves noindex, or None when it is indexable.
+
+    The single source of truth for that decision. `_force_noindex` applies it to
+    a rendered body; `_sitemap` consults it before listing a URL. Both asking
+    one predicate is the point — when the sitemap re-derived thinness itself the
+    two drifted, and 437 nested pages ended up listed in sitemap.xml while
+    serving `noindex,nofollow`. Add a new reason here and every caller inherits
+    it; never re-check it downstream.
+    """
+    p = path or ""
+    if _path_is_held(p):
+        return "consolidation"
+    if _path_is_thin_topic(p):
+        return "thin-topic"
+    if not _lp_pages_indexable() and _LP_PATH_RE.match(p):
+        return "landing-page"
+    return None
+
+
+def _nested_topic_has_products(term, parent_asins):
+    """True when a nested topic page will actually have products to render.
+
+    A head-to-head topic names its two ASINs in the term. When neither is in
+    the parent's stored product list `render_vs` resolves nothing, the page
+    serves noindex — and the sitemap only ever checked that the *parent* had
+    products, so an empty child was listed anyway. That was the last route by
+    which a noindex URL reached sitemap.xml.
+    """
+    m = _VS_TERM_RE.search(term or "")
+    if not m:
+        return True          # price band / relabel: renders the parent's rows
+    return any(a for a in m.groups() if a in parent_asins)
+
+
 def _force_noindex(body, path):
     """Force noindex where the page should not compete in search.
 
@@ -3097,13 +3132,7 @@ def _force_noindex(body, path):
     if not body:
         return body
     p = path or ""
-    why = None
-    if _path_is_held(p):
-        why = "consolidation"
-    elif _path_is_thin_topic(p):
-        why = "thin-topic"
-    elif not _lp_pages_indexable() and _LP_PATH_RE.match(p):
-        why = "landing-page"
+    why = _noindex_reason(p)
     if why is None:
         return body
     # A thin topic is a relabel of its parent, so the canonical has to point at
@@ -8381,6 +8410,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             conn.close()
         live = set()
         seen = set()
+        parent_asins = {}
         holds = _consolidation_holds()
         for r in nrows:
             # Only indexable niches belong in the sitemap — a niche without
@@ -8400,6 +8430,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             # vs "back-pain"); list each URL once — Google flags duplicates.
             if kw in seen:
                 continue
+            parent_asins[kw] = set(re.findall(r'"asin"\s*:\s*"([^"]+)"', prods))
             seen.add(kw)
             lm = (r["updated_at"] or r["created_at"] or "")[:10] or "2026-08-28"
             entries.append((f"/n/{kw}", lm))
@@ -8416,21 +8447,29 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             tro = conn.execute(
                 "SELECT parent_slug, slug, term, created_at FROM topics").fetchall()
             conn.close()
-        thin = _thin_topic_paths()
         for t in tro:
             # Long-tail pages resolve products via their parent niche; if the
             # parent is gone (or currently product-less) the page goes noindex,
             # so it has no business in the sitemap.
             if t["parent_slug"] not in live:
                 continue
-            # Relabelled topics serve the parent's ASINs under the child's H1
-            # (see _thin_topic_paths). They render noindex and canonicalise to
-            # the parent, so listing them would contradict the page we hand the
-            # crawler — the exact mismatch the sitemap exists to prevent.
-            if "/n/%s/%s" % (t["parent_slug"], (t["slug"] or "").lower()) in thin:
+            # A child page can be empty even when its parent is full: a
+            # head-to-head naming two ASINs the parent never stored renders
+            # nothing and goes noindex.
+            if not _nested_topic_has_products(
+                    t["term"], parent_asins.get(t["parent_slug"], set())):
                 continue
+            # Normalise once and reuse that exact string. The old code tested a
+            # lowercased path and then appended the raw slug, so a slug with
+            # stray whitespace or capitals was filtered under one URL and
+            # published under another.
+            tp = "/n/%s/%s" % (t["parent_slug"], (t["slug"] or "").strip().lower())
             lm = (t["created_at"] or "")[:10] or "2026-08-28"
-            entries.append((f"/n/{t['parent_slug']}/{t['slug']}", lm))
+            entries.append((tp, lm))
+        # Chokepoint. The page's own noindex predicate gets the last word, so no
+        # branch above can list a URL that serves noindex — which is how 437
+        # nested pages shipped in the sitemap while rendering `noindex,nofollow`.
+        entries = [(p, lm) for p, lm in entries if _noindex_reason(p) is None]
         return seo.render_sitemap(entries)
 
     def _rss(self):
