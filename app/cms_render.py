@@ -359,8 +359,11 @@ def _section_html(section, ctx):
     style = ctx.get("style") or {}
     hero_style = style.get("hero_style", "gradient")
     pick = ctx.get("pick") or {}
-    stars = pick.get("stars") if pick else None
-    reviews = pick.get("reviews") if pick else None
+    # Product ratings are licensed Amazon Program Content (Creators/PA API only);
+    # a scraped one must not be published, and a CMS page is a published page.
+    # The testimonials block below is operator-authored copy, not Amazon data, so
+    # its own star field is untouched.
+    stars, reviews = amazon_mod.licensed_rating(pick)
     amazon_url = (ctx.get("items") and _find_amazon_url(ctx)) or ""
     asin = (pick or {}).get("asin", "")
 

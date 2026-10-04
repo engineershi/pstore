@@ -1428,7 +1428,8 @@ class TestBrandedHtmlRenderer(unittest.TestCase):
         self.assertIn("<h3", html)                 # bold sub-heading from copy
         self.assertIn('src="https://x.com/og/best-espresso-machines.png', html)
         self.assertIn("$499.95", html)             # price on the hero card
-        self.assertIn("\u2605", html)              # star rating
+        self.assertNotIn("★", html)           # no unlicensed star rating
+        self.assertNotIn("1,234", html)       # nor its review count
         self.assertIn("See it on Amazon", html)
         self.assertIn("Also matched", html)        # runner-up column
         self.assertIn("Unsubscribe", html)         # footer
@@ -1440,9 +1441,20 @@ class TestBrandedHtmlRenderer(unittest.TestCase):
 
     def test_product_card_skips_image_when_none(self):
         card = mailer.product_card_html(self._items()[0], link_url="https://x.com/a",
-                                        image_url="", stars=4.6, reviews=1)
+                                        image_url="")
         self.assertNotIn("<img", card)
-        self.assertIn("rating", card)              # no trailing "s" for one rating
+
+    def test_product_card_hides_unlicensed_rating(self):
+        # A scraped star rating is Amazon Program Content we may not republish,
+        # so it must not reach an email body. Only a PA-API item carries one.
+        scraped = self._items()[0]
+        self.assertNotEqual(scraped.get("source"), "paapi")
+        card = mailer.product_card_html(scraped, link_url="https://x.com/a")
+        self.assertNotIn("★", card)
+        licensed = dict(scraped, source="paapi", stars=4.6, reviews=1)
+        card2 = mailer.product_card_html(licensed, link_url="https://x.com/a")
+        self.assertIn("★", card2)
+        self.assertIn("1 rating<", card2)             # no trailing "s" for one rating
 
     def test_sections_turn_labels_into_subheadings(self):
         out = mailer._email_sections("My one-line take: it is the best.\n\nClick https://amzn.com/dp/B0AAA now.")

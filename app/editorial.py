@@ -125,6 +125,27 @@ def _review_hum(reviews):
     return "%s" % (int(reviews) if isinstance(reviews, (int, float)) else reviews)
 
 
+def _licensed(it):
+    """The Amazon review stars/count of `it`, or (None, None) when we may not
+    show them. Thin alias over the single chokepoint in `amazon` — see
+    `amazon.licensed_rating` for why a scraped rating is never published."""
+    return amazon.licensed_rating(it)
+
+
+def _stars_cell(it):
+    """Comparison-table rating cell. Blank when unlicensed rather than an
+    em dash, so the column does not imply a rating exists."""
+    stars, _ = _licensed(it)
+    return ("★ %s" % stars) if isinstance(stars, (int, float)) else ""
+
+
+def _reviews_cell(it):
+    _, reviews = _licensed(it)
+    if isinstance(reviews, (int, float)) and reviews >= 0:
+        return _review_hum(reviews)
+    return ""
+
+
 _ASINISH = re.compile(r"^B[0-9A-Z]{9}$")
 
 
@@ -278,8 +299,7 @@ def rank_badge(item, idx, items):
 
 
 def quick_take(item, items):
-    stars = item.get("stars")
-    rev = item.get("reviews")
+    stars, rev = _licensed(item)
     p = item.get("price")
     pieces = []
     if isinstance(p, (int, float)):
@@ -294,8 +314,7 @@ def quick_take(item, items):
 
 
 def pros_cons(item, items):
-    stars = item.get("stars")
-    rev = item.get("reviews")
+    stars, rev = _licensed(item)
     p = item.get("price")
     prices = [it.get("price") for it in items if isinstance(it.get("price"), (int, float))]
     low = min(prices) if prices else None
@@ -338,8 +357,8 @@ def comparison_rows(items, start=1, top_asin=None, keyword=None):
             "title": _display(it, keyword),
             "asin": asin,
             "price": _price(it) or "—",
-            "stars": ("★ %s" % it["stars"]) if isinstance(it.get("stars"), (int, float)) else "—",
-            "reviews": _review_hum(it["reviews"]) if isinstance(it.get("reviews"), (int, float)) and it["reviews"] >= 0 else "—",
+            "stars": _stars_cell(it),
+            "reviews": _reviews_cell(it),
             "url": _aff(it) or "",
             "top": bool(top_asin) and asin == top_asin,
             "badge": "Top pick" if asin == top_asin else ("Runner-up" if idx == 1 else "Picked"),
@@ -498,9 +517,12 @@ def pick_html(keyword, item, idx, items):
     p, c = pros_cons(item, items)
     pros = "".join("<li>%s</li>" % _clean(x) for x in p)
     cons = "".join("<li>%s</li>" % _clean(x) for x in c)
-    stars = ('<span class="stars">★ %s</span>' % item.get("stars")) if isinstance(item.get("stars"), (int, float)) else ""
-    reviews = ('<span class="meta-strong">%s ratings</span>' % _review_hum(item.get("reviews"))) \
-        if isinstance(item.get("reviews"), (int, float)) and item["reviews"] >= 0 else ""
+    stars, reviews = "", ""
+    _st, _rv = _licensed(item)
+    if _st is not None:
+        stars = '<span class="stars">★ %s</span>' % _st
+    if isinstance(_rv, (int, float)) and _rv >= 0:
+        reviews = '<span class="meta-strong">%s ratings</span>' % _review_hum(_rv)
     cta = ""
     if _aff(item):
         label = "Check price on Amazon" + (" — %s" % price if price else "")
@@ -679,7 +701,8 @@ def featured_html(saved_niches):
     top, _score, kw = f
     url = _aff(top) or ""
     price = _price(top)
-    stars = ('<span class="stars">★ %s</span>' % top.get("stars")) if isinstance(top.get("stars"), (int, float)) else ""
+    _st, _rv = _licensed(top)
+    stars = ('<span class="stars">★ %s</span>' % _st) if isinstance(_st, (int, float)) else ""
     price_txt = price and (" · " + price) or ""
     cta = ""
     if url:
@@ -739,10 +762,11 @@ def quick_picks_band(saved_niches, count=3):
     for idx, (top, _score, kw) in enumerate(pools[:count]):
         badge, why = rank_badge(top, idx + 1, [top])
         price = _price(top)
-        stars = ('<span class="stars">★ %s</span>' % top.get("stars")) \
-            if isinstance(top.get("stars"), (int, float)) else ""
-        reviews = ('<span class="r-count">%s ratings</span>' % _review_hum(top.get("reviews"))) \
-            if isinstance(top.get("reviews"), (int, float)) and top["reviews"] >= 0 else ""
+        _st, _rv = _licensed(top)
+        stars = ('<span class="stars">★ %s</span>' % _st) \
+            if isinstance(_st, (int, float)) else ""
+        reviews = ('<span class="r-count">%s ratings</span>' % _review_hum(_rv)) \
+            if isinstance(_rv, (int, float)) and _rv >= 0 else ""
         cta = ""
         if _aff(top):
             cta = '<a class="btn" href="%s" data-asin="%s" target="_blank" rel="nofollow sponsored noopener">Check price%s</a>' \

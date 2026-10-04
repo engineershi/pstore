@@ -135,6 +135,26 @@ def _price(it):
     return "%s%0.2f" % (amazon.currency_symbol(it.get("currency") or "USD"), it.get("price"))
 
 
+def _proof(it, sep="/5 from", noun="Amazon buyers", fallback="one of our top-ranked picks"):
+    """The one trust line every buyer-facing asset in this module quotes.
+
+    Star ratings and review counts are Amazon Program Content that we are only
+    licensed to display when they arrived through the Creators/PA API — see
+    `amazon.licensed_rating`. We hold no such credentials, so a scraped rating
+    can never be printed. The unlicensed branch therefore has to make a claim we
+    can actually stand behind: our own ranking work and the live price, which is
+    public pricing data we are allowed to quote. Never fall back to vague
+    review language ("highly rated", "most-reviewed") — with no licensed number
+    behind it, that is an unevidenced claim about someone else's customers.
+    """
+    stars, reviews = amazon.licensed_rating(it)
+    if stars and isinstance(reviews, (int, float)):
+        return "⭐ %s%s %s %s" % (round(float(stars), 1), sep,
+                                 format(int(reviews), ","), noun)
+    price = _price(it)
+    return ("top-ranked pick · %s" % price) if price else fallback
+
+
 def _clip(text, n=70):
     t = re.sub(r"\s+", " ", str(text or "")).strip()
     return (t if len(t) <= n else t[: n - 1].rstrip() + "…")
@@ -149,25 +169,22 @@ def build_landing_page(keyword, items, site_url=None):
     slug = _slug(keyword)
     title = _clip(pick.get("title"), 90)
     price = _price(pick) or "—"
-    stars = pick.get("stars")
-    reviews = pick.get("reviews")
     go = amazon.affiliate_url(pick["asin"])
-    rating = f"{stars}★ ({reviews:,} ratings)" if (stars and reviews) else "highly rated on Amazon"
+    rating = _proof(pick, noun="ratings", fallback="one of our top-ranked picks")
     e = html.escape
-    base = (site_url or "").rstrip("/")
+    base = (site_url or "").strip().rstrip("/")
     og_image = (base + "/og/" + slug) if base else ""
     bullet_lines = []
     for it in rest[:3]:
         b = f"<li>{e(_clip(it.get('title'), 60))} — <strong>{e(_price(it) or 'see Amazon')}</strong>"
-        if it.get("stars"):
-            b += f" · ⭐ {it.get('stars')}"
-        if isinstance(it.get("reviews"), (int, float)):
-            b += f" ({it.get('reviews'):,} reviews)"
+        _st, _rv = amazon.licensed_rating(it)
+        if _st and isinstance(_rv, (int, float)):
+            b += f" · ⭐ {round(float(_st), 1)} ({int(_rv):,} reviews)"
         bullet_lines.append(b + "</li>")
     bullets = "".join(bullet_lines)
     faq = f"""
     <div class="qa"><b>Is this really the best {e(_slug(keyword).replace('-', ' '))} pick?</b>
-      <p>It's the highest-social-proof pick from our live Amazon research — {rating}. Click through, compare, and Amazon's own listing page tells the rest.</p></div>
+      <p>It's the pick our ranking landed on from live Amazon research — {rating}. Click through, compare, and Amazon's own listing page tells the rest.</p></div>
     <div class="qa"><b>How do I buy?</b>
       <p>Hit the button below. It takes you straight to this exact item on Amazon, ready to check out.</p></div>
     <div class="qa"><b>Shipping?</b>
@@ -266,10 +283,11 @@ def build_email_sequence(keyword, items):
     title = _clip(pick.get("title"), 70)
     price = _price(pick)
     url = redirect_url(pick["asin"])
-    stars = pick.get("stars")
-    reviews = pick.get("reviews")
-    proof = f"⭐ {stars}/5 from {reviews:,} Amazon buyers" if (stars and reviews) else "highly rated on Amazon"
-    social_head = f"What {reviews:,} buyers already think" if reviews else "What buyers already think"
+    _st, reviews = amazon.licensed_rating(pick)
+    proof = _proof(pick)
+    social_head = (f"What {reviews:,} buyers already think"
+                   if isinstance(reviews, (int, float)) and reviews
+                   else "What buyers already think")
     alts = _alternate_lines(items, pick["asin"])
     alt1 = ("\n\nPrefer a different budget or spec? Two matched alternatives:\n" + alts
             ) if alts else ""
@@ -281,7 +299,7 @@ def build_email_sequence(keyword, items):
 
 Hi {{first_name}},
 
-I found a {keyword} buy that a LOT of other buyers already swear by ({proof}).
+I found a {keyword} buy my ranking landed on ({proof}).
 
 My one-line take: it solves the problem, it's priced well{(' at ' + price) if price else ''}, and I'd buy it again without thinking.
 
@@ -315,7 +333,7 @@ Hi {{first_name}},
 If you're hesitating, it's usually one of these:
 
 1. "Is it actually good?" → {proof}
-2. "Is it worth the price?" → It's {price or 'competitively priced'} and it's the most-reviewed option in this niche.
+2. "Is it worth the price?" → It's {price or 'competitively priced'} and it's the pick our ranking landed on.
 3. "What if I don't like it?" → Amazon's return policy has your back.
 
 Feeling more solid? → {url}
@@ -388,10 +406,7 @@ def build_converted_followup(keyword, items):
         return None
     title = _clip(pick.get("title"), 52)
     url = redirect_url(pick["asin"])
-    stars = pick.get("stars")
-    reviews = pick.get("reviews")
-    proof = (f"⭐ {stars}/5 from {reviews:,} Amazon buyers"
-             if (stars and reviews) else "one of the most-reviewed picks in this niche")
+    proof = _proof(pick)
     alts = _alternate_lines(items, pick["asin"])
     alt = ("If your needs have grown, the next rung up the value ladder we'd point to:\n"
            + alts) if alts else ""
@@ -422,9 +437,7 @@ def build_social_pack(keyword, items):
         return {}
     url = redirect_url(pick["asin"])
     title = _clip(pick.get("title"), 60)
-    stars = pick.get("stars")
-    reviews = pick.get("reviews")
-    proof = f"⭐ {stars}/5 · {reviews:,} reviews" if (stars and reviews) else "highly rated"
+    proof = _proof(pick, sep="/5 ·", noun="reviews")
     tags = ["#" + s for s in _slug(keyword).split("-")] + ["#amazonfinds", "#amazondeals", "#musthave", "#recommended"]
     hook = f"{title} is my current {keyword} pick ({proof}) — link in the post 👇"
     return {
@@ -443,12 +456,10 @@ def build_dm_conversation(keyword, items):
         return {}
     url = redirect_url(pick["asin"])
     title = _clip(pick.get("title"), 60)
-    stars = pick.get("stars")
-    reviews = pick.get("reviews")
-    proof = f"⭐ {stars}/5 from {reviews:,} buyers" if (stars and reviews) else "really well reviewed"
+    proof = _proof(pick, noun="buyers")
     return {
         "opener": f"Hey {{name}}! Random, but quick — you ever looked at {title[:55]}…? I wrote it up in 2 lines here {url} — honestly fair price and {proof}. No pressure, just thought of you.",
-        "reply_price": f"Totally fair. It's {pick.get('price') and _price(pick) or 'actually reasonably priced'} and it's the most-reviewed option I could find ({proof}). If budget's tight, it's worth watching for a price dip — I'd bookmark {url}. 🙂{{first_name}}",
+        "reply_price": f"Totally fair. It's {pick.get('price') and _price(pick) or 'actually reasonably priced'} and it's the one my ranking landed on ({proof}). If budget's tight, it's worth watching for a price dip — I'd bookmark {url}. 🙂{{first_name}}",
         "reply_compare": f"Good question! Between the options I tested, this one wins on {proof} + price. If you want, I can grab you the 2 runner-ups in the same list — just say the word.",
         "reply_wait": f"No rush at all. When you do want it, it's one click: {url}. It's the same product page Amazon shows you, so you decide everything. 👌",
         "close": f"Great — here's the link: {url}. Took me 10 seconds, takes you 30. Let me know what you think after it lands! 🙌",
@@ -509,6 +520,7 @@ def build_boost_campaigns(keyword, items, base_url="", slug="", keywords=()):
     long = kit[0] if kit else disc
     hints = ("  ·  sweep these search terms: " +
              ", ".join(kit[:3]) + ".") if kit else ""
+    _pick_proof = _proof(pick) if pick else ""
 
     def tracked(name):
         code = _boost_code(slug, name)
@@ -534,19 +546,19 @@ Agitate:
 How much time/money you waste on a bad pick…
 
 Solution:
-This one's the most-reviewed ({'⭐ ' + str(pick['stars']) if pick and pick.get('stars') else ''}).
+This one's our top-ranked pick ({_pick_proof}).
 Full ranked guide (live prices): {pas_link}{hints}"""),
         entry("Social proof drop", f"""Just facts, zero hype:
-• Most-reviewed option in the {disc} niche
+• Our top-ranked option in the {disc} niche
 • Sold & shipped by Amazon
 • 30-second checkout
 • Full ranked guide: {pas_link}"""),
         entry("Urgency / restock angle", f"""⏳ If you've been eyeing {title}, Amazon prices/stock move all the time.
-Best-reviewed pick in the niche → don't lose it to a price change: {pas_link}"""),
+Top-ranked pick in the niche → don't lose it to a price change: {pas_link}"""),
         entry("Bundle stack", f"""This {disc} pick + the runner-ups in the same range = the whole starter kit.
 Top pick: {amazon_url}
 Buyers keep asking “{long}” — the full ranked guide answers it: {pas_link}"""),
-        entry("Giveaway / engagement", f""""Fellow {disc} shopper: the top-rated pick is ranked from live data.
+        entry("Giveaway / engagement", f""""Fellow {disc} shopper: our top pick is ranked from live data.
 Top pick: {amazon_url}
 Guides & honest picks: {pas_link}
 Drop a comment 🍀 I'll DM the winner the link.""") if True else None,

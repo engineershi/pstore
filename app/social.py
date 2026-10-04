@@ -94,14 +94,18 @@ def _price(it, s=None):
 
 
 def _proof(it):
-    stars = it.get("stars")
-    reviews = it.get("reviews")
-    if stars:
-        rv = f" · {reviews:,} reviews" if isinstance(reviews, (int, float)) else ""
-        return f"{stars:.1f}★{rv}"
-    if isinstance(reviews, (int, float)):
-        return f"{reviews:,} reviews"
-    return "top-rated"
+    """Trust line for a social card.
+
+    Amazon's Operating Agreement (updated 14 Apr 2026) forbids displaying
+    customer reviews or star ratings unless they were obtained through the
+    Creators API / PA API. We have no API access, so a scraped rating must never
+    be published — not on a share image, not in a caption. What we can honestly
+    claim is our own editorial work, so that is what the line says.
+    """
+    price = _price(it)
+    if price:
+        return "ranked picks · %s" % price
+    return "ranked picks from live listings"
 
 
 def _hashwords(keyword):
@@ -330,9 +334,7 @@ def og_svg(slug, keyword, title, stars, reviews):
     """Small share-preview card (SVG, stdlib-only) used as og:image/twitter:image."""
     kw = html_esc(keyword) or "Niche pick"
     t = html_esc(title or "Best picks, ranked fresh")
-    pr = ("%.1f" % float(stars)) if stars else "Top rated"
-    if stars and isinstance(reviews, (int, float)):
-        pr += " · %d reviews" % int(reviews)
+    pr = "RANKED PICKS"
     tr = t if len(t) <= 34 else t[:33] + "…"
     kwl = kw if len(kw) <= 26 else kw[:25] + "…"
     return f"""<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
@@ -816,23 +818,13 @@ def og_png(slug, keyword, title, stars, reviews, variant=0):
             ln = ln[:31] + "..."
         _stamp(_raster_text(ln, 96, 208 + i * 50, 5, gap=1), _WHITE)
 
-    # trust row — accent stars + proof number (or a check for top-rated)
+    # trust row — an honest claim about our own work. A star rating scraped from
+    # a listing may not be shown at all without Creators/PA API access, so no
+    # number from Amazon is ever painted here, whatever the caller passes.
     y_star = 392
-    if stars:
-        try:
-            _s = float(stars)
-        except (TypeError, ValueError):
-            _s = 0.0
-        for i in range(3):
-            _star(img, W, H, 108 + i * 52, y_star, 17, accent)
-        pr = "%.1f" % _s
-        if isinstance(reviews, (int, float)) and reviews:
-            pr += " · %d REVIEWS" % int(reviews)
-        _stamp(_raster_text(pr.upper(), 300, 372, 4, gap=1), _BODY)
-    else:
-        _stroke(img, W, H, 102, 384, 118, 400, accent, 7)
-        _stroke(img, W, H, 118, 400, 148, 368, accent, 7)
-        _stamp(_raster_text("TOP RATED PICKS", 176, 372, 4, gap=1), _BODY)
+    _stroke(img, W, H, 102, 384, 118, 400, accent, 7)
+    _stroke(img, W, H, 118, 400, 148, 368, accent, 7)
+    _stamp(_raster_text("RANKED PICKS", 176, 372, 4, gap=1), _BODY)
 
     # repin watermark — small, under the fresh pill, so variant pins are traceable
     if variant:
@@ -954,23 +946,10 @@ def pint_png(slug, keyword, title, stars, reviews, variant=0):
             ln = ln[:21] + "..."
         _stamp(_raster_text(ln, 96, 300 + i * 84, 6, gap=1), _WHITE)
 
-    # trust row — accent stars + proof
-    y_star = 620
-    if stars:
-        try:
-            _s = float(stars)
-        except (TypeError, ValueError):
-            _s = 0.0
-        for i in range(3):
-            _star(img, W, H, 126 + i * 62, y_star, 22, accent)
-        pr = "%.1f" % _s
-        if isinstance(reviews, (int, float)) and reviews:
-            pr += " . %d REVIEWS" % int(reviews)
-        _stamp(_raster_text(pr.upper(), 340, 596, 5, gap=1), _BODY)
-    else:
-        _stroke(img, W, H, 128, 610, 148, 630, accent, 9)
-        _stroke(img, W, H, 148, 630, 184, 592, accent, 9)
-        _stamp(_raster_text("TOP RATED PICKS", 216, 596, 5, gap=1), _BODY)
+    # trust row — an honest claim about our own work, never a scraped rating
+    _stroke(img, W, H, 128, 610, 148, 630, accent, 9)
+    _stroke(img, W, H, 148, 630, 184, 592, accent, 9)
+    _stamp(_raster_text("RANKED PICKS", 216, 596, 5, gap=1), _BODY)
 
     # one accent call to action, phrase rotates per variant
     cta = _PINT_CTAS[variant % len(_PINT_CTAS)]

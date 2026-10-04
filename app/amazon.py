@@ -488,6 +488,35 @@ def _active_tag(tag=None):
     return paid or AFFILIATE_TAG
 
 
+def licensed_rating(it):
+    """A product's review stars/count, or ``(None, None)`` when we may not show them.
+
+    Amazon's Operating Agreement (updated 14 Apr 2026) permits displaying
+    customer reviews or star ratings only when they were obtained through the
+    Creators API / PA API. Everything else we know about a listing came from a
+    scrape, and a scraped star rating is Program Content we are not licensed to
+    republish — so it must never reach a page, a share image, an email, a
+    comparison table, JSON-LD or a sentence of generated copy.
+
+    ``source == "paapi"`` is the only licensed case, because that is the only
+    path where the number actually arrived through the API rather than a scrape.
+
+    The values are still perfectly usable *internally* — ranking, scoring,
+    saturation maths and audits all read the raw fields directly, because that is
+    our own analysis of public pricing, not a display of Amazon's content. The
+    distinction this function enforces is narrower and sharper: internal analysis
+    may read it, a reader may not.
+
+    This lives in ``amazon`` rather than in a render module because it is a rule
+    about Amazon's data, not about HTML, and because every reader-facing module
+    (seo, editorial, social, market_engine, mailer, cms) already imports this
+    one — so there is a single chokepoint to audit instead of six copies.
+    """
+    if (it or {}).get("source") != "paapi":
+        return None, None
+    return it.get("stars"), it.get("reviews")
+
+
 def set_session_tag(tag):
     """Per-request affiliate-tag override. Paid landing sessions route clicks
     through a campaign-specific tag without touching AFFILIATE_TAG."""

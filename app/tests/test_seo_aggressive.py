@@ -133,7 +133,7 @@ class TestSeoAggressive(unittest.TestCase):
         p = json.loads(data)
         self.assertEqual(set(p.keys()),
                          {"email", "social", "traffic", "content",
-                          "demography", "recommendations"})
+                          "paid", "demography", "recommendations"})
         self.assertEqual(set(p["email"]),
                          {"confirmed", "unsubscribed", "sent", "opens",
                           "open_rate", "clicks", "click_rate",

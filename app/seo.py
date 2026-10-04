@@ -22,6 +22,14 @@ SITE_NAME = "pstore"
 SITE_DESC = "Hand-picked Amazon product picks by niche."
 BASE_URL = os.environ.get("PSTORE_URL", "https://trypstore.com").rstrip("/")
 
+#: Whether the paid-offer page /pro is live and worth linking to. `server` owns
+#: the truth (it reads the offer settings) and keeps this in sync at boot and on
+#: every settings save, because `payments` imports `server` and this module must
+#: never import it back. The flag exists so the footer can link /pro only when
+#: the page actually exists: /pro 404s until a Stripe Payment Link is saved, and
+#: a site-wide link to a 404 costs us crawler trust and buyer trust for nothing.
+PAID_OFFER_LIVE = False
+
 # Blog cards per page — keeps /blog light (the old single page ballooned to
 # ~445KB / 485 <h2> once the niche list grew).
 BLOG_PAGE_SIZE = 24
@@ -253,13 +261,19 @@ def _slugify(text):
     return s or "niche"
 
 
+def _licensed_rating(it):
+    """Amazon review stars/count, or None when we may not display them. Thin
+    alias over the single chokepoint in `amazon` — see
+    `amazon.licensed_rating` for why a scraped rating is never published."""
+    return amazon.licensed_rating(it)
+
+
 def _product_graph(items, page_url=None, slug=None):
-    """Product nodes (+Offer, +AggregateRating) for niche/topic/landing pages.
+    """Product nodes (+Offer) for niche/topic/landing pages.
     Only fully-populated products are marked up: Google rejects an Offer without
-    a price and flags nodes missing priceCurrency, availability, aggregateRating
-    or review — so rows missing the price or the rating data are skipped rather
-    than serialized half-dressed. Each node carries a stable @id so the graph's
-    ItemList can reference it."""
+    a price and flags nodes missing priceCurrency or availability, so rows
+    missing the price are skipped rather than serialized half-dressed. Each node
+    carries a stable @id so the graph's ItemList can reference it."""
     graph = []
     for it in (items or [])[:10]:
         if not it.get("title"):
@@ -267,21 +281,20 @@ def _product_graph(items, page_url=None, slug=None):
         price = it.get("price")
         have_price = price not in (None, "") and not (
             isinstance(price, (int, float)) and float(price) <= 0)
-        stars = it.get("stars")
-        reviews = it.get("reviews")
-        if not have_price or not stars or not reviews:
+        stars, reviews = _licensed_rating(it)
+        if not have_price:
             continue
         node = {"@type": "Product", "name": it.get("title")}
-        # `image` must be a picture OF THIS PRODUCT. Falling back to the page's
-        # /og/<slug>.png share card put the same brand image on all 8 products
-        # of every ranking page (measured live across /n/keto on 2026-10-03),
-        # which is invalid Product markup: Google requires a representative
-        # product image and treats a mismatched one as misleading, suppressing
-        # the merchant-listing rich result we already have price, rating and
-        # reviewCount for. An absent image costs a thumbnail; a false one risks
-        # the whole page. So emit the product's own image when PA-API has given
-        # us one and otherwise say nothing.
-        if it.get("image"):
+        # `image` must be a picture OF THIS PRODUCT, and it must be an image we
+        # are licensed to display. Falling back to the page's /og/<slug>.png
+        # share card put the same brand image on all 8 products of every ranking
+        # page (measured live across /n/keto on 2026-10-03), which is invalid
+        # Product markup: Google requires a representative product image and
+        # treats a mismatched one as misleading. An absent image costs a
+        # thumbnail; a false one risks the whole page. Amazon product imagery is
+        # Program Content too, so it is emitted only when it arrived through
+        # PA-API and is therefore licensed.
+        if it.get("image") and it.get("source") == "paapi":
             node["image"] = it["image"]
         if it.get("title"):
             node["description"] = it["title"]
@@ -297,13 +310,14 @@ def _product_graph(items, page_url=None, slug=None):
                           "availability": "https://schema.org/InStock"}
         if it.get("url"):
             node["offers"]["url"] = it["url"]
-        node["aggregateRating"] = {
-            "@type": "AggregateRating",
-            "ratingValue": round(float(stars), 1),
-            "reviewCount": int(reviews),
-            "bestRating": 5,
-            "worstRating": 1,
-        }
+        if stars and reviews:
+            node["aggregateRating"] = {
+                "@type": "AggregateRating",
+                "ratingValue": round(float(stars), 1),
+                "reviewCount": int(reviews),
+                "bestRating": 5,
+                "worstRating": 1,
+            }
         graph.append(node)
     return graph
 
@@ -319,8 +333,11 @@ def landing_product_jsonld(pick, page_url, image_url=""):
         "@type": "Product",
         "name": pick.get("title"),
         "description": pick.get("title"),
-        "image": pick.get("image") or image_url or "",
     }
+    if pick.get("image") and pick.get("source") == "paapi":
+        node["image"] = pick["image"]
+    elif image_url:
+        node["image"] = image_url
     if pick.get("asin"):
         node["sku"] = pick["asin"]
         if page_url:
@@ -337,7 +354,7 @@ def landing_product_jsonld(pick, page_url, image_url=""):
         offers["priceCurrency"] = pick.get("currency") or "USD"
         offers["availability"] = "https://schema.org/InStock"
         node["offers"] = offers
-    stars, reviews = pick.get("stars"), pick.get("reviews")
+    stars, reviews = _licensed_rating(pick)
     if stars and reviews:
         node["aggregateRating"] = {
             "@type": "AggregateRating",
@@ -440,6 +457,12 @@ def _capture_cta(has_gate):
 
 
 def _footer():
+    # Only advertised once a checkout link exists — see PAID_OFFER_LIVE. This is
+    # the one link on the site that leads to owned revenue rather than an Amazon
+    # commission, and it is the reason /pro was unreachable: the page existed,
+    # converted, and nothing pointed at it.
+    pro_link = ('<a href="/pro">Niche Playbook (PDF)</a>'
+                if PAID_OFFER_LIVE else "")
     return f"""<footer>
   <div class="foot-wrap">
     <div class="foot-grid">
@@ -456,6 +479,7 @@ def _footer():
           <a href="/#niches">All niches</a>
           <a href="/blog">Blog</a>
           <a href="/stories">Stories</a>
+          {pro_link}
         </div>
       </div>
       <div class="fcol">
@@ -1320,7 +1344,7 @@ def story_cards(keyword, niche, base_url=None):
         "keyword": keyword,
         "count": len(items),
         "title": _best_prefixed(keyword),
-        "sub": "Ranked from live Amazon price, rating + review data.",
+"sub": "Ranked from live Amazon listings — price checked, picks explained.",
         "img": base + "/og/" + _slugify(keyword) + ".png",
     }]
     for i, item in enumerate(items, 1):
@@ -1333,6 +1357,7 @@ def story_cards(keyword, niche, base_url=None):
             "title": editorial._display(item, keyword),
             "stars": item.get("stars"),
             "reviews": item.get("reviews"),
+            "source": item.get("source"),
             "price": price if have_price else None,
             "url": item.get("url") or amazon.affiliate_url(item.get("asin") or "") or "",
             "img": item.get("image") or (base + "/og/" + _slugify(keyword) + ".png"),
@@ -1361,11 +1386,6 @@ def _story_slide_html(slide):
                 '</div></section>'
                 % (_clean(kw.upper()), _clean(kw), _clean(sub)))
     price = ("%s" % slide["price"]) if slide.get("price") is not None else "check price"
-    rating = ""
-    if slide.get("stars") and slide.get("reviews"):
-        rating = ('<p class="story-rating">%s / 5 from %s reviews</p>'
-                  % (round(float(slide["stars"]), 1),
-                     format(int(slide["reviews"]), ",")))
     img = (slide.get("img") or "").strip()
     img_html = ('<img src="%s" alt="%s" loading="lazy">' % (_clean(img),
                 _clean(slide.get("title", "")))) if img else ""
@@ -1375,9 +1395,9 @@ def _story_slide_html(slide):
     return ('<section class="story-slide">'
             '<div class="story-img">%s</div>'
             '<div class="story-inner"><p class="story-rank">Slot %s</p>'
-            '<h2>%s</h2>%s<p class="story-price">%s</p>%s</div></section>'
+            '<h2>%s</h2><p class="story-price">%s</p>%s</div></section>'
             % (img_html, slide.get("position", ""),
-               _clean(slide.get("title", "")), rating,
+               _clean(slide.get("title", "")),
                _clean(price), cta))
 
 
@@ -1389,11 +1409,11 @@ def story_listitem(pos, slide):
     price = slide.get("price")
     have_price = price not in (None, "") and not (
         isinstance(price, (int, float)) and float(price) <= 0)
-    stars, reviews = slide.get("stars"), slide.get("reviews")
+    stars, reviews = _licensed_rating(slide)
     title = slide.get("title") or ""
-    if have_price and stars and reviews:
+    if have_price:
         item = {"@type": "Product", "name": title}
-        img = slide.get("img") or ""
+        img = (slide.get("img") or "") if slide.get("source") == "paapi" else ""
         if img:
             item["image"] = img
         item["offers"] = {
@@ -1404,13 +1424,14 @@ def story_listitem(pos, slide):
         }
         if slide.get("url"):
             item["offers"]["url"] = slide["url"]
-        item["aggregateRating"] = {
-            "@type": "AggregateRating",
-            "ratingValue": round(float(stars), 1),
-            "reviewCount": int(reviews),
-            "bestRating": 5,
-            "worstRating": 1,
-        }
+        if stars and reviews:
+            item["aggregateRating"] = {
+                "@type": "AggregateRating",
+                "ratingValue": round(float(stars), 1),
+                "reviewCount": int(reviews),
+                "bestRating": 5,
+                "worstRating": 1,
+            }
     entry = {"@type": "ListItem", "position": pos}
     if item:
         entry["item"] = item

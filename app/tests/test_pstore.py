@@ -445,35 +445,59 @@ class TestSEO(unittest.TestCase):
     def test_product_offers_require_price_currency_availability(self):
         # Google rich results reject an Offer without "price"; non-critical
         # warnings fire when priceCurrency, availability, aggregateRating or
-        # review are missing. Only fully-populated products may be marked up:
-        # a priced+rated item emits the complete trio + aggregateRating, while
-        # rows missing a price OR the rating data are skipped entirely.
+        # review are missing. So a row without a price is skipped, and a priced
+        # row always ships the complete Offer trio.
+        #
+        # aggregateRating is a separate question from the Offer: Amazon's
+        # Operating Agreement (14 Apr 2026) only licenses review stars/counts
+        # that came through the Creators API / PA API. `source == "paapi"` is
+        # the only licensed state, so a scraped rating is dropped from the
+        # markup — and does NOT cost the product its node.
         import json
-        html = seo.render_niche("keto snacks", {
-            "products": [
-                {"asin": "B0KETO1234", "title": "Keto Bar", "price": 12.99,
-                 "stars": 4.5, "reviews": 10, "url": "https://www.amazon.com/dp/B0KETO1234"},
-                {"asin": "B0KETO9999", "title": "Unpriced Snack Jar",
-                 "stars": 4.0, "reviews": 3, "url": "https://www.amazon.com/dp/B0KETO9999"},
-                {"asin": "B0KETO7777", "title": "Unrated New Product", "price": 8.0,
-                 "url": "https://www.amazon.com/dp/B0KETO7777"},
-            ],
-            "source": "amazon"}).decode("utf-8")
-        blocks = re.findall(r'<script type="application/ld\+json">(.*?)</script>',
-                            html, re.S)
-        products = []
-        for block in blocks:
-            data = json.loads(block)
-            for node in (data.get("@graph", [data]) if isinstance(data, dict) else [data]):
-                if isinstance(node, dict) and node.get("@type") == "Product":
-                    products.append(node)
-        names = {p["name"] for p in products}
-        self.assertEqual(names, {"Keto Bar"})
-        node = products[0]
-        off = node["offers"]
-        self.assertEqual(sorted(off), sorted(["@type", "price", "priceCurrency",
-                                              "availability", "url"]))
-        self.assertIn("aggregateRating", node)
+
+        def graph_products(products):
+            html = seo.render_niche("keto snacks", {
+                "products": products, "source": "amazon"}).decode("utf-8")
+            blocks = re.findall(r'<script type="application/ld\+json">(.*?)</script>',
+                                html, re.S)
+            found = {}
+            for block in blocks:
+                data = json.loads(block)
+                for node in (data.get("@graph", [data])
+                             if isinstance(data, dict) else [data]):
+                    if isinstance(node, dict) and node.get("@type") == "Product":
+                        found[node["name"]] = node
+            return found
+
+        scraped = graph_products([
+            {"asin": "B0KETO1234", "title": "Keto Bar", "price": 12.99,
+             "stars": 4.5, "reviews": 10, "url": "https://www.amazon.com/dp/B0KETO1234"},
+            {"asin": "B0KETO9999", "title": "Unpriced Snack Jar",
+             "stars": 4.0, "reviews": 3, "url": "https://www.amazon.com/dp/B0KETO9999"},
+            {"asin": "B0KETO7777", "title": "Unrated New Product", "price": 8.0,
+             "url": "https://www.amazon.com/dp/B0KETO7777"},
+        ])
+        # No price -> skipped. Everything priced -> kept.
+        self.assertEqual(set(scraped), {"Keto Bar", "Unrated New Product"})
+        node = scraped["Keto Bar"]
+        self.assertEqual(sorted(node["offers"]),
+                         sorted(["@type", "price", "priceCurrency",
+                                 "availability", "url"]))
+        # A scraped rating is never published, so it never reaches the markup.
+        self.assertNotIn("aggregateRating", node)
+        self.assertNotIn("aggregateRating", scraped["Unrated New Product"])
+
+        licensed = graph_products([
+            {"asin": "B0KETO1234", "title": "Keto Bar", "price": 12.99,
+             "stars": 4.5, "reviews": 10, "source": "paapi",
+             "image": "https://m.media-amazon.com/keto.jpg",
+             "url": "https://www.amazon.com/dp/B0KETO1234"},
+        ])["Keto Bar"]
+        self.assertEqual(licensed["aggregateRating"],
+                         {"@type": "AggregateRating", "ratingValue": 4.5,
+                          "reviewCount": 10, "bestRating": 5, "worstRating": 1})
+        # Amazon product imagery is Program Content too — licensed only via PA-API.
+        self.assertEqual(licensed["image"], "https://m.media-amazon.com/keto.jpg")
 
     def test_audit_jsonld_flags_google_errors(self):
         # The /admin/seo Schema column re-serializes what the page emits and

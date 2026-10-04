@@ -29,6 +29,7 @@ from email.mime.text import MIMEText
 from email.utils import formataddr, parseaddr
 
 import market_engine
+import amazon
 import security
 
 STORE_NAME = os.environ.get("PSTORE_NAME", "pstore").strip() or "pstore"
@@ -239,20 +240,28 @@ def _email_sections(body, tracked_link=""):
     return "\n".join(out) if out else '<p style="margin:0;color:#3a3f4b">…</p>'
 
 
-def product_card_html(item, link_url="", image_url="", badge="", stars=0, reviews=0):
+def product_card_html(item, link_url="", image_url="", badge=""):
     """One Amazon-style product card for email bodies: clean image on top, bold
-    title, ⭐ rating line, orange price, and a direct affiliate CTA. All inline
-    styles so Gmail/Outlook/Apple Mail render it the same."""
+    title, rating line, orange price, and a direct affiliate CTA. All inline
+    styles so Gmail/Outlook/Apple Mail render it the same.
+
+    The rating line is not a parameter and cannot be supplied by the caller: a
+    star rating is Amazon Program Content we are only licensed to display when it
+    arrived through the Creators/PA API, so it is read from the item behind
+    `amazon.licensed_rating` and simply omitted when unlicensed. An email is a
+    published surface like any other — a scraped rating must not reach one.
+    """
     e = _html.escape
     it = item or {}
     title = market_engine._clip(it.get("title") or "", 96)
     price = _price_text(it)
     rating = ""
-    if stars or reviews:
+    stars, reviews = amazon.licensed_rating(it)
+    if stars and isinstance(reviews, (int, float)):
         sst = "" if not reviews else "s" if reviews != 1 else ""
         rating = ('<div style="margin:7px 0 0;font-size:13px;color:#5c6b7a;font-family:\'Inter\',\'Helvetica Neue\',Helvetica,Arial,sans-serif">'
                   '★ <strong style="color:#191b26">%s</strong> · %s rating%s</div>' %
-                  (e(str(stars)), e("{:,}".format(reviews) if reviews else "—"), sst))
+                  (e(str(round(float(stars), 1))), e("{:,}".format(int(reviews))), sst))
     badge_html = ('<div style="margin:0 0 8px;font-size:11px;font-weight:800;letter-spacing:.12em;'
                   'color:#e8600c;text-transform:uppercase;font-family:\'Inter\',\'Helvetica Neue\',Helvetica,Arial,sans-serif">%s</div>' % e(badge)) if badge else ""
     cta = ('<div style="margin:14px 0 0"><a href="%s" rel="nofollow sponsored noopener" '
@@ -316,10 +325,7 @@ def render_email_html(mail, to_name="there", site_name=STORE_NAME, email="",
             base = (base_url or site_base()).rstrip("/")
             image = "%s/og/%s.png?v=navy3" % (base, _slug(keyword))
             link = tracked_link or (base + "/lp/" + _slug(keyword))
-            stars = pick.get("stars") or 0
-            reviews = pick.get("reviews") or 0
-            inner += product_card_html(pick, link, image, badge="Top pick for “%s”" % keyword,
-                                       stars=stars, reviews=reviews)
+            inner += product_card_html(pick, link, image, badge="Top pick for “%s”" % keyword)
             inner += _runner_rows(items, tracked_link)
         if tracked_link:
             inner += ('<div style="text-align:center;margin:26px 0 4px">'

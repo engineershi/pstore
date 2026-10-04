@@ -682,10 +682,13 @@ def build_page_context(conn, keyword, niche_data):
         if pick.get("price"):
             sym = "$"
             ctx["price"] = "%s%.2f" % (sym, pick["price"])
-        if pick.get("stars"):
-            ctx["stars"] = str(pick["stars"])
-        # Build Amazon URL with affiliate tag
+        # A product rating is licensed only when it came through PA-API; until
+        # then it never enters the render context, so no template can print it.
         import amazon
+        _stars, _reviews = amazon.licensed_rating(pick)
+        if _stars:
+            ctx["stars"] = str(_stars)
+        # Build Amazon URL with affiliate tag
         ctx["amazon_url"] = amazon.affiliate_url(pick["asin"]) if ctx["asin"] else ""
 
     # Process sections in order

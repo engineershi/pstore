@@ -51,6 +51,7 @@ import market_engine
 import niche
 import oauth
 import paapi
+import payments
 import pricedrop
 import sales_events
 import seo
@@ -1659,6 +1660,38 @@ def _sales_event_summary():
         return sales_events.upcoming_summary()
     except Exception:
         return {}
+
+
+def _paid_settings():
+    """Paid-offer state for the admin console. The webhook secret is reduced to a
+    presence flag plus its last four characters here so the operator can confirm
+    which secret is stored without the page ever carrying the whole value."""
+    _sync_paid_flag()
+    off = payments.offer()
+    secret = payments.webhook_secret()
+    st = payments.status()
+    return {
+        "offer_name": off["name"],
+        "offer_price": off["price_label"],
+        "offer_blurb": off["blurb"],
+        "offer_niche": off["niche"],
+        "checkout_url": off["checkout_url"],
+        "offer_deliver_pdf": off["deliver_pdf"],
+        "webhook_secret": secret if len(secret) <= 10 else secret[-4:],
+        "has_webhook_secret": bool(secret),
+        "orders": st["orders"],
+        "entitlements": st["entitlements"],
+    }
+
+
+def _sync_paid_flag():
+    """Keep `seo.PAID_OFFER_LIVE` honest so the footer links /pro only when the
+    page actually exists. Called at boot and after any paid-settings save, so
+    the operator never has to redeploy to switch the link on."""
+    try:
+        seo.PAID_OFFER_LIVE = payments.configured()
+    except Exception:
+        seo.PAID_OFFER_LIVE = False
 
 
 def _email_freq_settings():
@@ -4925,6 +4958,7 @@ def _ensure_db_schema(conn):
     cms_mod.ensure_tables(conn)
     conn.execute(linkauthority.SCHEMA)
     conn.execute(linkauthority.SCHEMA_INDEX)
+    payments.init_db(conn)
     return conn
 
 
@@ -5280,6 +5314,7 @@ class Handler(BaseHTTPRequestHandler):
                 },
             },
             "marketing": market_engine.status_blurb(),
+            "paid": _paid_settings(),
             "demography": self._demo(),
             "mailer": {
                 "configured": mailer.configured(),
@@ -6995,6 +7030,10 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             if path == "/tool":
                 with open(os.path.join(STATIC, "tool.html"), "rb") as fh:
                     return self._send(200, fh.read(), "text/html; charset=utf-8")
+            if path == "/pro":
+                return self._pro_offer_html()
+            if path == "/pro/download":
+                return self._pro_download(path, q)
             if path == "/admin":
                 return self._admin_page()
             if path == "/admin/ebooks/pdf":
@@ -7248,6 +7287,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._page_view()
             if parsed.path == "/api/social/webhook":
                 return self._social_webhook()
+            if parsed.path == "/webhook/stripe":
+                return self._stripe_webhook()
             if parsed.path == "/api/telegram/hook":
                 return self._telegram_hook()
             if parsed.path == "/api/telegram/feed":
@@ -7453,6 +7494,24 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         self._body_parsed = parsed
         return parsed
 
+    def _raw_body(self):
+        """The exact bytes Stripe signed. Kept separate from `_body` because a
+        signature check must run against the untouched payload, before any
+        parsing — reading here also consumes the socket, so a handler that calls
+        this must not then call `_body`."""
+        raw = getattr(self, "_raw_cached", None)
+        if raw is not None:
+            return raw
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n > security.MAX_BODY:
+            raise ValueError("payload too large")
+        raw = self.rfile.read(n) if n else b""
+        self._raw_cached = raw
+        return raw
+
     def _search(self, q):
         query = (q.get("q") or [""])[0].strip()
         market = (q.get("market") or [""])[0].strip()
@@ -7586,6 +7645,25 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                     _set_setting("ai.model." + p, "")
                     _set_setting("ai.base." + p, "")
                     ai.clear_runtime(p)
+        # Paid offer (owned revenue). The checkout link is a Stripe-hosted Payment
+        # Link, so no Stripe secret key ever lives here; the only credential is
+        # the webhook signing secret, and it is write-only from this side.
+        paid = body.get("paid")
+        if isinstance(paid, dict):
+            for f in ("offer_name", "offer_price", "offer_blurb", "offer_niche",
+                      "checkout_url"):
+                if f in paid:
+                    _set_setting("paid_%s" % f, str(paid.get(f) or "").strip())
+            if "offer_deliver_pdf" in paid:
+                _set_setting("paid_offer_deliver_pdf",
+                             "0" if paid.get("offer_deliver_pdf") in
+                             ("0", "", "no", False) else "1")
+            if paid.get("webhook_secret"):
+                _set_setting("stripe_webhook_secret",
+                             str(paid["webhook_secret"]).strip())
+            # Saving the first checkout link is what makes /pro go live, so the
+            # footer link has to appear now rather than after a redeploy.
+            _sync_paid_flag()
         # Market-demography targeting profile (region / interest / persona).
         demo = body.get("demography")
         if isinstance(demo, dict):
@@ -8290,6 +8368,12 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         entries = [("/", today), ("/blog", today), ("/stories", today)]
         for page in seo.STATIC_PAGES:
             entries.append(("/" + page, "2026-08-28"))
+        # The paid-offer page is indexable whenever it exists, so listing it
+        # while it is live keeps the sitemap and the robots meta in agreement.
+        # It 404s until a checkout link is saved, and a sitemap entry that 404s
+        # is exactly the contradiction this sitemap exists to prevent.
+        if payments.configured():
+            entries.append(("/pro", today))
         with _lock:
             conn = _db()
             nrows = conn.execute(
@@ -11989,6 +12073,31 @@ details.copy-details summary {{ cursor:pointer; color:var(--accent,#ff6b2c); fon
                                 "via": res.get("via") or "error",
                                 "message": res.get("message") or ""})
 
+    def _stripe_webhook(self):
+        """POST /webhook/stripe — the only path that can create a paid
+        entitlement. Public by necessity (Stripe calls it) and therefore
+        authenticated entirely by the signature on the body: an unsigned or
+        replayed payload is refused before it is parsed, and a verified event is
+        de-duplicated on its event id so a retry cannot grant twice."""
+        try:
+            raw = self._raw_body()
+        except ValueError:
+            return self._send(413, {"error": "payload too large"})
+        if not payments.webhook_secret():
+            return self._send(503, {"error": "payments not configured"})
+        header = (self.headers.get("Stripe-Signature")
+                  or self.headers.get("Stripe-signature") or "")
+        if not payments.verify_signature(raw, header):
+            return self._send(400, {"error": "invalid signature"})
+        try:
+            event = json.loads(raw.decode("utf-8", "replace"))
+        except Exception:
+            return self._send(400, {"error": "invalid json"})
+        result = payments.handle_event(event)
+        return self._send(200, {"ok": True, "type": result.get("type"),
+                                "granted": bool(result.get("granted")),
+                                "duplicate": bool(result.get("duplicate"))})
+
     def _record_social_webhook(self, kit, res):
         """Upsert one social_posts row for a webhook-delivered kit so the admin
         log and stats stay honest: 'published' when the native post went out,
@@ -14125,6 +14234,7 @@ fresh();
                 "top_open_niches": [dict(r) for r in top_open_niches],
             },
             "content": {"niches": niches, "topics": topics},
+            "paid": _paid_settings(),
             "demography": demo,
             "recommendations": reco,
         }
@@ -14339,6 +14449,50 @@ fresh();
             'btn.disabled=false;}'
             '</script></section>'
         )
+        paid_editor = (
+            '<section class="card" id="paidoffer"><h2>💰 Paid offer (owned revenue)</h2>'
+            '<p class="hint">The only revenue on this site that Amazon does not gate. '
+            'Checkout runs on a Stripe-hosted <b>Payment Link</b>, so no Stripe secret key '
+            'is stored here &mdash; the only credential on this server is the webhook signing '
+            'secret, which cannot move money. Until a checkout link is set, <code>/pro</code> '
+            'returns 404 rather than advertising a dead button.</p>'
+            '<form id="paidfrm" onsubmit="paidSave();return false;"><div class="grid">'
+            '<label>Product name<input name="offer_name" value="%s" placeholder="Niche Playbook"></label>'
+            '<label>Price label<input name="offer_price" value="%s" placeholder="$39"></label>'
+            '<label>Stripe Payment Link<input name="checkout_url" value="%s" placeholder="https://buy.stripe.com/..."></label>'
+            '<label>Niche the PDF covers<input name="offer_niche" value="%s" placeholder="cast iron skillet"></label>'
+            '<label style="grid-column:1/-1">One-line pitch<input name="offer_blurb" value="%s"></label>'
+            '<label style="grid-column:1/-1">Stripe webhook signing secret'
+            '<input name="webhook_secret" type="password" value="" placeholder="%s">'
+            '<span class="hint">Stripe Dashboard → Developers → Webhooks → your endpoint → '
+            'Signing secret. Leave blank to keep the stored one.</span></label>'
+            '<label style="display:flex;gap:8px;align-items:center">'
+            '<input type="checkbox" name="offer_deliver_pdf" style="width:auto"%s> Attach the PDF to the delivery email</label>'
+            '</div><button class="warm" type="submit">Save offer</button>'
+            '<span id="paidmsg" class="msg"></span></form>'
+            '<p class="hint" style="margin-top:10px">Then add the Stripe webhook endpoint '
+            '<code>https://%s/webhook/stripe</code> subscribed to '
+            '<code>checkout.session.completed</code>. Orders seen: <b>%d</b> · '
+            'entitlements granted: <b>%d</b>.</p>'
+            '<script>async function paidSave(){const o={};'
+            '["offer_name","offer_price","offer_blurb","offer_niche","checkout_url","webhook_secret"]'
+            '.forEach(f=>{const el=document.querySelector(`#paidfrm input[name="${f}"]`);o[f]=el.value;});'
+            'o.offer_deliver_pdf=document.querySelector("#paidfrm input[name=offer_deliver_pdf]").checked?1:0;'
+            'const m=document.querySelector("#paidmsg");m.textContent="Saving…";'
+            'let r,d;try{r=await fetch("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},'
+            'body:JSON.stringify({paid:o})});d=await r.json();}catch(e){m.textContent="✗ Could not reach the server.";return;}'
+            'm.textContent=(r.ok?"✓ Offer saved":"✗ "+JSON.stringify(d||{}));'
+            'if(r.ok)setTimeout(()=>location.reload(),700);}\n</script></section>'
+            % (_d(p["paid"]["offer_name"]), _d(p["paid"]["offer_price"]),
+               _d(p["paid"]["checkout_url"]), _d(p["paid"]["offer_niche"]),
+               _d(p["paid"]["offer_blurb"]),
+               ("stored (%s…%s)" % (_d(p["paid"]["webhook_secret"][:6]),
+                                     _d(p["paid"]["webhook_secret"][-4:]))
+                if p["paid"]["webhook_secret"] else
+                "whsec_… — paste it once"),
+               " checked" if p["paid"]["offer_deliver_pdf"] else "",
+               _d(self._site_base()), p["paid"]["orders"], p["paid"]["entitlements"])
+        )
         body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Marketing ROI — pstore</title><link rel="stylesheet" href="/style.css">
@@ -14355,6 +14509,7 @@ fresh();
 <div class="table-wrap"><table class="plain"><thead><tr><th>Platform</th><th>Winner post</th><th>Clicks</th></tr></thead><tbody>{winners_html}</tbody></table></div></section>
 <section class="card"><h2>🌐 Traffic &amp; content</h2>{traffic_row}
 <div class="table-wrap"><table class="plain"><thead><tr><th>Most-clicked page</th><th>Clicks</th></tr></thead><tbody>{top_pages}</tbody></table></div></section>
+{paid_editor}
 {demo_editor}
 {suggest_card}
 <section class="card"><h2>💡 Next best action</h2><ul class="reco">{reco_html}</ul>
@@ -18570,6 +18725,107 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
                 return n.get("products") or []
         return []
 
+    def _pro_offer_html(self):
+        """GET /pro — the paid-offer landing page.
+
+        This is the site's only owned-revenue surface, so it is built to convert:
+        one primary action, the objection (what is in it, what it costs, when you
+        get it) answered above the action, and no second competing CTA. The
+        Product/Offer markup here describes *our* product, which we are the
+        vendor of — unlike the Amazon product markup elsewhere in the codebase,
+        it carries no third-party data.
+        """
+        off = payments.offer()
+        if not payments.configured():
+            return self._send(404, seo.render_404(), "text/html; charset=utf-8")
+        name = seo._clean(off["name"])
+        price = seo._clean(off["price_label"])
+        title = "%s — %s | %s" % (name, off["blurb"].split(".")[0], seo.SITE_NAME)
+        desc = ("%s. %s One payment, delivered as a PDF the moment you check out."
+                % (name, off["blurb"]))
+        canonical = "/pro"
+        url = seo.BASE_URL + canonical
+        jsonld = {
+            "@context": "https://schema.org",
+            "@graph": [
+                {"@type": "Product", "name": name, "description": off["blurb"],
+                 "brand": {"@type": "Brand", "name": seo.SITE_NAME},
+                 "offers": {"@type": "Offer", "price": off["price_label"].lstrip("$"),
+                            "priceCurrency": "USD", "availability":
+                            "https://schema.org/InStock",
+                            "url": off["checkout_url"]}},
+                {"@type": "BreadcrumbList", "itemListElement": [
+                    {"@type": "ListItem", "position": 1, "name": seo.SITE_NAME,
+                     "item": seo.BASE_URL + "/"},
+                    {"@type": "ListItem", "position": 2, "name": name, "item": url},
+                ]},
+            ],
+        }
+        head = seo._head(title, desc, canonical, canonical, jsonld=jsonld)
+        bullets = "".join(
+            "<li>%s</li>" % b for b in (
+                "The ranked picks, with the reasoning behind each one — not a "
+                "list of links.",
+                "The price band the niche actually sells at, so you position "
+                "against the right competitor.",
+                "Delivered to your inbox as a PDF seconds after you pay.",
+                "Yours to keep, with no subscription and no upsell.",
+            ))
+        body = """%s
+<main class="page">
+<article class="card offer">
+<h1>%s</h1>
+<p class="hero-sub">%s</p>
+<div class="offer-price">%s <span>one payment &middot; no subscription</span></div>
+<ul class="offer-list">%s</ul>
+<p><a class="btn btn-primary btn-lg" href="%s">Get the %s</a></p>
+<p class="hint">Checkout is handled by Stripe. You are emailed the PDF the
+moment payment clears &mdash; usually within a minute, always within a few
+minutes. If it does not arrive, reply to the email and a person sends it again.</p>
+<h2>Who this is for</h2>
+<p>If you are about to publish a page in this niche, this saves you the
+week of research it took us to build the ranking in the first place.</p>
+<h2>Who this is not for</h2>
+<p>If you want a list of affiliate links and nothing else, the free
+<a href="/">niche pages</a> already give you that. This is the part that
+does not fit in a web page.</p>
+<h2>Questions</h2>
+<p>Ask before you buy &mdash; <a href="/contact">contact us</a>. Also read the
+<a href="/disclosure">disclosure</a> and <a href="/terms">terms</a>.</p>
+</article>
+</main>
+""" % (seo._page_header(), name, seo._clean(off["blurb"]), price, bullets,
+       seo._clean(off["checkout_url"]), name)
+        return self._send(200, head + body.encode("utf-8") + seo._footer(),
+                          "text/html; charset=utf-8")
+
+    def _pro_download(self, path, q):
+        """GET /pro/download?token=... — serve the bought PDF to a buyer whose
+        signed token is valid and whose entitlement still exists. Nothing here
+        reveals whether an email exists unless the token already proved it."""
+        token = (q.get("token") or [""])[0].strip()
+        email = payments.verify_download_token(token)
+        if not email:
+            return self._send(403, b"expired or invalid link",
+                              "text/plain; charset=utf-8")
+        built = payments.build_pdf()
+        if not built:
+            return self._send(503, b"your file is being rebuilt - email us and "
+                                  b"we will send it straight over",
+                              "text/plain; charset=utf-8")
+        payments.note_download(email)
+        name, data = built
+        self.send_response(200)
+        self.send_header("Content-Type", "application/pdf")
+        self.send_header("Content-Disposition",
+                         'attachment; filename="%s"' % name.replace('"', ""))
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        if not getattr(self, "_head_only", False):
+            self.wfile.write(data)
+        return None
+
     def _ebook_attachment(self, keyword):
         """Return the per-niche lead-magnet PDF as an (filename, bytes) tuple for
         attaching to email #1, or None when the ebook isn't available."""
@@ -21198,6 +21454,7 @@ Handler._tg_config_save = telegram_admin._config_save
 def main():
     _init()
     _load_saved_verification_tokens()
+    _sync_paid_flag()
     if not _ADMIN_CRED_VIA_ENV:
         print("WARNING: PSTORE_ADMIN_EMAIL / PSTORE_ADMIN_PASSWORD not both set — admin login "
               "uses an EPHEMERAL single-boot credential (email=%s password=%s). Set both env "
