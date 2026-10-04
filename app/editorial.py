@@ -400,13 +400,121 @@ def faq(keyword, best):
     return out
 
 
-def related_niches(current, niches):
-    """Up to 6 sibling niche pages, self-excluded, deterministically chosen."""
+#: Words that appear in half the inventory and therefore prove nothing about
+#: whether two niches belong together. Without this, every page "related" to
+#: every other page via the word "best".
+_REL_STOP = frozenset((
+    "best", "for", "the", "with", "to", "and", "of", "in", "a", "an", "on",
+    "at", "by", "from", "top", "guide", "review", "reviews", "vs", "or",
+    "our", "your", "my", "is", "are", "that", "this",
+))
+
+
+def _rel_tokens(text):
+    """A keyword reduced to the tokens that identify its subject.
+
+    Punctuation is a separator, so `back-pain`, `back pain` and `Back_Pain`
+    collapse to one set, and the common inflections are indexed next to their
+    base form so a cluster is not split by grammar: `desk-lamp`/`desk-lamps`,
+    `yoga mat`/`yoga mats`, and above all `sleep`/`sleeping` -- without that
+    last one `sleeping bag` shares nothing with `sleep mask` and gets filed
+    with the fallback instead of its own topic.
+
+    This is deliberately a short explicit list, not a stemmer. A real Porter
+    stemmer would merge genuinely different products ("press" with "printing")
+    and the cost of a wrong sibling is higher than the cost of a missing one:
+    the fallback still fills the block, it just stops being topical.
+    """
+    out = set()
+    for raw in re.findall(r"[a-z0-9]+", (text or "").lower()):
+        if raw in _REL_STOP:
+            continue
+        out.add(raw)
+        if len(raw) > 3 and raw.endswith("s") and not raw.endswith("ss"):
+            out.add(raw[:-1])
+            if raw.endswith("es") and len(raw) > 4:
+                out.add(raw[:-2])
+        if len(raw) > 5 and raw.endswith("ing"):
+            base = raw[:-3]
+            # "running" -> "runn" -> "run": drop the doubled consonant the
+            # suffix left behind.
+            if len(base) > 2 and base[-1] == base[-2]:
+                base = base[:-1]
+            out.add(base)
+        if len(raw) > 4 and raw.endswith("ed") and not raw.endswith("eed"):
+            out.add(raw[:-2])
+    return out
+
+
+def related_niches(current, niches, limit=6):
+    """Up to `limit` sibling niche pages that actually belong beside `current`.
+
+    This was `sorted(pool, key=lambda n: _h(n["keyword"], "related"))[:6]` --
+    a sort key computed from the candidate alone, with no reference to the page
+    being rendered. Every page on the site therefore returned the *identical*
+    six niches in hash order: six pages took roughly 1,300 inbound internal
+    links each and the remaining ~1,300 took none. A sitemap is a discovery
+    hint, not a link graph, so that shape is a crawl graph with one very fat
+    hub and a long tail of orphans -- which is what a young domain with 1,300
+    crawlable, self-canonical, `index,follow` pages and zero impressions from
+    four engines looks like.
+
+    Ranking is now token overlap, weighted so a rare shared word counts for
+    more than a ubiquitous one. `jewelry box` lands beside `jewelry cleaner`
+    and `gold jewelry`; `yoga mat` beside `yoga blocks`; `keto snacks` beside
+    `keto bread`. Words like "best" and "products" are dropped as stopwords so
+    they cannot carry a match on their own.
+
+    Ties are broken with a hash salted by the *current* keyword rather than
+    alphabetically. That detail is load-bearing: an inventory where many pages
+    share one generic token (every keyword beginning "niche", or every
+    "best ..." page) makes the whole pool score identically, and an
+    alphabetical tie-break then hands the same handful of pages every slot on
+    the site -- the original bug wearing a different hat.
+
+    When a keyword genuinely shares nothing with the rest of the inventory the
+    block is still filled, but the fallback is salted the same way, so a page
+    is never left with an empty "Keep exploring" section and no six pages are
+    left holding every link on the site.
+    """
     pool = [n for n in (niches or [])
             if isinstance(n, dict) and n.get("keyword") and n["keyword"] != current]
     if not pool:
         return []
-    return sorted(pool, key=lambda n: _h(n["keyword"], "related"))[:6]
+    cur = _rel_tokens(current)
+    df = {}
+    for n in pool:
+        for t in _rel_tokens(n["keyword"]):
+            df[t] = df.get(t, 0) + 1
+
+    ranked = []
+    for n in pool:
+        kw = n["keyword"]
+        cand = _rel_tokens(kw)
+        shared = cur & cand
+        if not shared:
+            ranked.append((0.0, 0.0, kw, n))
+            continue
+        # Rarity first: a shared word that only a few pages use says more.
+        rarity = sum(1.0 / (1.0 + math.log(1.0 + df.get(t, 1))) for t in shared)
+        # Then containment: how much of the candidate this page accounts for.
+        # "sleep" is 1 of 2 tokens in "sleep mask" but 1 of 3 in "mellow sleep
+        # pillow", so the mask is the closer sibling even though both match on
+        # the same single word. Without this the tie falls to alphabetical
+        # order and picks the wrong one.
+        cover = len(shared) / float(len(cand))
+        ranked.append((rarity, cover, kw, n))
+
+    matched = sorted((r for r in ranked if r[0] > 0),
+                     key=lambda r: (-r[0], -r[1],
+                                    _h("%s|%s" % (current, r[2]), "related")))
+    out = [r[3] for r in matched[:limit]]
+    if len(out) < limit:
+        seen = {id(n) for n in out}
+        rest = [r for r in ranked if id(r[3]) not in seen]
+        rest.sort(key=lambda r: _h("%s|%s" % (current, r[2]), "related"))
+        out.extend(r[3] for r in rest[:limit - len(out)])
+    return out[:limit]
 
 
 def reading_minutes(keyword, items, best):
