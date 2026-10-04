@@ -5332,13 +5332,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_cached(self, body, ctype, max_age=RENDER_CACHE_DEFAULT_TTL, edge=True):
         """Send a public HTML/xml response tagged with a Cache-Control lifetime so
-        browsers, crawlers and CDN edges reuse it. The /n/ render cache is keyed by
-        content and expires itself, so the stale window is bounded and safe.
+        browsers, crawlers and any CDN edge can reuse it. The /n/ render cache is
+        keyed by content and expires itself, so the stale window is bounded and
+        safe.
 
-        edge=True also emits s-maxage: Cloudflare (already in front of Render)
-        then serves the page from the edge, so Google/Bing never wait on the
-        free-tier cold start. Pages with A/B variants pass edge=False to keep the
-        per-visitor headline intact."""
+        edge=True also emits s-maxage. Cloudflare sits in front of this origin
+        and is the only thing that can absorb a crawl, but whether it actually
+        caches is a dashboard setting, not something this header can force --
+        Cloudflare ignores s-maxage for HTML unless a Cache Rule matches, and
+        the live site currently answers `cf-cache-status: DYNAMIC` for every
+        path, CSS included. Until that rule exists, treat these pages as
+        origin-served and use the `Server-Timing` header below to tell an app
+        problem from a network one. Pages with A/B variants pass edge=False to
+        keep the per-visitor headline intact."""
         data = body if isinstance(body, bytes) else body.encode("utf-8")
         data = _stamp_style_version(data, ctype)
         if "text/html" in ctype:
@@ -5355,7 +5361,16 @@ class Handler(BaseHTTPRequestHandler):
                              % (age, edge_age))
         else:
             self.send_header("Cache-Control", "public, max-age=%d" % age)
-        _tally_api(getattr(self, "path", ""), 200, self._latency())
+        origin_ms = self._latency()
+        if origin_ms is not None:
+            # Origin time, separated from the client's total. Every public page
+            # reports `cf-cache-status: DYNAMIC`, so the edge is not caching
+            # anything and this number IS the crawl experience -- but it is
+            # indistinguishable from the edge->origin round trip without a
+            # header. One `curl -sI` now answers "is the app slow or the
+            # network slow", which is the whole diagnosis.
+            self.send_header("Server-Timing", "origin;dur=%.1f" % origin_ms)
+        _tally_api(getattr(self, "path", ""), 200, origin_ms)
         self.end_headers()
         if not getattr(self, "_head_only", False):
             self.wfile.write(data)
@@ -21653,6 +21668,16 @@ def main():
         each one buries the errors that actually matter, so log those two
         quietly and keep tracebacks for everything else."""
         daemon_threads = True
+        # The stdlib default is 5. That is the kernel's accept backlog, not a
+        # concurrency limit — it is how many *completed* handshakes can sit
+        # waiting for the accept loop. A crawler pulling the sitemap opens
+        # several sockets at once while a human is on the site, and at a
+        # backlog of 5 the kernel starts refusing the rest, which reaches the
+        # client as a reset connection mid-response (`RemoteDisconnected`,
+        # `ConnectionResetError`) rather than as a slow page. It showed up as
+        # ~2% of a live sitemap crawl failing outright, and a dropped request
+        # during a crawl is worse for indexing than a slow one.
+        request_queue_size = 128
 
         def handle_error(self, request, client_address):
             exc = sys.exc_info()[1]
