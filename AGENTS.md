@@ -44,10 +44,19 @@ Dual audience, keep separate — they have opposite economics:
 ## OFFER + PRICE
 - Today: free site, 100% of revenue is Amazon commission via `PSTORE_TAG`.
   Every page must end in a buyer click.
-- **No owned revenue exists.** No Stripe/PayPal/Gumroad anywhere in the repo
-  (the only "premium" in the code is a CSS theme preset). The delivery machinery
-  for a paid product already exists unused: `pdfgen.py` (PDF), `cms.py` (page
-  editor), email gate. Highest-leverage unbuilt revenue line.
+- A paid offer is **built but unlaunched**: `payments.py`, `/pro`, the PDF
+  delivery (`pdfgen.py`) and the Stripe webhook all exist. `payments.sellable()`
+  deliberately refuses to publish the offer unless BOTH `paid_checkout_url` and
+  `stripe_webhook_secret` are set — a checkout link with no working webhook takes
+  money and never grants access. So `/pro` 404s and stays out of the sitemap
+  until the owner configures both.
+  **Owner action:** create the Stripe Payment Link, set `paid_checkout_url` and
+  the webhook signing secret (`/webhook/stripe`), then re-verify. Highest-leverage
+  unbuilt revenue line — this is the only audience that can pay us directly.
+- Commission is category-driven, not flat: see `earnings.CATEGORY_AOV` /
+  `SAMPLE_CATEGORIES`. Per-click value ranges **$0.03 (grocery) to $0.51
+  (jewelry)** — an 17x spread on identical traffic. Prefer jewellery, tools,
+  furniture, appliances, garden. Never value a page at the 4% / $40 default.
 - Commission is category-driven, not flat: see `earnings.CATEGORY_AOV` /
   `SAMPLE_CATEGORIES`. Per-click value ranges **$0.03 (grocery) to $0.51
   (jewelry)** — an 17x spread on identical traffic. Prefer jewellery, tools,
@@ -69,12 +78,18 @@ described as one** — 1,963 of those pages were relabels of their own parent
 vs head-to-head pages, which answer a distinct query.
 
 ## CURRENT BLOCKER
-1. **Zero discovery.** 2,469 `/n/` URLs are crawlable, 200 OK, self-canonical,
+1. **Zero discovery.** 1,322 URLs are crawlable, 200 OK, self-canonical,
    `index,follow` — and Google, Bing, Yandex, DuckDuckGo and Yahoo have all sent
    **0 views**. 1,102 lifetime pageviews, 28 clicks, $1.35 modelled, **$0 real**.
-   13,212 social posts and 2,154 Pinterest pins have produced **0 clicks**. This
-   is not a crawl or schema problem (verified); it is authority + a young domain
+   13,212 social posts and 2,154 Pinterest pins have produced **0 clicks**.
+   Crawl and schema are now clean (verified live: 40/40 sampled `/n/` URLs
+   indexable, sitemap/render agree). What remains is authority + a young domain
    competing against Amazon itself for head commercial terms.
+   Fixed on our side: `/niches` indexes the whole inventory (live, page 1 in the
+   sitemap, `Server-Timing` reporting), and `related_niches()` is topical instead
+   of a fixed six (live: 10 pages → 55 distinct targets, reuse only where the
+   match is real). **Neither has had time to earn an impression — check Search
+   Console before drawing any conclusion from the traffic number.**
 2. **PA-API credentials unset in prod.** The code path is wired and verified; the
    input is missing. Until then: all product data comes from TOS-violating
    scraping (account-ban risk to the whole stream) and **0 ranking pages carry a
