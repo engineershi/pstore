@@ -358,8 +358,8 @@ def og_svg(slug, keyword, title, stars, reviews):
  <text x="116" y="84" font-family="Helvetica,Arial,sans-serif" font-size="32" font-weight="700" fill="rgba(203,221,252,0.95)" letter-spacing="2">PSTORE</text>
  <text x="96" y="156" font-family="Helvetica,Arial,sans-serif" font-size="44" font-weight="800" fill="#FFBA6A" letter-spacing="1">{kwl}</text>
  <text x="96" y="280" font-family="Helvetica,Arial,sans-serif" font-size="72" font-weight="800" fill="#F7FAFF">{tr}</text>
- <g fill="#FFBA6A"><text x="96" y="420" font-size="64">★★★</text></g>
- <text x="330" y="416" font-family="Helvetica,Arial,sans-serif" font-size="40" font-weight="700" fill="#DAE5FA">{html_esc(pr)}</text>
+ <polyline points="100,388 116,404 148,372" fill="none" stroke="#FFBA6A" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+ <text x="176" y="416" font-family="Helvetica,Arial,sans-serif" font-size="40" font-weight="700" fill="#DAE5FA">{html_esc(pr)}</text>
  <line x1="100" y1="470" x2="1100" y2="470" stroke="rgba(255,255,255,.18)" stroke-width="6" stroke-dasharray="2 22" stroke-linecap="round"/>
  <rect x="96" y="498" width="610" height="80" rx="26" fill="#FFBB74"/>
  <rect x="104" y="506" width="594" height="64" rx="22" fill="#FFBA6A"/>
