@@ -1679,6 +1679,7 @@ def _paid_settings():
         "offer_deliver_pdf": off["deliver_pdf"],
         "webhook_secret": secret if len(secret) <= 10 else secret[-4:],
         "has_webhook_secret": bool(secret),
+        "sellable": bool(st["sellable"]),
         "orders": st["orders"],
         "entitlements": st["entitlements"],
     }
@@ -1687,9 +1688,13 @@ def _paid_settings():
 def _sync_paid_flag():
     """Keep `seo.PAID_OFFER_LIVE` honest so the footer links /pro only when the
     page actually exists. Called at boot and after any paid-settings save, so
-    the operator never has to redeploy to switch the link on."""
+    the operator never has to redeploy to switch the link on.
+
+    `sellable()`, not `configured()`: a checkout link with no webhook signing
+    secret is a page we would 404 anyway, and linking it site-wide would point
+    every buyer at a 404."""
     try:
-        seo.PAID_OFFER_LIVE = payments.configured()
+        seo.PAID_OFFER_LIVE = payments.sellable()
     except Exception:
         seo.PAID_OFFER_LIVE = False
 
@@ -8433,9 +8438,10 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             entries.append(("/" + page, "2026-08-28"))
         # The paid-offer page is indexable whenever it exists, so listing it
         # while it is live keeps the sitemap and the robots meta in agreement.
-        # It 404s until a checkout link is saved, and a sitemap entry that 404s
-        # is exactly the contradiction this sitemap exists to prevent.
-        if payments.configured():
+        # It 404s until the offer is sellable — checkout link AND webhook
+        # signing secret — and a sitemap entry that 404s is exactly the
+        # contradiction this sitemap exists to prevent.
+        if payments.sellable():
             entries.append(("/pro", today))
         with _lock:
             conn = _db()
@@ -14523,12 +14529,47 @@ fresh();
             'btn.disabled=false;}'
             '</script></section>'
         )
+        # Readiness banner. The two halves of this setup fail independently and
+        # the dangerous one is silent: a Payment Link with no signing secret puts
+        # a live buy button on the site, and every payment then 503s into a
+        # delivery that can never happen. Say so in the operator's face.
+        _has_link = bool(p["paid"]["checkout_url"])
+        _has_secret = bool(p["paid"]["has_webhook_secret"])
+        if p["paid"]["sellable"]:
+            paid_ready = (
+                '<div style="padding:10px 13px;border-radius:10px;margin:0 0 12px;'
+                'border:1px solid #1f7a4d;background:#0f2a1e;color:#8ff0bd">'
+                '<b>● Live.</b> /pro is serving, listed in the sitemap and linked in '
+                'the footer. Payments are delivered.</div>')
+        elif _has_link and not _has_secret:
+            paid_ready = (
+                '<div style="padding:10px 13px;border-radius:10px;margin:0 0 12px;'
+                'border:1px solid #a33;background:#2a1414;color:#ffb4b4">'
+                '<b>● Payment link saved, webhook secret missing — not selling.</b> '
+                'The webhook is the <i>only</i> path that grants the download, so with '
+                'no signing secret a paid buyer would be charged and never receive '
+                'the PDF. <code>/pro</code> stays 404 and stays out of the sitemap '
+                'and footer until the secret below is saved.</div>')
+        elif _has_secret and not _has_link:
+            paid_ready = (
+                '<div style="padding:10px 13px;border-radius:10px;margin:0 0 12px;'
+                'border:1px solid #b58900;background:#2a2410;color:#ffd479">'
+                '<b>● Webhook secret stored, no Payment Link.</b> Add the Stripe '
+                'Payment Link above and this goes live — both halves are required.</div>')
+        else:
+            paid_ready = (
+                '<div style="padding:10px 13px;border-radius:10px;margin:0 0 12px;'
+                'border:1px solid var(--border);background:var(--bg-soft);color:var(--muted)">'
+                '<b>○ Not configured.</b> This is the only revenue on the site that '
+                'Amazon does not gate. It needs <i>both</i> a Stripe Payment Link and '
+                'the webhook signing secret before it can take a payment.</div>')
         paid_editor = (
             '<section class="card" id="paidoffer"><h2>💰 Paid offer (owned revenue)</h2>'
+            '%s'
             '<p class="hint">The only revenue on this site that Amazon does not gate. '
             'Checkout runs on a Stripe-hosted <b>Payment Link</b>, so no Stripe secret key '
             'is stored here &mdash; the only credential on this server is the webhook signing '
-            'secret, which cannot move money. Until a checkout link is set, <code>/pro</code> '
+            'secret, which cannot move money. Until <i>both</i> are set, <code>/pro</code> '
             'returns 404 rather than advertising a dead button.</p>'
             '<form id="paidfrm" onsubmit="paidSave();return false;"><div class="grid">'
             '<label>Product name<input name="offer_name" value="%s" placeholder="Niche Playbook"></label>'
@@ -14557,7 +14598,8 @@ fresh();
             'body:JSON.stringify({paid:o})});d=await r.json();}catch(e){m.textContent="✗ Could not reach the server.";return;}'
             'm.textContent=(r.ok?"✓ Offer saved":"✗ "+JSON.stringify(d||{}));'
             'if(r.ok)setTimeout(()=>location.reload(),700);}\n</script></section>'
-            % (_d(p["paid"]["offer_name"]), _d(p["paid"]["offer_price"]),
+            % (paid_ready,
+               _d(p["paid"]["offer_name"]), _d(p["paid"]["offer_price"]),
                _d(p["paid"]["checkout_url"]), _d(p["paid"]["offer_niche"]),
                _d(p["paid"]["offer_blurb"]),
                ("stored (%s…%s)" % (_d(p["paid"]["webhook_secret"][:6]),
@@ -18808,9 +18850,14 @@ border-bottom:1px solid var(--border);font-size:13px}}.ct{{text-align:right}}
         Product/Offer markup here describes *our* product, which we are the
         vendor of — unlike the Amazon product markup elsewhere in the codebase,
         it carries no third-party data.
+
+        404s unless the offer is `payments.sellable()`. A live checkout button
+        on a deployment that cannot deliver is worse than no page at all: the
+        charge clears, the webhook 503s, and the buyer owns a product nobody
+        can hand them.
         """
         off = payments.offer()
-        if not payments.configured():
+        if not payments.sellable():
             return self._send(404, seo.render_404(), "text/html; charset=utf-8")
         name = seo._clean(off["name"])
         price = seo._clean(off["price_label"])

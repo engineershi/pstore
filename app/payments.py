@@ -117,8 +117,38 @@ def checkout_url():
 
 
 def configured():
-    """True when a buyer can actually pay. No link means no offer is advertised."""
+    """True when a buyer can reach a checkout page. Says nothing about delivery.
+
+    Use `sellable` to decide whether the offer may be advertised; this only
+    answers the narrower "is there a link to send someone to".
+    """
     return bool(checkout_url())
+
+
+def sellable():
+    """True when a buyer who pays can actually receive the product.
+
+    Both halves are required, and the webhook half is not optional politeness.
+    The signature check is the *only* authentication on `POST /webhook/stripe`,
+    and `handle_event` is reached from nowhere else, so a checkout link without
+    a signing secret is not a half-configured offer — it is a broken one:
+
+      * `configured()` used to be the whole gate, and /pro 404s until it passes,
+        so pasting a Payment Link was enough to put a live "Get the Niche
+        Playbook" button on 1,300+ pages;
+      * every subsequent `checkout.session.completed` then hits the route's
+        `if not payments.webhook_secret(): return 503` and Stripe retries into
+        the same wall;
+      * no entitlement is ever granted, no PDF is ever built, no email goes out,
+        and the `paid_events` ledger stays empty, so the retry cannot even be
+        recognised as a duplicate when the secret is finally added;
+      * meanwhile the buyer has been charged and is writing to the support
+        address on the delivery email that never arrived.
+
+    Better to 404 the page and keep it out of the footer and the sitemap than to
+    sell something this deployment cannot deliver.
+    """
+    return bool(checkout_url()) and bool(webhook_secret())
 
 
 def webhook_secret():
@@ -134,6 +164,7 @@ def status():
     return {
         "configured": bool(off["checkout_url"]),
         "has_webhook_secret": bool(webhook_secret()),
+        "sellable": bool(off["checkout_url"]) and bool(webhook_secret()),
         "product": off["name"],
         "price_label": off["price_label"],
         "niche": off["niche"],
