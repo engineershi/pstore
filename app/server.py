@@ -2725,6 +2725,21 @@ _LP_PATH_RE = re.compile(r"^/lp(/|$)")
 _THIN_TOPIC_CACHE = {"at": 0.0, "value": None}
 _THIN_TOPIC_RE = re.compile(r"^/n/([^/]+)/([^/]+)/?$")
 _VS_TERM_RE = re.compile(r"\(@([A-Z0-9]{10})\|@([A-Z0-9]{10})\)")
+_PRICE_BAND_SLUG_RE = re.compile(r"^under-(\d+)$")
+
+
+def _parse_products(raw):
+    """Stored products JSON -> list of dicts, tolerating anything unparseable.
+
+    The sitemap runs this once per niche per render, so it must never raise;
+    a row that fails to parse is treated as having no products, which is the
+    same answer the page gives when it cannot load them.
+    """
+    try:
+        out = json.loads(raw or "[]")
+    except Exception:
+        return []
+    return out if isinstance(out, list) else []
 _THIN_TOPIC_SET_CACHE = {"at": 0.0, "val": None}
 
 
@@ -3099,19 +3114,38 @@ def _noindex_reason(path):
     return None
 
 
-def _nested_topic_has_products(term, parent_asins):
-    """True when a nested topic page will actually have products to render.
+def _nested_topic_renders(term, slug, parent_items):
+    """Mirror the renderers' own emptiness test, from stored rows only.
 
-    A head-to-head topic names its two ASINs in the term. When neither is in
-    the parent's stored product list `render_vs` resolves nothing, the page
-    serves noindex — and the sitemap only ever checked that the *parent* had
-    products, so an empty child was listed anyway. That was the last route by
-    which a noindex URL reached sitemap.xml.
+    A nested topic page is only worth listing if it will actually render
+    products. Both emptiness tests read nothing but the parent's stored rows,
+    so the sitemap can reach the same verdict without a network call:
+
+      * `render_vs` needs BOTH of its ASINs in the parent's current products,
+        or `cand` is empty and it serves `noindex=not bool(cand)`. It looks the
+        ASIN up case-sensitively against the uppercased stored keys, so mirror
+        that exactly rather than normalising -- normalising here made the
+        sitemap more lenient than the page.
+      * `render_priceband` needs at least one parent product priced within the
+        band, else `noindex=not bool(band)`.
+
+    Getting this wrong is how 21% of the nested URLs kept shipping
+    listed-but-noindex: an earlier version accepted EITHER ASIN.
+
+    Relabelled/autosuggest topics return True -- they render the parent's rows
+    wholesale, and a product-less parent is already excluded upstream.
     """
+    items = parent_items or []
     m = _VS_TERM_RE.search(term or "")
-    if not m:
-        return True          # price band / relabel: renders the parent's rows
-    return any(a for a in m.groups() if a in parent_asins)
+    if m:
+        stored = {(it.get("asin") or "").strip().upper() for it in items}
+        return all(a in stored for a in m.groups())
+    b = _PRICE_BAND_SLUG_RE.match((slug or "").strip().lower())
+    if b:
+        amount = int(b.group(1))
+        return any(seo._num_price(it) is not None
+                   and seo._num_price(it) <= amount for it in items)
+    return True
 
 
 def _force_noindex(body, path):
@@ -8410,7 +8444,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             conn.close()
         live = set()
         seen = set()
-        parent_asins = {}
+        parent_items = {}
         holds = _consolidation_holds()
         for r in nrows:
             # Only indexable niches belong in the sitemap — a niche without
@@ -8430,7 +8464,7 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             # vs "back-pain"); list each URL once — Google flags duplicates.
             if kw in seen:
                 continue
-            parent_asins[kw] = set(re.findall(r'"asin"\s*:\s*"([^"]+)"', prods))
+            parent_items[kw] = _parse_products(prods)
             seen.add(kw)
             lm = (r["updated_at"] or r["created_at"] or "")[:10] or "2026-08-28"
             entries.append((f"/n/{kw}", lm))
@@ -8454,10 +8488,11 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             if t["parent_slug"] not in live:
                 continue
             # A child page can be empty even when its parent is full: a
-            # head-to-head naming two ASINs the parent never stored renders
-            # nothing and goes noindex.
-            if not _nested_topic_has_products(
-                    t["term"], parent_asins.get(t["parent_slug"], set())):
+            # head-to-head missing either of its ASINs, or a price band no
+            # current product falls into, renders nothing and goes noindex.
+            if not _nested_topic_renders(
+                    t["term"], t["slug"],
+                    parent_items.get(t["parent_slug"], [])):
                 continue
             # Normalise once and reuse that exact string. The old code tested a
             # lowercased path and then appended the raw slug, so a slug with

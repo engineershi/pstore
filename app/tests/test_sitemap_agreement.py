@@ -44,6 +44,7 @@ BAND = "under-25"               # price band: real differentiation, must survive
 # stays listed; RESOLVABLE names the first two seed ASINs, GHOST names none.
 RESOLVABLE = "brand-a-vs-brand-b"
 GHOST = "ghost-a-vs-ghost-b"
+HALF = "half-stale-vs-brand-b"   # one live ASIN, one dead: render_vs gets nothing
 
 
 class SitemapAgreementTest(unittest.TestCase):
@@ -104,14 +105,15 @@ class SitemapAgreementTest(unittest.TestCase):
                     "seed parent %r needs two stored ASINs, found %r"
                     % (PARENT, asins))
             cls.vs_term = "Brand A vs Brand B (@%s|@%s)" % (asins[0], asins[1])
+            cls.half_term = "Half A vs Brand B (@%s|@B0DEADBE12)" % asins[0]
             conn.executemany(
                 "INSERT INTO topics (parent_slug, slug, term, created_at) "
                 "VALUES (?,?,?,datetime('now'))",
                 [(PARENT, THIN, "keto snacks that are not a real question"),
                  (PARENT, BAND, "keto snacks under $25"),
                  (PARENT, RESOLVABLE, cls.vs_term),
-                 (PARENT, GHOST,
-                  "Ghost A vs Ghost B (@B0ZZZZZZZ9|@B0YYYYYYY8)")])
+                 (PARENT, GHOST, "Ghost A vs Ghost B (@B0ZZZZZZZ9|@B0YYYYYYY8)"),
+                 (PARENT, HALF, cls.half_term)])
             conn.commit()
         finally:
             conn.close()
@@ -159,6 +161,11 @@ class SitemapAgreementTest(unittest.TestCase):
     def test_relabelled_topic_is_not_listed(self):
         self.assertNotIn("/n/%s/%s" % (PARENT, THIN), self._sitemap_paths())
 
+    def test_half_stale_head_to_head_is_not_listed(self):
+        """End-to-end version of the one-of-two-ASINs regression: the page is
+        reachable and listed-by-default until the check demands both ASINs."""
+        self.assertNotIn("/n/%s/%s" % (PARENT, HALF), self._sitemap_paths())
+
     def test_price_band_topic_is_still_listed(self):
         self.assertIn("/n/%s/%s" % (PARENT, BAND), self._sitemap_paths())
 
@@ -171,15 +178,43 @@ class SitemapAgreementTest(unittest.TestCase):
         paths = self._sitemap_paths()
         self.assertNotIn("/n/%s/%s" % (PARENT, GHOST), paths)
         self.assertIsNone(server._noindex_reason("/n/%s/%s" % (PARENT, GHOST)))
-        self.assertFalse(server._nested_topic_has_products(
-            "Ghost A vs Ghost B (@B0ZZZZZZZ9|@B0YYYYYYY8)", set()))
+        self.assertFalse(server._nested_topic_renders(
+            "Ghost A vs Ghost B (@B0ZZZZZZZ9|@B0YYYYYYY8)", "x", []))
 
-    def test_nested_topic_check_passes_when_either_asin_is_stored(self):
-        term = "Brand A vs Brand B (@B094MR99N6|@B09M93GJLR)"
-        self.assertTrue(server._nested_topic_has_products(
-            term, {"B09M93GJLR", "B0OTHER1234"}))
-        self.assertTrue(server._nested_topic_has_products(
-            "keto snacks under $25", set()))
+    def test_one_of_two_asins_is_not_enough(self):
+        """Regression. An earlier version of the check accepted EITHER ASIN,
+        so every half-stale head-to-head stayed listed while the page served
+        noindex -- 21% of the nested URLs sampled live. `render_vs` needs both.
+        """
+        items = [{"asin": "B094MR99N6", "price": 19.99}]
+        self.assertFalse(server._nested_topic_renders(
+            "A vs B (@B094MR99N6|@B0MISSING1)", "a-vs-b", items))
+        self.assertTrue(server._nested_topic_renders(
+            "A vs B (@B094MR99N6|@B09M93GJLR)",
+            "a-vs-b", [{"asin": "B094MR99N6"}, {"asin": "b09m93gjlr"}]))
+
+    def test_price_band_needs_a_product_inside_the_band(self):
+        cheap = [{"asin": "B1", "price": 9.99}]
+        dear = [{"asin": "B1", "price": 49.99}]
+        self.assertTrue(server._nested_topic_renders("keto under $25",
+                                                     "under-25", cheap))
+        self.assertFalse(server._nested_topic_renders("keto under $25",
+                                                      "under-25", dear))
+        # Unparseable price counts as outside the band, exactly as seo._num_price
+        # makes render_priceband treat it.
+        self.assertFalse(server._nested_topic_renders("keto under $25",
+                                                      "under-25",
+                                                      [{"asin": "B1"}]))
+
+    def test_relabelled_topic_is_always_rendered(self):
+        self.assertTrue(server._nested_topic_renders(
+            "keto snacks that are not a real question", "some-term", []))
+
+    def test_broken_products_json_is_treated_as_empty(self):
+        self.assertEqual(server._parse_products("{not json"), [])
+        self.assertEqual(server._parse_products(None), [])
+        self.assertEqual(server._parse_products('{"a":1}'), [])
+        self.assertEqual(len(server._parse_products('[{"asin":"B1"}]')), 1)
 
     # ---- the predicate ----------------------------------------------------
     def test_reason_for_each_case(self):
