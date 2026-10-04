@@ -579,7 +579,7 @@ FUNCTION_PATHS = {
             "/api/linkauthority", "/api/topics/generate"),
     "content": ("/admin/cms", "/admin/ebooks", "/admin/refresh",
                 "/api/cms", "/api/suggest", "/api/refresh", "/api/settings",
-                "/api/ai/"),
+                "/api/paapi/", "/api/ai/"),
     "marketing": ("/admin/funnel", "/admin/marketing", "/admin/variants",
                   "/admin/segments", "/admin/pricedrop", "/admin/template",
                   "/admin/weeklydigest", "/api/weeklydigest", "/api/weeklydigest/run",
@@ -1275,6 +1275,14 @@ def _bust_admin_data_cache():
         _render_cache.pop("sugg:data", None)
 
 
+def _bust_render_cache():
+    """Drop every cached render. Product data changed, so a page served from
+    the render cache would still be missing the images we just filled in --
+    the operator would backfill and then see no change on the site."""
+    with _render_cache_lock:
+        _render_cache.clear()
+
+
 def _warm_startup_admin():
     """Background pre-warm of the admin Grow payloads right after boot so the
     first page visit never blocks on live autosuggest / suggest-engine runs."""
@@ -1339,6 +1347,48 @@ def _refresh_stale_candidates(now):
     return out
 
 
+def _mark_paapi_sourced(cur, add, took):
+    """Promote a partly-scraped product row to ``source == "paapi"``.
+
+    Why this is load-bearing: `seo.py` renders a product image only when
+    `source == "paapi"` (seo.py:297 and :337), and `amazon.rating_pair()` shows
+    stars/reviews only on the same condition. `normalize_item()` stamped
+    `source: "paapi"` on its own output, but `_enrich_products()` merged PA-API
+    fields INTO an existing scraped row and left `source` as "scraper" — so the
+    image and the ratings were fetched, paid for, stored, and then silently
+    suppressed on every page. That is why zero ranking pages carried an image
+    even with working credentials.
+
+    The merge is per-field, so `source` must be promoted only when the fields we
+    actually took are themselves licensed. Ratings are the sharp edge: a scraped
+    star rating is Program Content we may not republish
+    (`amazon.rating_pair()`), so if the row's stars/reviews came from the scraper
+    we must NOT promote the row, even though its image legitimately came from
+    PA-API. Leaving `source` alone there keeps the rating suppressed, which is
+    the correct and conservative outcome.
+    """
+    took = set(took or ())
+    rating_fields = ("stars", "reviews")
+    # Which rating values did the SCRAPER contribute? Those are unlicensed.
+    scraped_rating = any(cur.get(f) for f in rating_fields
+                         if f not in took)
+    if scraped_rating:
+        return cur
+    # NOTE: parentheses are load-bearing. `took & ratings | {"image"}` parses as
+    # `(took & ratings) | {"image"}`, which is never empty -- every price-only
+    # enrichment would promote the row and unlock a scraped rating.
+    if not ((took & set(rating_fields)) | ({"image"} if "image" in took else set())):
+        # Nothing reader-facing-and-licensed came from PA-API, so there is
+        # nothing to unlock by relabelling the row.
+        return cur
+    cur["source"] = "paapi"
+    # Record that the promoted row's non-image fields may still be scraped, so a
+    # future audit can tell "fully PA-API" from "image from PA-API".
+    if took & set(rating_fields):
+        cur["paapi_fields"] = sorted(took & set(rating_fields))
+    return cur
+
+
 def _enrich_products(products):
     """Fill in missing product fields — above all the product image — from
     PA-API before the row is persisted.
@@ -1383,12 +1433,87 @@ def _enrich_products(products):
                 continue
             # Only ever ADD. Never overwrite a value the scraper already got:
             # a live scraped price beats a cached PA-API price for freshness.
+            took = []
             for field in ("image", "price", "currency", "title", "stars", "reviews"):
                 if not cur.get(field) and add.get(field):
                     cur[field] = add[field]
+                    took.append(field)
+            if took:
+                _mark_paapi_sourced(cur, add, took)
         return items
     except Exception:
         return products
+
+
+def _paapi_image_backfill(limit=25):
+    """Fill in missing product fields for ALREADY-SAVED niches, without re-mining.
+
+    Why this exists: `_enrich_products()` only runs on the save/refresh paths.
+    So the day PA-API credentials finally work, every pre-existing niche still
+    holds its image-less scraped rows and keeps rendering zero `<img>`. `seo.py`
+    only renders a product image when `source == "paapi"` (seo.py:297/337/1558),
+    so merchant-listing rich results never fire and the API commission is never
+    earned -- the keys look configured and nothing happens. Without this, the
+    operator has to hand-refresh every saved niche to discover it.
+
+    `_enrich_products()` only ever ADDS, so a live scraped price is preserved
+    over a cached PA-API one, and a row that gains nothing is not rewritten.
+
+    Walks niches in stable keyword order with LIMIT/OFFSET so every row is
+    visited exactly once even as it rewrites them. Never raises.
+    """
+    if not paapi.ready():
+        return {"ok": False, "skipped": "PA-API not configured",
+                "updated": 0, "fields": 0, "images": 0, "done": True}
+    try:
+        limit = max(1, min(int(limit or 25), 200))
+    except (TypeError, ValueError):
+        limit = 25
+    fields = ("image", "price", "currency", "title", "stars", "reviews")
+    report = {"ok": True, "done": False, "scanned": 0, "updated": 0,
+              "fields": 0, "images": 0}
+    offset = 0
+    while True:
+        with _lock:
+            conn = _db()
+            rows = conn.execute(
+                "SELECT keyword, products FROM niches "
+                "ORDER BY keyword LIMIT ? OFFSET ?", (limit, offset)).fetchall()
+            conn.close()
+        if not rows:
+            report["done"] = True
+            break
+        offset += len(rows)
+        report["scanned"] += len(rows)
+        for row in rows:
+            try:
+                products = json.loads(row["products"] or "[]")
+            except (ValueError, TypeError):
+                continue
+            clean = [dict(p) for p in products
+                     if isinstance(p, dict)] if isinstance(products, list) else []
+            if not clean:
+                continue
+            before = sum(1 for p in clean for f in fields if p.get(f))
+            had_image = sum(1 for p in clean if p.get("image"))
+            enriched = _enrich_products(clean)
+            gained = sum(1 for p in enriched for f in fields if p.get(f)) - before
+            if gained <= 0:
+                continue
+            with _lock:
+                conn = _db()
+                conn.execute(
+                    "UPDATE niches SET products=?, updated_at=datetime('now') "
+                    "WHERE keyword=?", (json.dumps(enriched), row["keyword"]))
+                conn.commit()
+                conn.close()
+            report["updated"] += 1
+            report["fields"] += gained
+            report["images"] += (sum(1 for p in enriched if p.get("image"))
+                                 - had_image)
+    _bust_admin_data_cache()
+    _bust_render_cache()
+    return report
 
 
 def _refresh_niche(keyword):
@@ -3789,8 +3914,11 @@ def _indexable_url_estimate():
         if kw in holds or kw in live:
             continue
         live.add(kw)
-    # home + /blog + /stories + static pages
-    total = 3 + len(seo.STATIC_PAGES)
+    # home + /niches + /blog + /stories + static pages
+    # /niches is always emitted unconditionally (the way /blog is), so it must
+    # be counted here or this ceiling under-counts the sitemap by exactly one —
+    # which is what test_growth_safety caught.
+    total = 4 + len(seo.STATIC_PAGES)
     total += len(live)                       # /n/<slug>
     total += len(live)                       # /stories/<slug>
     if _lp_pages_indexable():
@@ -7060,6 +7188,17 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._send_cached(self._rss(),
                                          "application/rss+xml; charset=utf-8",
                                          max_age=3600)
+            if path == "/niches":
+                # The complete inventory, linked. 748 of the 1,321 listed URLs
+                # were reachable only from the sitemap before this existed --
+                # a discovery hint is not a link graph.
+                try:
+                    idx_page = max(1, int((q.get("p") or ["1"])[0]))
+                except (TypeError, ValueError):
+                    idx_page = 1
+                return self._send_cached(seo.render_niche_index(
+                    self._all_niches(), page=idx_page),
+                    "text/html; charset=utf-8", edge=False)
             if path == "/blog":
                 try:
                     blog_page = max(1, int((q.get("p") or ["1"])[0]))
@@ -7394,6 +7533,8 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._refresh_post()
             if parsed.path == "/api/refresh-all":
                 return self._refresh_all_post()
+            if parsed.path == "/api/paapi/backfill":
+                return self._paapi_backfill_post()
             if parsed.path == "/api/settings":
                 return self._save_settings()
             if parsed.path == "/api/settings/test":
@@ -8274,6 +8415,30 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         threading.Thread(target=_refresh_all_worker, args=(kws,), daemon=True).start()
         return self._send(200, {"status": "started", "queued": len(kws)})
 
+    def _paapi_backfill_post(self):
+        """Kick off a PA-API image backfill over saved niches.
+
+        Separate from `_refresh_all_post` on purpose: that one re-mines (scraping
+        every niche again, TOS exposure, minutes of work) when the only gap is a
+        missing image. This one calls PA-API only -- the licensed source -- and
+        is safe to run as soon as the keys are saved.
+        """
+        if not paapi.ready():
+            return self._send(200, {"ok": False,
+                                    "error": "PA-API not configured — save the "
+                                             "three PA-API values first."})
+        b = self._body() if self.command == "POST" else {}
+        try:
+            limit = int(b.get("limit") or 25)
+        except (TypeError, ValueError):
+            limit = 25
+        report = _paapi_image_backfill(limit)
+        msg = ("Backfilled %d niche(s): %d field(s), %d image(s) added."
+               % (report.get("updated", 0), report.get("fields", 0),
+                  report.get("images", 0))) if report.get("ok") else \
+              (report.get("skipped") or "backfill failed")
+        return self._send(200, dict(report, message=msg))
+
     # ------------------------------------------------------------------ SEO
     def _all_niches(self):
         """All saved niches (see module-level _niches_rows)."""
@@ -8449,6 +8614,12 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         from datetime import datetime, timezone
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         entries = [("/", today), ("/blog", today), ("/stories", today)]
+        # Page 1 of the niche index only. It is one logical index split across
+        # ?p= URLs, all indexable and self-canonical with rel=prev/next, so
+        # listing every page would ask a crawler to treat a handful of near
+        # identical listings as distinct destinations. The deep pages are
+        # reachable from the pager, which is the point of them.
+        entries.append(("/niches", today))
         for page in seo.STATIC_PAGES:
             entries.append(("/" + page, "2026-08-28"))
         # The paid-offer page is indexable whenever it exists, so listing it
@@ -15129,7 +15300,12 @@ fresh();
   {pa_rows}
   <div class="row"><button class="btn">Save PA-API</button>
   <button type="button" class="btn" onclick="pa_test();">Test PA-API</button>
+  <button type="button" class="btn" onclick="pa_backfill();">Backfill images from PA-API</button>
   <span id="paout" class="msg"></span></div>
+  <p class="hint">Niches saved <i>before</i> the keys were set still hold image-less
+  rows, and ranking pages render a product image only for PA-API-sourced picks.
+  After the test passes, run the backfill once — it calls PA-API only (no
+  re-scraping) and takes about a second per niche.</p>
 </form>
 </section>
 <section class="card" id="sec-social"><h2>📣 Social publishing keys</h2>
@@ -15212,6 +15388,14 @@ async function pint_test(){{
   out.textContent = "Testing Pinterest…";
   const d = await post("/api/settings/test", {{pinterest: true}});
   out.textContent = d && d.ok ? ("Pinterest ✓ " + (d.detail || "")) : ((d && d.error) || "Test failed");
+}}
+async function pa_backfill(){{
+  $("paout").textContent = "Backfilling images from PA-API…";
+  const d = await post("/api/paapi/backfill", {{limit: 25}});
+  $("paout").textContent = d && d.ok
+      ? ((d.message || "Backfill done.") + " Reload to see images on ranking pages.")
+      : ((d && d.error) || "Backfill failed");
+  return false;
 }}
 async function soc_test(provider){{
   $("socout").textContent = "Testing " + provider + "…";

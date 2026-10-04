@@ -19,13 +19,44 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import threading
+import time
+import urllib.error
 import urllib.request
 
 import amazon
 
 PAAPI_HOST = os.environ.get("PAAPI_HOST", "webservices.amazon.com").rstrip("/")
 _ENDPOINT_PATH = "/paapi5/getitems"
+
+# Amazon's published PA-API quota starts at 1 request/second and is shared
+# across every resource and every client of the account. Firing batches of 10
+# ASINs back to back does not get more data faster: it earns an HTTP 429, and
+# because `get_items()` swallows every exception the whole batch comes back
+# empty. That looks exactly like "the credentials don't work", so the operator
+# would throw away a working key. Enforce the floor ourselves and retry 429.
+MIN_INTERVAL = float(os.environ.get("PAAPI_MIN_INTERVAL", "1.0"))
+MAX_ATTEMPTS = 4
+_throttle_lock = threading.Lock()
+_last_call = [0.0]
+
+
+def _pace():
+    """Block until at least MIN_INTERVAL has passed since the previous call."""
+    with _throttle_lock:
+        wait = _last_call[0] + MIN_INTERVAL - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        _last_call[0] = time.monotonic()
+
+
+def _retry_after(exc):
+    """Amazon sends the throttle window as Retry-After. Honour it when present."""
+    try:
+        return max(0.0, float((exc.headers or {}).get("Retry-After") or 0))
+    except (TypeError, ValueError):
+        return 0.0
 
 _PAAPI_CFG = {"access_key": "", "secret_key": "", "partner_tag": ""}
 _cfg_lock = threading.Lock()
@@ -118,42 +149,66 @@ def get_items(asin_list):
     body = json.dumps({
         "PartnerType": "Associates",
         "PartnerTag": c["partner_tag"],
-        "Marketplace": "www.amazon.com",
+        # Honor PSTORE_MARKET the way the rest of the app does. Hardcoding
+        # www.amazon.com means a store set up for another TLD signs valid
+        # requests against a marketplace its partner tag cannot serve.
+        "Marketplace": "www.amazon.%s" % (amazon.MARKET or amazon.DEFAULT_MARKET),
         "ItemIds": asins[:10],
         "Resources": [
             "Images.Primary.Large",
             "ItemInfo.Title",
+            # Ratings are requested and parsed for the same licensing reason as
+            # the image: a scraped star rating is Program Content we may not
+            # republish, so `amazon.licensed_rating()` can only ever display a
+            # number that arrived through this API. Without these two resources
+            # the ONE licensed rating source in the codebase is never fetched,
+            # and every ranking page renders stars as blank.
+            "ItemInfo.ByLineInfo",
+            "ItemInfo.CustomerReviews",
             "OfferSummary.LowestPrice",
             "Offers.Listings.Price",
             "ParentASIN",
             "ItemInfo.ExternalIds",
         ],
     }).encode("utf-8")
-    try:
-        canonical_uri, amz_date, signature, signed_headers = _sigv4(
-            PAAPI_HOST, c["access_key"], c["secret_key"], body)
-        url = "https://%s%s" % (PAAPI_HOST, canonical_uri)
-        req = urllib.request.Request(
-            url, data=body,
-            headers={
-                "Content-Type": "application/json; charset=utf-8",
-                "Content-Encoding": "amz-1.0",
-                "X-Amz-Date": amz_date,
-                "X-Amz-Target": "com.amazon.paapi5.v1.ProductAdvertisingAPIv1.GetItems",
-                "Authorization": (
-                    "AWS4-HMAC-SHA256 Credential=%s/%s/a/us-east-1/"
-                    "ProductAdvertisingAPI/aws4_request, "
-                    "SignedHeaders=%s, Signature=%s"
-                ) % (c["access_key"], amz_date[:8], signed_headers, signature),
-            },
-            method="POST")
-        raw = amazon._urlopen(req, timeout=10)
-        if raw is None:
+    last_err = None
+    for attempt in range(MAX_ATTEMPTS):
+        try:
+            _pace()
+            canonical_uri, amz_date, signature, signed_headers = _sigv4(
+                PAAPI_HOST, c["access_key"], c["secret_key"], body)
+            url = "https://%s%s" % (PAAPI_HOST, canonical_uri)
+            req = urllib.request.Request(
+                url, data=body,
+                headers={
+                    "Content-Type": "application/json; charset=utf-8",
+                    "Content-Encoding": "amz-1.0",
+                    "X-Amz-Date": amz_date,
+                    "X-Amz-Target": "com.amazon.paapi5.v1.ProductAdvertisingAPIv1.GetItems",
+                    "Authorization": (
+                        "AWS4-HMAC-SHA256 Credential=%s/%s/a/us-east-1/"
+                        "ProductAdvertisingAPI/aws4_request, "
+                        "SignedHeaders=%s, Signature=%s"
+                    ) % (c["access_key"], amz_date[:8], signed_headers, signature),
+                },
+                method="POST")
+            raw = amazon._urlopen(req, timeout=10)
+            if raw is None:
+                return None
+            data = raw.read()
+            return json.loads(data.decode("utf-8", "replace"))
+        except urllib.error.HTTPError as e:
+            # 429 is the quota, 500/503/504 are Amazon-side transients. Both are
+            # retryable and neither means the credentials are wrong -- 401/403 do.
+            last_err = e
+            if e.code not in (429, 500, 503, 504) or attempt >= MAX_ATTEMPTS - 1:
+                return None
+            wait = _retry_after(e) or min(8.0, 0.5 * (2 ** attempt))
+            if attempt or e.code == 429:
+                time.sleep(wait)
+        except Exception:
             return None
-        data = raw.read()
-        return json.loads(data.decode("utf-8", "replace"))
-    except Exception:
-        return None
+    return None
 
 
 def normalize_item(item):
@@ -180,12 +235,51 @@ def normalize_item(item):
     image = ""
     img_obj = ((item.get("Images", {}) or {}).get("Primary", {}) or {}).get("Large", {}) or {}
     image = (img_obj.get("URL") or "").strip()
+    # Ratings. PA-API returns them in two different shapes depending on the
+    # marketplace and on whether the item has editorial bylines, so read both
+    # and keep the first usable value. Left as None when absent: a missing
+    # rating must stay None rather than becoming 0, because "0 stars" would be
+    # published to readers as if Amazon had said so.
+    stars, reviews = "", ""
+    cr = info.get("CustomerReviews", {}) or {}
+    raw_stars = cr.get("AverageStarRating")
+    if raw_stars is not None:
+        # PA-API returns "4.5 out of 5 stars" on some hosts and a bare "4.5" on
+        # others; take the leading number either way.
+        # Store one decimal so the stored value equals what seo.py displays
+        # (`round(float(stars), 1)`); a stored 4.25 rendering as 4.2 would make
+        # the JSON-LD ratingValue disagree with the visible stars.
+        try:
+            stars = "%.1f" % float(str(raw_stars).split()[0])
+        except (ValueError, IndexError):
+            stars = ""
+    raw_count = cr.get("Count")
+    if raw_count is not None:
+        try:
+            reviews = int(raw_count)
+        except (ValueError, TypeError):
+            reviews = ""
+    if not stars or not reviews:
+        for c in ((info.get("ByLineInfo", {}) or {}).get("Contributors", []) or []):
+            blob = "%s %s" % ((c or {}).get("Role") or "", (c or {}).get("Name") or "")
+            m = re.search(r"([\d.]+)\s*out of\s*5\s*stars", blob, re.I)
+            if m and not stars:
+                try:
+                    stars = "%.1f" % float(m.group(1))
+                except ValueError:
+                    pass
+            m = re.search(r"([\d,]+)\s*ratings?", blob, re.I)
+            if m and not reviews:
+                try:
+                    reviews = int(m.group(1).replace(",", ""))
+                except ValueError:
+                    pass
     return {
         "asin": asin,
         "title": title,
         "price": price,
-        "stars": None,
-        "reviews": None,
+        "stars": stars or None,
+        "reviews": reviews or None,
         "url": amazon.affiliate_url(asin),
         "currency": currency,
         "image": image,

@@ -24,9 +24,12 @@ section is the owner's operating console. Zero API keys required to earn —
 - Secrets: `PSTORE_ADMIN_EMAIL`, `PSTORE_ADMIN_PASSWORD`, `PSTORE_HASH_SECRET`,
   `PSTORE_OAUTH_SECRET`, `PSTORE_TAG`, `PSTORE_MARKET`, `PSTORE_URL`.
 - Optional: `OAUTH_GOOGLE_*` / `OAUTH_FACEBOOK_*`; ScraperAPI/Outscraper/SerpAPI
-  proxies in Settings; `PAAPI_*` (see CURRENT BLOCKER).
+  proxies in Settings; `PAAPI_ACCESS_KEY` / `PAAPI_SECRET_KEY` /
+  `PAAPI_PARTNER_TAG` / `PAAPI_HOST` / `PAAPI_MIN_INTERVAL` (see CURRENT
+  BLOCKER). PA-API is throttled to ~1 req/s and the client paces itself to
+  match; 429/500/503/504 are retried, 401/403 are not (they mean bad keys).
 - Deploy: Fly.io (`fly.toml`, `Dockerfile`) + Render (`render.yaml`).
-- Tests: `cd app && python3 -m unittest discover -s tests` (~1197, ~10 min, all
+- Tests: `cd app && python3 -m unittest discover -s tests` (~1330, ~7 min, all
   offline). Admin login for live checks is in aimem (`trypstore-com`).
 
 ## AUDIENCE / ICP
@@ -76,7 +79,31 @@ vs head-to-head pages, which answer a distinct query.
    input is missing. Until then: all product data comes from TOS-violating
    scraping (account-ban risk to the whole stream) and **0 ranking pages carry a
    product image**, which is why merchant-listing rich results never fire.
+   **Owner action, exact order:** save the three keys in `/admin/keys` → *Test
+   PA-API* → *Backfill images from PA-API* (`POST /api/paapi/backfill`). The
+   backfill is mandatory, not optional: niches saved before the keys existed were
+   never enriched, and `seo.py` only renders an image when `source == "paapi"`.
+   Do not re-mine instead — that re-scrapes every niche for nothing.
 3. No vertical chosen; consolidation holds have still never been fired.
+4. **Cloudflare serves every URL as `cf-cache-status: DYNAMIC`**, including
+   `/style.css`, despite the origin sending `s-maxage`. Origin TTFB is 87–117 ms
+   while live TTFB is 1.0–7.3 s, so the crawl delay is edge-side, not our
+   rendering. Needs a dashboard Cache Rule (owner action; no API creds here).
+
+## The `source == "paapi"` rule (do not "simplify" it away)
+`amazon.licensed_rating()` returns ratings **only** for `source == "paapi"`, and
+`seo.py` renders a product image only on the same condition. That is a licensing
+chokepoint, not a filter: a scraped star rating is Program Content we are not
+licensed to republish. So:
+- `_enrich_products()` merges PA-API fields into an existing scraped row and, via
+  `_mark_paapi_sourced()`, promotes it to `source == "paapi"` — **but only when
+  the row holds no scraped rating.** A legitimate PA-API image does not license
+  a scraped star rating sitting in the same dict.
+- A price-only enrichment must never promote the row (nothing reader-facing was
+  added). The guard reads `((took & ratings) | ({"image"} if "image" in took))` —
+  the parentheses are load-bearing; `&` binds tighter than `|`.
+- Any change that makes a non-PA-API field visible to readers bypasses the
+  Associates programme. Treat "it renders now" as a red flag, not progress.
 
 ## Rules for this repo (house style)
 - Run `python3 -m unittest discover -s tests` before claiming done; keep green.

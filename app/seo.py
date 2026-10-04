@@ -475,8 +475,8 @@ def _footer():
       <div class="fcol">
         <h4>Browse</h4>
         <div class="foot-links">
-          <a href="/#top-picks">Today's top picks</a>
-          <a href="/#niches">All niches</a>
+<a href="/#top-picks">Today's top picks</a>
+            <a href="/niches">All niches</a>
           <a href="/blog">Blog</a>
           <a href="/stories">Stories</a>
           {pro_link}
@@ -802,7 +802,7 @@ def render_landing(saved_niches):
             break
     niche_count = len(top_pick_niches)
     pick_count = sum(len((n or {}).get("products") or []) for n in top_pick_niches)
-    masthead = _masthead([("Home", "/", True), ("Niches", "/#niches", False),
+    masthead = _masthead([("Home", "/", True), ("Niches", "/niches", False),
                           ("Blog", "/blog", False), ("Stories", "/stories", False)],
                          cta=("/#top-picks", "Today's top picks"))
     jumps = ('<nav class="sec-jumps" aria-label="On this page">'
@@ -1210,6 +1210,146 @@ def render_vs(title_a, title_b, a_asin, b_asin, parent_keyword, parent_slug,
     return head + body + _footer()
 
 
+#: Niches listed per /niches page. 60 keeps each page a real index rather than
+#: a teaser, while holding the whole listing to a handful of URLs at the live
+#: inventory size instead of ~600 dead-end hub pages.
+NICHE_INDEX_PAGE_SIZE = 60
+
+
+def _index_page_url(page):
+    """Canonical URL for a page of the niche index. Page 1 has no `?p=` -- its
+    canonical is bare /niches, and rel=prev/next and the pager must agree with
+    that rather than inventing a second URL for the same listing."""
+    page = max(1, int(page or 1))
+    return "/niches" if page == 1 else "/niches?p=%d" % page
+
+
+def render_niche_index(saved_niches, page=1, per_page=NICHE_INDEX_PAGE_SIZE):
+    """Public /niches: the complete inventory, one link per ranked page.
+
+    This page exists to fix a crawl-graph defect, not to be pretty. The
+    homepage's "Explore the niches" grid is capped at 36 tiles and there was no
+    index of the rest, so with ~600 ranked pages on the live site, 748 of the
+    1,321 listed URLs were reachable only from sitemap.xml. A sitemap is a
+    discovery hint; a link is a path. Any URL not linked from anywhere is
+    crawled rarely and indexed late, and a young domain gets no impressions at
+    all from pages nobody links to.
+
+    Every page here is indexable and self-canonical, with rel=prev/next and
+    visible pagination. Only page 1 goes in the sitemap: the set is one logical
+    index split across URLs, so listing every page would ask a crawler to
+    treat ten near-identical listings as ten distinct destinations.
+
+    Ordering is alphabetical rather than by creation date, so the pagination is
+    stable across deploys. A niche that moves between pages every time a new
+    one is added invalidates the crawler's idea of how deep the index goes.
+    """
+    niches = [n for n in (saved_niches or []) if n.get("products")]
+    seen = set()
+    uniq = []
+    for n in niches:
+        slug = _slugify(n["keyword"])
+        if slug in seen:
+            continue                      # "back pain" vs "back-pain"
+        seen.add(slug)
+        uniq.append(n)
+    uniq.sort(key=lambda n: (_slugify(n["keyword"]), n["keyword"]))
+    total_pages = max(1, -(-len(uniq) // per_page))
+    page = max(1, int(page or 1))
+    page = min(page, total_pages)
+    page_niches = uniq[(page - 1) * per_page:page * per_page]
+    page_url = _index_page_url(page)
+
+    extra = ""
+    # Page 1's canonical is bare /niches, so a rel=prev pointing at
+    # /niches?p=1 would advertise a URL the site itself does not consider
+    # canonical. Crawlers follow these literally.
+    if total_pages > 1 and page > 1:
+        extra += '<link rel="prev" href="%s">' % (BASE_URL + _index_page_url(page - 1))
+    if total_pages > 1 and page < total_pages:
+        extra += '<link rel="next" href="%s">' % (BASE_URL + _index_page_url(page + 1))
+
+    if page == 1:
+        title = "All %d product niches, ranked from live Amazon data" % len(uniq)
+        desc = ("Every niche we rank, in one index: %d buying guides scored on live "
+                "Amazon price, rating and review volume. Pick a category and see "
+                "the pick before you click." % len(uniq))
+        h1 = "Every niche we rank"
+        intro = ("%d ranked buying guides, each scored on live Amazon price, rating "
+                 "and review volume." % len(uniq))
+    else:
+        title = "All niches, page %d of %d" % (page, total_pages)
+        desc = ("Page %d of %d in the full pstore index: every niche ranked from "
+                "live Amazon price, rating and review volume." % (page, total_pages))
+        h1 = "Every niche we rank"
+        intro = ("Page %d of %d." % (page, total_pages))
+
+    items = []
+    for n in page_niches:
+        slug = _slugify(n["keyword"])
+        items.append({"@type": "ListItem", "position": len(items) + 1,
+                      "name": n["keyword"], "url": BASE_URL + "/n/" + slug})
+    jsonld = {
+        "@context": "https://schema.org",
+        "@graph": [
+            {"@type": "CollectionPage", "name": title, "description": desc,
+             "url": BASE_URL + page_url, "isPartOf": {"@type": "WebSite",
+                                                      "name": SITE_NAME,
+                                                      "url": BASE_URL}},
+            {"@type": "BreadcrumbList", "itemListElement": [
+                {"@type": "ListItem", "position": 1, "name": SITE_NAME,
+                 "url": BASE_URL + "/"},
+                {"@type": "ListItem", "position": 2, "name": "All niches",
+                 "url": BASE_URL + "/niches"},
+            ]},
+        ],
+    }
+    if items:
+        jsonld["@graph"].append({"@type": "ItemList", "name": "Ranked niches",
+                                 "itemListElement": items})
+
+    head = _head(title, desc, page_url, page_url, jsonld=jsonld,
+                 og_image=BASE_URL + "/og/niches.png", extra=extra)
+
+    tiles = []
+    for n in page_niches:
+        slug = _slugify(n["keyword"])
+        count = len(n.get("products") or [])
+        best = editorial.best_pick(n.get("products") or [])
+        note = _clean((best or {}).get("title") or "")[:80]
+        tiles.append(
+            '<a class="ntile" href="/n/%s"><b>%s</b>'
+            '<span>%d ranked picks · live prices</span>%s</a>'
+            % (_clean(slug), _clean(n["keyword"].title()), count,
+               ('<em>%s</em>' % note) if note else ""))
+
+    nav = ""
+    if total_pages > 1:
+        prev_link = ('<a href="%s" rel="prev">&larr; Previous</a>'
+                     % _index_page_url(page - 1)) if page > 1 else ""
+        next_link = ('<a href="%s" rel="next">Next &rarr;</a>'
+                     % _index_page_url(page + 1)) if page < total_pages else ""
+        nav = ('<nav class="blog-pager" style="display:flex;gap:16px;align-items:center;'
+               'margin:24px 0">%s<span class="pager-page" style="flex:1;text-align:center">'
+               'Page %d of %d</span>%s</nav>'
+               % (prev_link, page, total_pages, next_link))
+
+    masthead = _masthead([("Home", "/", False), ("Niches", "/niches", True),
+                          ("Blog", "/blog", False), ("Stories", "/stories", False)],
+                         cta=("#gate", "Get the free guide"))
+    body = f"""{masthead}
+<main data-niche="niches" data-source="niche-index" data-tag="{_clean(amazon.AFFILIATE_TAG)}">
+<section class="hero-home">
+  <p class="eyebrow">The full index</p>
+  <h1>{_clean(h1)}</h1>
+  <p class="hero-sub">{_clean(intro)}</p>
+</section>
+<div class="ngrid">{''.join(tiles)}</div>
+{nav}</main>
+""".encode("utf-8")
+    return head + body + _footer()
+
+
 def indexable_urls(saved_niches, base_url=None, saved_topics=None):
     """Absolute URLs that belong in the sitemap + IndexNow submissions.
 
@@ -1217,7 +1357,9 @@ def indexable_urls(saved_niches, base_url=None, saved_topics=None):
     saved_topics: iterable of (parent_slug, slug) for built long-tail pages.
     """
     base = (base_url or BASE_URL).rstrip("/")
-    urls = [base + "/", base + "/blog", base + "/stories"]
+    # /niches is the hub that links the whole inventory; without it in
+    # IndexNow/sitemap submissions the new pages are orphaned to crawlers.
+    urls = [base + "/", base + "/niches", base + "/blog", base + "/stories"]
     for page in STATIC_PAGES:
         urls.append(base + "/" + page)
     seen = set()
@@ -1313,7 +1455,7 @@ def render_blog(saved_niches, page=1, per_page=BLOG_PAGE_SIZE):
         nav = ('<nav class="blog-pager" style="display:flex;gap:16px;margin:24px 0">'
                "%s<span class=\"pager-page\" style=\"flex:1;text-align:center\">Page %d of %d</span>%s</nav>"
                % (prev_link, page, total_pages, next_link))
-    masthead = _masthead([("Home", "/", False), ("Niches", "/#niches", False),
+    masthead = _masthead([("Home", "/", False), ("Niches", "/niches", False),
                           ("Blog", "/blog", True), ("Stories", "/stories", False)],
                          cta=("#gate", "Get the free guide"))
     body = f"""{masthead}
@@ -1718,7 +1860,7 @@ def render_stories_gallery(saved_niches):
     # visitors to the homepage's #top-picks anchor to sign up elsewhere. Now
     # that the gate is on this page, the CTA points at it, as it does on /n/.
     capture = lead_gate_html("picks", "stories")
-    masthead = _masthead([("Home", "/", False), ("Niches", "/#niches", False),
+    masthead = _masthead([("Home", "/", False), ("Niches", "/niches", False),
                           ("Blog", "/blog", False), ("Stories", "/stories", True)],
                          cta=("#gate", "Get the free guide"))
     body = f"""{masthead}
