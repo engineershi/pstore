@@ -541,6 +541,37 @@ def render_page(slug, title, desc, content_html):
     return head + body + _footer()
 
 
+def render_form_result(title, message, cta_label="Back to the niches",
+                       cta_href="/niches", extra_html=""):
+    """Landing page for a public form submitted with no JS available.
+
+    `/subscribe`, `/price-alert` and the PDF gate are plain HTML forms so they
+    degrade gracefully, but the handlers only returned JSON. When the JS asset
+    was blocked or errored, the browser rendered the raw response in the window
+    — a JSON object with `id`, the signed `download_token` and the referral URL.
+
+    Always noindex with a self-canonical: this is a per-visitor confirmation, not
+    a page, and it must never enter the sitemap (which would then disagree with
+    its robots meta — the house rule).
+    """
+    canonical = BASE_URL.rstrip("/") + "/"
+    head = _head(title, message, "/", "/", noindex=True,
+                 jsonld={"@context": "https://schema.org", "@type": "WebPage",
+                         "name": title, "description": message,
+                         "url": canonical})
+    body = ("%s\n<main class=\"page\"><article class=\"card\">"
+            "<p class=\"eyebrow\">Done</p><h1>%s</h1>"
+            "<p class=\"lede\">%s</p>"
+            "<div class=\"hero-ctas\"><a class=\"btn\" href=\"%s\">%s</a></div>"
+            "<p class=\"hint\">Your signup went through — the next update "
+            "arrives by email. If this page looks unusually plain, your browser "
+            "blocked our scripts; nothing was lost.</p>%s"
+            "</article></main>\n"
+            % (_page_header(), _clean(title), _clean(message),
+               _clean(cta_href), _clean(cta_label), extra_html)).encode("utf-8")
+    return head + body + _footer()
+
+
 def render_404():
     """Friendly, noindex 404 page for unknown page URLs — never a JSON 404 in a
     browser. No canonical/og:url so crawlers treat it as a soft-404, not a page."""
@@ -720,12 +751,20 @@ _LEAD_GATE_CSS = """
 """
 
 
-def lead_gate_html(keyword, source="niche"):
+def lead_gate_html(keyword, source="niche", courier_script_tag=""):
     """Email-gated free-guide PDF block for SEO pages (MME-6): the visitor enters
     their email to unlock the niche's generated PDF guide. Markup mirrors the
     CMS landing gate so courier.js' existing gate-form handler unlocks #gate-unlock
     with the /subscribe download token. Ships its own CSS (SEO pages don't load
-    the CMS gate styles)."""
+    the CMS gate styles).
+
+    `courier_script_tag` is NOT optional by accident — it is an explicit argument
+    so that emitting this block without the script that operates it is a visible
+    decision at every call site. /blog and /stories both shipped this form while
+    omitting <script src="/courier.js">, so submitting there fell through to a
+    native form POST and the browser rendered the raw /subscribe JSON — which is
+    how a reporter ended up staring at a signed download token instead of a
+    thank-you. Every page that emits this block must pass courier_script()."""
     kw = _clean(keyword or "picks")
     # The template supplies "best ... to buy", so strip any leading "best"
     # rather than adding one.
@@ -748,11 +787,16 @@ def lead_gate_html(keyword, source="niche"):
   <p class="hint">No spam. Unsubscribe any time. A price-drop alert only fires when a ranked pick's price changes.</p>
 </div>
 <script>var _lgcc=document.getElementById('gate');if(_lgcc){{var i=_lgcc.querySelector('input[name=email]');if(i)setTimeout(function(){{if(!document.body.getAttribute('data-opted'))i.focus();}},900);}}</script>
-"""
+{courier_script_tag}"""
 
 
 def courier_script():
     return '<script src="/courier.js" defer></script>'.encode("utf-8")
+
+
+# Passed explicitly to every lead_gate_html() call so "form without its script"
+# is a visible, greppable decision rather than a silent omission.
+_COURIER_TAG = '<script src="/courier.js" defer></script>'
 
 
 _MARKET_LABELS = {"com": "US", "co.uk": "UK", "de": "DE", "ca": "CA",
@@ -949,7 +993,7 @@ def render_niche(keyword, niche, saved_niches=None, ab_headline=None, ab_variant
   <h2>The ranked list</h2>
   {ranked}
   {editorial.upsell_block(items, keyword)}
-  {lead_gate_html(keyword, "niche") if items else ""}
+  {lead_gate_html(keyword, "niche", _COURIER_TAG) if items else ""}
   {editorial.comparison_html(items, keyword) if items else ""}
   {editorial.methodology_html()}
   {editorial.related_html(keyword, saved_niches) if saved_niches else ""}
@@ -1056,7 +1100,7 @@ def render_topic(term, parent_keyword, niche, parent_slug, style_pack=None,
   <h2>Top {_clean(_title_kw(_bare_kw(term or parent_keyword)))} Picks</h2>
   {ranked}
   {editorial.upsell_block(items, term or parent_keyword)}
-  {lead_gate_html(term or parent_keyword, "topic") if items else ""}
+  {lead_gate_html(term or parent_keyword, "topic", _COURIER_TAG) if items else ""}
   {editorial.comparison_html(items, term or parent_keyword) if items else ""}
   {editorial.methodology_html()}
   {editorial.related_html(term or parent_keyword, saved_niches or [])}
@@ -1132,7 +1176,7 @@ def render_priceband(amount, parent_keyword, parent_slug, items,
   <h2>Top {_clean(parent_keyword)} picks under ${amount:,}</h2>
   {ranked}
   {editorial.upsell_block(band, term_label)}
-  {lead_gate_html(term_label, "priceband") if band else ""}
+  {lead_gate_html(term_label, "priceband", _COURIER_TAG) if band else ""}
   {editorial.comparison_html(band, parent_keyword) if band else ""}
   {editorial.methodology_html()}
   <p class="hint">This is a budget slice of our <a href="{_clean(hub)}">full {_clean(parent_keyword)} guide</a>.</p>
@@ -1197,7 +1241,7 @@ def render_vs(title_a, title_b, a_asin, b_asin, parent_keyword, parent_slug,
   {editorial.trust_block_html()}
   <h2>The verdict</h2>
   {ranked}
-  {lead_gate_html(term_label, "vs") if cand else ""}
+  {lead_gate_html(term_label, "vs", _COURIER_TAG) if cand else ""}
   {editorial.comparison_html(cand, parent_keyword) if cand else ""}
   {editorial.methodology_html()}
   <p class="hint">Part of our <a href="{_clean(hub)}">full {_clean(parent_keyword)} guide</a>.</p>
@@ -1445,7 +1489,7 @@ def render_blog(saved_niches, page=1, per_page=BLOG_PAGE_SIZE):
     # /blog is the index every guide is reachable from, and it was the one
     # crawlable page with no way to capture anyone. A reader who lands on the
     # index, scans a list, and leaves had no offer to accept.
-    capture = lead_gate_html("picks", "blog")
+    capture = lead_gate_html("picks", "blog", _COURIER_TAG)
     nav = ""
     if total_pages > 1:
         prev_link = ('<a class="blog-prev" href="/blog?p=%d" rel="prev">&larr; Newer</a>'
@@ -1859,7 +1903,7 @@ def render_stories_gallery(saved_niches):
     # /stories was the only hub with no capture form; its masthead CTA sent
     # visitors to the homepage's #top-picks anchor to sign up elsewhere. Now
     # that the gate is on this page, the CTA points at it, as it does on /n/.
-    capture = lead_gate_html("picks", "stories")
+    capture = lead_gate_html("picks", "stories", _COURIER_TAG)
     masthead = _masthead([("Home", "/", False), ("Niches", "/niches", False),
                           ("Blog", "/blog", False), ("Stories", "/stories", True)],
                          cta=("#gate", "Get the free guide"))

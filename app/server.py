@@ -1389,6 +1389,56 @@ def _mark_paapi_sourced(cur, add, took):
     return cur
 
 
+def _wants_html(handler):
+    """True when this request came from a browser navigating, not from our own JS.
+
+    `/subscribe`, `/price-alert` and the PDF gate are plain
+    `<form action="/subscribe" method="post">` so they work at all without JS --
+    but the handler only ever returned JSON. If `courier.js` failed to load (a
+    blocked asset, a CSP/extension kill, a JS error, an old cached page), the
+    browser did a native POST and displayed the raw response body in the window:
+    a JSON object carrying `id`, `message`, the signed PDF `download_token` and
+    the referral URL. That is the first thing a new subscriber sees, and it looks
+    broken enough to lose the signup.
+
+    `fetch()` sends `Accept: */*`; a browser form navigation sends an Accept
+    header listing text/html. So this is a reliable discriminator and needs no
+    cooperation from the client script.
+    """
+    accept = (handler.headers.get("Accept") or "").lower()
+    return "text/html" in accept
+
+
+def _gated_locked_html(keyword):
+    """Real page for an expired/missing PDF token: re-offer the opt-in that mints
+    a working one instead of showing a JSON error document."""
+    kw = seo._clean(keyword or "the free guide")
+    return seo.render_form_result(
+        "One quick step to your guide",
+        "That download link has expired. Enter your email and we'll send a "
+        "fresh link straight away.",
+        cta_label="Browse the picks",
+        cta_href="/n/%s" % (seo._slugify(keyword) if keyword else ""),
+        extra_html='<form class="courier card" action="/subscribe" method="post">'
+                   '<input type="hidden" name="keyword" value="%s">'
+                   '<input type="hidden" name="source" value="pdf-retry-gate">'
+                   '<input type="email" name="email" placeholder="you@example.com" '
+                   'required autocomplete="email">'
+                   '<button class="btn" type="submit">Email me the guide</button>'
+                   '</form>' % kw)
+
+
+def _public_post_result(handler, message, cta_label="Back to the niches",
+                        cta_href="/niches", extra_html=""):
+    """Return an HTML confirmation for a browser form post, or None if the caller
+    should keep sending JSON (our own `fetch()` from courier.js)."""
+    if not _wants_html(handler):
+        return None
+    return seo.render_form_result(
+        "You're in" if "again" not in message.lower() else "Already subscribed",
+        message, cta_label, cta_href, extra_html)
+
+
 def _enrich_products(products):
     """Fill in missing product fields — above all the product image — from
     PA-API before the row is persisted.
@@ -16026,13 +16076,13 @@ document.addEventListener("click", async function(e){{
     def _subscribe(self):
         key = "sub|" + security.client_key(self.headers, self._client_ip())
         if not security.SUBSCRIBE_LIMITER.hit(key):
-            return self._send(429, {"ok": False, "error": "Too many signups from this device — try again later."})
+            return self._subscribe_error(429, "Too many signups from this device — try again later.")
         body = self._body()
         email = str(body.get("email") or "").strip().lower()
         if not _EMAIL_RE.match(email):
-            return self._send(200, {"ok": False, "error": "That email doesn't look right."})
+            return self._subscribe_error(200, "That email doesn't look right.")
         if len(email) > 200:
-            return self._send(200, {"ok": False, "error": "Email too long."})
+            return self._subscribe_error(200, "Email too long.")
         keyword = str(body.get("keyword") or "").strip()[:120]
         first_name = str(body.get("first_name") or "").strip()[:80]
         source = (str(body.get("source") or "niche").strip()[:40]) or "niche"
@@ -16097,9 +16147,53 @@ document.addEventListener("click", async function(e){{
         if is_new and keyword:
             threading.Thread(target=_send_welcome_email, args=(sid, keyword),
                              daemon=True).start()
+        # A browser that got here by submitting the form natively (no JS) must
+        # get a page, not the JSON we hand courier.js -- and it must not be shown
+        # the signed PDF token.
+        ref_url = self._referral_url(ref_slug, ref_token)
+        extra = ""
+        if ref_url:
+            extra += ('<p class="hint">Your referral link to share: '
+                      '<a href="%s">%s</a></p>' % (seo._clean(ref_url),
+                                                   seo._clean(ref_url)))
+        # The gate forms exist to unlock the PDF. With JS the browser turns the
+        # token into an <a download>; without it the reader would land here with
+        # no way to reach the thing they just gave up an email for. Send the
+        # link explicitly on the page instead.
+        if token and source.endswith("-gate"):
+            dl = "/_gated/pdf?keyword=%s&token=%s" % (
+                urllib.parse.quote(keyword), urllib.parse.quote(token))
+            extra = ('<div class="hero-ctas"><a class="btn" href="%s">'
+                     'Download your free guide</a></div>%s'
+                     % (seo._clean(dl), extra))
+        page = _public_post_result(self, msg, cta_label="Browse the picks",
+                                   cta_href="/n/%s" % (ref_slug or "niches"),
+                                   extra_html=extra)
+        if page is not None:
+            return self._send(200, page, "text/html; charset=utf-8")
         return self._send(200, {"ok": True, "id": sid, "message": msg,
                                 "download_token": token,
-                                "referral_url": self._referral_url(ref_slug, ref_token)})
+                                "referral_url": ref_url})
+
+    def _subscribe_error(self, code, message):
+        """Failed opt-in. Same content negotiation as success: a browser that
+        posted the form natively must see a page carrying the reason, otherwise
+        it sees `{"ok": false, "error": ...}` and has no idea what to fix."""
+        if _wants_html(self):
+            page = seo.render_form_result(
+                "We couldn't sign you up", message,
+                cta_label="Browse the picks", cta_href="/niches",
+                extra_html='<form class="courier card" action="/subscribe" '
+                           'method="post">'
+                           '<input type="hidden" name="keyword" value="%s">'
+                           '<input type="email" name="email" required '
+                           'autocomplete="email" '
+                           'placeholder="you@example.com">'
+                           '<button class="btn" type="submit">Try again</button>'
+                           '</form>' % seo._clean(str(self._body().get("keyword")
+                                                      or "")))
+            return self._send(code, page, "text/html; charset=utf-8")
+        return self._send(code, {"ok": False, "error": message})
 
     def _price_alert(self):
         """Public price-watch signup from a product card: captures the email as a
@@ -16108,15 +16202,15 @@ document.addEventListener("click", async function(e){{
         an affiliate link. Same device rate limit as /subscribe."""
         key = "watch|" + security.client_key(self.headers, self._client_ip())
         if not security.SUBSCRIBE_LIMITER.hit(key):
-            return self._send(429, {"ok": False, "error": "Too many signups from this device — try again later."})
+            return self._subscribe_error(429, "Too many signups from this device — try again later.")
         body = self._body()
         email = str(body.get("email") or "").strip().lower()
         asin = str(body.get("asin") or "").strip().upper()[:40]
         keyword = str(body.get("keyword") or "").strip()[:120]
         if not _EMAIL_RE.match(email):
-            return self._send(200, {"ok": False, "error": "That email doesn't look right."})
+            return self._subscribe_error(200, "That email doesn't look right.")
         if len(asin) < 6 or not asin.isalnum():
-            return self._send(200, {"ok": False, "error": "We couldn't find that product."})
+            return self._subscribe_error(200, "We couldn't find that product.")
         first_name = str(body.get("first_name") or "").strip()[:80]
         ref = str(body.get("ref") or "").strip()[:80]
         with _lock:
@@ -16159,9 +16253,13 @@ document.addEventListener("click", async function(e){{
             threading.Thread(target=_send_welcome_email, args=(sid, keyword),
                              daemon=True).start()
         ref_slug = seo._slugify(keyword) if keyword else ""
-        return self._send(200, {"ok": True, "id": sid,
-                                "message": "You're on the list — we'll email you the moment this price drops. "
-                                           "Meanwhile, your free guide is ready below.",
+        msg = ("You're on the list — we'll email you the moment this price drops. "
+               "Meanwhile, your free guide is ready below.")
+        page = _public_post_result(self, msg, cta_label="Back to the picks",
+                                   cta_href="/n/%s" % (ref_slug or "niches"))
+        if page is not None:
+            return self._send(200, page, "text/html; charset=utf-8")
+        return self._send(200, {"ok": True, "id": sid, "message": msg,
                                 "download_token": security.make_token("pdf:" + keyword, 10 * 60)
                                 if keyword else "",
                                 "referral_url": self._referral_url(ref_slug, ref_token)})
@@ -16230,6 +16328,13 @@ document.addEventListener("click", async function(e){{
         if gated:
             token = (q.get("token") or [""])[0].strip()
             if not token or security.verify_token(token) != "pdf:" + keyword:
+                # Opened directly in the browser (a shared/expired link, or a
+                # reader who lost the JS that builds the token). A bare
+                # {"error": ...} document is not a page -- send one, with the
+                # opt-in form that mints a working token.
+                if _wants_html(self):
+                    return self._send(403, _gated_locked_html(keyword),
+                                      "text/html; charset=utf-8")
                 return self._send(403, {"error": "not authorized"})
         book = self._ebook_for(keyword)
         if not book:
