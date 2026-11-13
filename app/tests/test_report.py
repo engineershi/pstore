@@ -227,6 +227,43 @@ class TestReportOfferSurface(unittest.TestCase):
         self.assertIn('href="https://pay.example/report"', html)
         self.assertIn("Order my report", html)
 
+    def test_saving_the_admin_card_persists_both_keys(self):
+        saved = []
+
+        class H:
+            def __init__(self):
+                self.sent = []
+
+            def _body(self):
+                return {"report": {"price": "$79",
+                                   "checkout_url": "https://pay.example/r"}}
+
+            def _settings(self):
+                return {}
+
+            def _send(self, code, payload):
+                self.sent.append((code, payload))
+
+        h = H()
+        with mock.patch.object(server, "_set_setting",
+                               lambda k, v: saved.append((k, v))), \
+                mock.patch.object(server, "_sync_paid_flag", lambda: None):
+            server.Handler._save_settings(h)
+        self.assertIn(("report_price", "$79"), saved)
+        self.assertIn(("report_checkout_url", "https://pay.example/r"), saved)
+        self.assertEqual(200, h.sent[-1][0])
+
+    def test_env_vars_win_over_saved_settings(self):
+        with mock.patch.dict(os.environ,
+                             {"PSTORE_REPORT_CHECKOUT": "https://env.example/x",
+                              "PSTORE_REPORT_PRICE": "$99"}), \
+                mock.patch.object(server, "_get_setting",
+                                  lambda k, d="": "https://db.example/x"):
+            st = server._report_settings()
+        self.assertEqual("https://env.example/x", st["checkout_url"])
+        self.assertEqual("$99", st["price"])
+        self.assertTrue(st["env_locked"])
+
     def test_sample_pdf_route_serves_a_pdf(self):
         class H:
             def __init__(self):

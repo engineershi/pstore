@@ -1861,6 +1861,24 @@ def _paid_settings():
     }
 
 
+def _report_settings():
+    """Effective state of the done-for-you Niche Validation Report.
+
+    Env vars win at read time (same precedence as the page itself), so the admin
+    card always shows what /report will actually render. Unlike /pro this needs
+    no webhook: the owner fulfils the report by hand, so a Payment Link alone is
+    enough to take the order.
+    """
+    return {
+        "price": (os.environ.get("PSTORE_REPORT_PRICE")
+                  or _get_setting("report_price", "") or "$49").strip(),
+        "checkout_url": (os.environ.get("PSTORE_REPORT_CHECKOUT")
+                         or _get_setting("report_checkout_url", "") or "").strip(),
+        "env_locked": bool(os.environ.get("PSTORE_REPORT_CHECKOUT")
+                           or os.environ.get("PSTORE_REPORT_PRICE")),
+    }
+
+
 def _sync_paid_flag():
     """Keep `seo.PAID_OFFER_LIVE` honest so the footer links /pro only when the
     page actually exists. Called at boot and after any paid-settings save, so
@@ -5577,6 +5595,7 @@ class Handler(BaseHTTPRequestHandler):
             },
             "marketing": market_engine.status_blurb(),
             "paid": _paid_settings(),
+            "report": _report_settings(),
             "demography": self._demo(),
             "mailer": {
                 "configured": mailer.configured(),
@@ -7943,6 +7962,14 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
             # Saving the first checkout link is what makes /pro go live, so the
             # footer link has to appear now rather than after a redeploy.
             _sync_paid_flag()
+        # Done-for-you report offer. /report always exists, so there is no flag
+        # to flip: a saved checkout link changes the CTA on the next render.
+        rep = body.get("report")
+        if isinstance(rep, dict):
+            for src, dst in (("price", "report_price"),
+                             ("checkout_url", "report_checkout_url")):
+                if src in rep:
+                    _set_setting(dst, str(rep.get(src) or "").strip())
         # Market-demography targeting profile (region / interest / persona).
         demo = body.get("demography")
         if isinstance(demo, dict):
@@ -14559,6 +14586,7 @@ fresh();
             },
             "content": {"niches": niches, "topics": topics},
             "paid": _paid_settings(),
+            "report": _report_settings(),
             "demography": demo,
             "recommendations": reco,
         }
@@ -14853,6 +14881,50 @@ fresh();
                " checked" if p["paid"]["offer_deliver_pdf"] else "",
                _d(self._site_base()), p["paid"]["orders"], p["paid"]["entitlements"])
         )
+        _rep_live = bool(p["report"]["checkout_url"])
+        report_ready = (
+            '<div style="padding:10px 13px;border-radius:10px;margin:0 0 12px;'
+            'border:1px solid #1f7a4d;background:#0f2a1e;color:#8ff0bd">'
+            '<b>● Live checkout.</b> /report is serving, in the sitemap and in '
+            'the footer. Orders arrive in Stripe and you deliver the PDF by hand '
+            'within 48 hours.</div>'
+            if _rep_live else
+            '<div style="padding:10px 13px;border-radius:10px;margin:0 0 12px;'
+            'border:1px solid var(--border);background:var(--bg-soft);'
+            'color:var(--muted)"><b>○ Email orders only.</b> The page is live and '
+            'takes orders through a prefilled email, but no self-serve checkout '
+            'is attached. Paste a Stripe Payment Link below to switch the CTA to '
+            'an order button.</div>')
+        report_env = (
+            '<p class="hint" style="color:#ffd479">PSTORE_REPORT_* env vars are '
+            'set and override these fields. Change them in Render to edit here.</p>'
+            if p["report"]["env_locked"] else "")
+        report_editor = (
+            '<section class="card" id="reportoffer"><h2>📄 Niche Validation '
+            'Report (done for you)</h2>%s%s'
+            '<form id="reportfrm" onsubmit="reportSave();return false;">'
+            '<div class="grid">'
+            '<label>Price label<input name="price" value="%s" placeholder="$49"></label>'
+            '<label>Stripe Payment Link<input name="checkout_url" value="%s" '
+            'placeholder="https://buy.stripe.com/..."></label>'
+            '</div><button class="warm" type="submit">Save report offer</button>'
+            '<span id="reportmsg" class="msg"></span></form>'
+            '<p class="hint" style="margin-top:10px">No webhook is required: you '
+            'are selling a service, not a download. Leaving the link blank keeps '
+            'the mailto order CTA. Live page: <a href="/report">/report</a> · '
+            'free sample: <a href="/report/sample.pdf">/report/sample.pdf</a>.</p>'
+            '<script>async function reportSave(){const o={'
+            'price:document.querySelector("#reportfrm input[name=price]").value,'
+            'checkout_url:document.querySelector("#reportfrm input[name=checkout_url]").value};'
+            'const m=document.querySelector("#reportmsg");m.textContent="Saving…";'
+            'let r,d;try{r=await fetch("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},'
+            'body:JSON.stringify({report:o})});d=await r.json();}catch(e){'
+            'm.textContent="✗ Could not reach the server.";return;}'
+            'm.textContent=(r.ok?"✓ Report offer saved":"✗ "+JSON.stringify(d||{}));'
+            'if(r.ok)setTimeout(()=>location.reload(),700);}\n</script></section>'
+            % (report_ready, report_env, _d(p["report"]["price"]),
+               _d(p["report"]["checkout_url"]))
+        )
         body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Marketing ROI — pstore</title><link rel="stylesheet" href="/style.css">
@@ -14870,6 +14942,7 @@ fresh();
 <section class="card"><h2>🌐 Traffic &amp; content</h2>{traffic_row}
 <div class="table-wrap"><table class="plain"><thead><tr><th>Most-clicked page</th><th>Clicks</th></tr></thead><tbody>{top_pages}</tbody></table></div></section>
 {paid_editor}
+{report_editor}
 {demo_editor}
 {suggest_card}
 <section class="card"><h2>💡 Next best action</h2><ul class="reco">{reco_html}</ul>
