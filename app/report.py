@@ -256,6 +256,15 @@ def analyse(keyword, products=None, score=None, saturation=None, prepared_for=""
     return result
 
 
+def _clip_title(title, limit=110):
+    """Trim a long listing title at a word boundary, never mid-word."""
+    s = " ".join((title or "").split())
+    if len(s) <= limit:
+        return s
+    cut = s[:limit].rsplit(" ", 1)[0].rstrip(" ,.;:-|")
+    return (cut or s[:limit]) + "..."
+
+
 def _band_text(band):
     if not band["median"]:
         return "No priced products in the sample."
@@ -329,7 +338,7 @@ def render_pdf(result, site="trypstore.com"):
         ("At 5.0% click-through", format(pv[0.05], ",d") + " pageviews"
          if pv[0.05] else "n/a"),
     ])
-    doc.pullquote(
+    doc.paragraph(
         "If those pageview numbers feel large, that is the honest answer: this "
         "niche is a volume play. A higher-commission category is the cheapest "
         "lever you have.")
@@ -364,7 +373,7 @@ def render_pdf(result, site="trypstore.com"):
                 "The products the live listing data puts on top, with no paid placement.")
     if result["shortlist"]:
         for i, it in enumerate(result["shortlist"], 1):
-            title = (it["title"] or it["asin"] or "Product")[:110]
+            title = _clip_title(it["title"] or it["asin"] or "Product")
             doc.paragraph("%d. %s" % (i, title), size=12, leading=16)
             line = []
             if it["price"] is not None:
@@ -402,6 +411,7 @@ def render_pdf(result, site="trypstore.com"):
                         "category at the current commission rate.")
     doc.bullets(risks)
 
+    doc.new_page()
     doc.chapter(6, "90-day action plan")
     doc.bullets(result["action_plan"])
 

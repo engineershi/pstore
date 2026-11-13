@@ -10,11 +10,65 @@ GoTo for the table of contents) and tickable AcroForm checkboxes.
 Coordinates are bottom-up (like a PDF page): y grows toward the top, text
 baselines are at y, and the page content ends at the footer near y=34.
 
+Layout uses the real Adobe Helvetica advance widths (the same numbers an AFM
+carries), not an average-character-width guess, so wrapping and right/centre
+alignment land where the glyphs actually end.
+
 `latin-1` output keeps bytes small and deterministic for tests.
 """
+import unicodedata
+
 _SAFE = {"\u2019": "'", "\u2018": "'", "\u201c": '"', "\u201d": '"',
          "\u2013": "-", "\u2014": "-", "\u2026": "...", "\u2192": "->",
          "\u00b7": ".", "\u2022": "*", "\u2605": "*", "\u2b50": "*"}
+
+# Helvetica / Helvetica-Bold advance widths for ASCII 32..126, in 1/1000 em.
+# Source: the standard Adobe AFM metrics (Helvetica.afm, Helvetica-Bold.afm).
+_W_HELV = (
+    278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333,
+    278, 278, 556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 278, 278,
+    584, 584, 584, 556, 1015, 667, 667, 722, 722, 667, 611, 778, 722, 278,
+    500, 667, 556, 833, 722, 778, 667, 778, 722, 667, 611, 722, 667, 944,
+    667, 667, 611, 278, 278, 278, 469, 556, 333, 556, 556, 500, 556, 556,
+    278, 556, 556, 222, 222, 500, 222, 833, 556, 556, 556, 556, 333, 500,
+    278, 556, 500, 722, 500, 500, 500, 334, 260, 334, 584)
+_W_BOLD = (
+    278, 333, 474, 556, 556, 889, 722, 238, 333, 333, 389, 584, 278, 333,
+    278, 278, 556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 333, 333,
+    584, 584, 584, 611, 975, 722, 722, 722, 722, 667, 611, 778, 722, 278,
+    556, 722, 611, 833, 722, 778, 667, 778, 722, 667, 611, 722, 667, 944,
+    667, 667, 611, 333, 278, 333, 584, 556, 333, 556, 611, 556, 611, 556,
+    333, 611, 611, 278, 278, 556, 278, 889, 611, 611, 611, 611, 389, 556,
+    333, 611, 556, 778, 556, 556, 500, 389, 280, 389, 584)
+
+
+def _char_width(ch, size, bold=False):
+    o = ord(ch)
+    if 32 <= o <= 126:
+        return (_W_BOLD if bold else _W_HELV)[o - 32] * size / 1000.0
+    base = unicodedata.normalize("NFKD", ch)[:1]
+    if base and 32 <= ord(base) <= 126:
+        return _char_width(base, size, bold)
+    return 0.556 * size
+
+
+def text_width(s, size, bold=False, italic=False):
+    """Rendered width in points. Oblique shares Helvetica's advances."""
+    return sum(_char_width(c, size, bold) for c in _safe(s))
+
+
+def _split_long(word, width, size, bold):
+    """Break a single word that cannot fit, so it never bleeds past the margin."""
+    out, cur = [], ""
+    for ch in word:
+        if not cur or text_width(cur + ch, size, bold) <= width:
+            cur += ch
+        else:
+            out.append(cur)
+            cur = ch
+    if cur:
+        out.append(cur)
+    return out
 
 
 def _safe(t):
@@ -37,21 +91,32 @@ def _n(*nums):
     return " ".join("%0.2f" % n for n in nums)
 
 
-def _wrap(text, width, size):
-    """Simple word wrap (Helvetica avg char width ~0.52*size)."""
-    words = _esc(text).split()
-    max_chars = max(1, int(width / (0.52 * size)))
-    lines, cur = [], ""
-    for w in words:
-        cand = w if not cur else cur + " " + w
-        if len(cand) <= max_chars:
-            cur = cand
-        else:
-            if cur:
-                lines.append(cur)
-            cur = w
-    if cur:
-        lines.append(cur)
+def _wrap(text, width, size, bold=False, italic=False):
+    """Word-wrap using real glyph advances.
+
+    Honours explicit newlines, breaks over-long words instead of letting them
+    run past the margin, and measures with the same font that text() draws.
+    """
+    width = max(4.0, float(width))
+    lines = []
+    for para in _safe(text).split("\n"):
+        words = para.split()
+        if not words:
+            lines.append("")
+            continue
+        cur = ""
+        for word in words:
+            pieces = ([word] if text_width(word, size, bold, italic) <= width
+                      else _split_long(word, width, size, bold))
+            for piece in pieces:
+                cand = piece if not cur else cur + " " + piece
+                if not cur or text_width(cand, size, bold, italic) <= width:
+                    cur = cand
+                else:
+                    lines.append(cur)
+                    cur = piece
+        if cur:
+            lines.append(cur)
     return lines
 
 
@@ -81,7 +146,7 @@ class Pdf:
         self._plain = False    # True on the cover (no auto frame/footer)
         self._framed = False
         self._fields = []      # AcroForm field names
-        self.y = self.h - 84
+        self.y = self.h - 96
 
     # ------------------------------------------------------------- internals
     def _c(self, s):
@@ -91,7 +156,14 @@ class Pdf:
         return "%0.3f %0.3f %0.3f" % (c[0] / 255, c[1] / 255, c[2] / 255)
 
     def _sync(self):
-        """Frame the current page before anything is drawn on it."""
+        """Frame the current page before anything is drawn on it.
+
+        A cover is a one-shot page: the first element after it starts a fresh
+        page automatically. Without this, cover() and chapter 1 were painted on
+        the same sheet and the two text blocks interleaved.
+        """
+        if self._plain and self._content:
+            self.page_break()
         if not self._content and not self._framed and not self._plain:
             self._frame()
             self._framed = True
@@ -119,7 +191,7 @@ class Pdf:
         self._cur_links = []
         self._framed = False
         self._plain = False
-        self.y = self.h - 84
+        self.y = self.h - 96
 
     def ensure(self, need):
         if self.y - need < self.margin_y:
@@ -159,13 +231,13 @@ class Pdf:
         tsize, tadv = 30, 41
         ssize, slead = 12, 19
         t_w, s_w = int(self.body_w * 0.94), int(self.body_w * 0.9)
-        nT = len(_wrap(title or "", t_w, tsize))
+        nT = len(_wrap(title or "", t_w, tsize, bold=True))
         nS = len(_wrap(subtitle or "", s_w, ssize))
         sub_last = 170  # baseline of the subtitle's final line
         top = sub_last + (nS - 1) * slead + 4 + nT * tadv + (22 if kicker else 0)
         if top > 380:  # very long copy: step down sizes once
             tsize, tadv, ssize, slead = 28, 37, 11, 17
-            nT = len(_wrap(title or "", t_w, tsize))
+            nT = len(_wrap(title or "", t_w, tsize, bold=True))
             nS = len(_wrap(subtitle or "", s_w, ssize))
             top = sub_last + (nS - 1) * slead + 4 + nT * tadv + (22 if kicker else 0)
         if top > 385:  # still tall: let the strip sit a little lower instead
@@ -176,7 +248,7 @@ class Pdf:
         if kicker:
             self.text(_esc(kicker).upper(), 48, y + 22, 10, (150, 96, 74), bold=True)
         self.rect(48, y + 6, 34, 2.4, self.accent)
-        for i, line in enumerate(_wrap(title or "", t_w, tsize)):
+        for i, line in enumerate(_wrap(title or "", t_w, tsize, bold=True)):
             self.text(line, 48, y, tsize, self.ink, bold=True)
             y -= tadv
         y -= 4
@@ -198,14 +270,14 @@ class Pdf:
     def _toc_row(self, num, label, page_no, target_idx):
         """One clickable contents row (label, dot leader, page number)."""
         x = self.margin_x
-        width = len(label) * 0.52 * 12
-        label_y = self.y + 3
+        width = text_width(label, 12)
+        label_y = self.y - 10
         self.text(label, x, label_y, 12, self.ink)
         if width < self.body_w - 60:
             self.graddot(x + width + 10, self.w - self.margin_x - 30, label_y + 2)
         self.text(str(page_no), self.w - self.margin_x, label_y, 12, self.accent,
                   bold=True, align="right")
-        self.goto(x - 6, self.y - 3, self.body_w + 12, 15, target_idx, self.h - 30)
+        self.goto(x - 6, self.y - 15, self.body_w + 12, 16, target_idx, self.h - 30)
         self.y -= 19
 
     # ---------------------------------------------------------- primitives
@@ -311,13 +383,13 @@ class Pdf:
     # ------------------------------------------------------------- text
     def text(self, s, x, y, size, color, bold=False, align="left", italic=False, cx=None):
         family = "/F2" if bold else ("/F3" if italic else "/F1")
-        s = _esc(s)
         if align in ("right", "center"):
-            width = len(s) * 0.52 * size
+            width = text_width(s, size, bold, italic)
             if align == "right":
                 x = self.w - self.margin_x - width
             else:
                 x = (cx if cx is not None else self.margin_x + self.body_w / 2) - width / 2
+        s = _esc(s)
         self._c("BT %s %d Tf %s rg %s Td (%s) Tj ET"
                 % (family, size, self._rgb(color), _n(x, y), s))
 
@@ -328,19 +400,34 @@ class Pdf:
         self.rect(self.margin_x, (y or self.y) - 6, 34, 2.2, self.accent, r=1)
 
     def heading(self, title, size=21):
-        self.ensure(44)
-        self.rect(self.margin_x, self.y + 3, 6, 28, self.accent, r=3)
-        self.text(_esc(title).upper(), self.margin_x + 16, self.y + 2, size,
-                  self.ink, bold=True)
-        self.y -= size + 16
+        lines = _wrap((title or "").upper(), self.body_w - 16, size, bold=True)
+        leading = size + 3
+        self.ensure(max(44, len(lines) * leading + 12))
+        # Draw inside the cursor block (never above it) so a heading that lands
+        # at the top of a page cannot paint into the header furniture.
+        self.rect(self.margin_x, self.y - size - 2, 6, size + 2, self.accent, r=3)
+        ty = self.y - size
+        for line in lines:
+            self.text(line, self.margin_x + 16, ty, size, self.ink, bold=True)
+            ty -= leading
+        self.y -= (len(lines) - 1) * leading + size + 16
 
     def chapter(self, num, title, blurb=None, size=20):
-        self.ensure(54)
-        self.rect(self.margin_x, self.y + 4, 34, 34, self.accent, r=9)
-        self.text(str(num), self.margin_x + 17, self.y + 8, 15, (255, 255, 255), bold=True)
-        self.text(_esc(title).upper(), self.margin_x + 44, self.y + 14, size,
-                  self.ink, bold=True)
-        self.y -= size + 12
+        lines = _wrap((title or "").upper(), self.body_w - 44, size, bold=True)
+        leading = size + 3
+        block = max(38, (len(lines) - 1) * leading + size + 14)
+        self.ensure(block + 16)
+        top = self.y
+        # Everything descends from the cursor; the badge sits flush with the
+        # first title line instead of protruding into the page header.
+        self.rect(self.margin_x, top - 34, 34, 34, self.accent, r=9)
+        self.text(str(num), self.margin_x + 17, top - 30, 15,
+                  (255, 255, 255), bold=True)
+        ty = top - size * 0.75
+        for line in lines:
+            self.text(line, self.margin_x + 44, ty, size, self.ink, bold=True)
+            ty -= leading
+        self.y = top - block
         if blurb:
             self.paragraph(blurb, size=11.5, leading=16, color=self.muted)
         self.hline(self.y + 4, self.margin_x, self.w - self.margin_x,
@@ -368,25 +455,36 @@ class Pdf:
             self.y -= 3
 
     def pullquote(self, text, size=15, color=(120, 70, 44), bg=(255, 247, 240)):
-        self.ensure(56)
         qw = self.body_w - 20
-        lines = _wrap(text, qw, size)
-        box_h = len(lines) * (size + 8) + 30
-        self.rect(self.margin_x, self.y - box_h + 10, self.body_w, box_h, bg, r=14)
-        self.rect(self.margin_x, self.y - box_h + 18, 5, box_h - 16, self.accent, r=3)
-        ty = self.y - 26
+        lines = _wrap(text, qw, size, italic=True)
+        line_h = size + 8
+        box_h = max(1, len(lines)) * line_h + 22
+        # Break first, then draw: a quote taller than the page must never be
+        # pinned off the bottom edge. The box opens at the cursor and descends.
+        self.ensure(box_h + 10)
+        self.rect(self.margin_x, self.y - box_h, self.body_w, box_h, bg, r=14)
+        self.rect(self.margin_x, self.y - box_h + 8, 5, box_h - 16, self.accent, r=3)
+        ty = self.y - 18
         for line in lines:
             self.text(line, self.margin_x + 26, ty, size, color, italic=True)
-            ty -= size + 8
-        self.y -= box_h + 18
+            ty -= line_h
+        self.y -= box_h + 10
 
     def two_col(self, rows, size=11, leading=15, gap=18):
-        self.ensure(leading * len(rows) + 12)
         col_w = (self.body_w - gap) / 2
         for left, right in rows:
-            self.text(left, self.margin_x, self.y, size, self.ink, bold=True)
-            self.text(right, self.margin_x + col_w + gap, self.y, size, self.ink)
-            self.y -= leading
+            ll = _wrap(str(left), col_w, size, bold=True)
+            rl = _wrap(str(right), col_w, size)
+            n = max(len(ll), len(rl), 1)
+            self.ensure(n * leading + 4)
+            y0 = self.y
+            for i, line in enumerate(ll):
+                self.text(line, self.margin_x, y0 - i * leading, size,
+                          self.ink, bold=True)
+            for i, line in enumerate(rl):
+                self.text(line, self.margin_x + col_w + gap,
+                          y0 - i * leading, size, self.ink)
+            self.y -= n * leading
         self.y -= 6
 
     def spacer(self, n=10):
@@ -398,21 +496,31 @@ class Pdf:
         self.ensure(64)
         slot = self.body_w / len(boxes)
         bw = min(slot - gap, 62)
+        top = y
+        bottom = y - 34
         for i, (label, rgb) in enumerate(boxes):
             x = self.margin_x + (slot - bw) / 2 + i * slot
-            self.rect(x, y, bw, 34, rgb, r=9)
-            self.text(_esc(label), x + bw / 2, y + 15, 10.5, (255, 255, 255),
-                      bold=True, align="center", cx=x + bw / 2)
+            self.rect(x, bottom, bw, 34, rgb, r=9)
+            lines = _wrap(label, bw - 8, 8.5, bold=True)[:2]
+            lh = 9.5
+            ty = bottom + (34 - (len(lines) - 1) * lh) / 2 - 3
+            for line in lines:
+                self.text(line, x + bw / 2, ty, 8.5, (255, 255, 255),
+                          bold=True, align="center", cx=x + bw / 2)
+                ty -= lh
             if i < len(boxes) - 1:
-                self.arrow(x + bw + 2, y + 17, x + slot - 4, self.muted, width=1.6, head=5)
-        self.y = y - 26
+                self.arrow(x + bw + 2, bottom + 17, x + slot - 4, self.muted,
+                           width=1.6, head=5)
+        self.y = bottom - 12
 
     def bar_chart(self, x, y, w, h, values, labels, colors, title=None):
-        self.ensure(h + 40)
         maxv = max(values) or 1
         n = len(values)
         slot = w / n
         bw = slot * 0.56
+        label_lines = [_wrap(str(lab), slot - 4, 7.5) for lab in labels]
+        label_max = max((len(ls) for ls in label_lines), default=0)
+        self.ensure(h + 20 + label_max * 9)
         base = y + h
         self.hline(base - 1, x, x + w, (210, 200, 210), 0.8)
         for i, v in enumerate(values):
@@ -420,12 +528,17 @@ class Pdf:
             cx = x + slot * i + (slot - bw) / 2
             self.rect(cx, base - bh, bw, bh, colors[i], r=2.5)
             self.text("%0.1f" % v, cx + bw / 2, base + 3, 8, self.muted, align="center", cx=cx + bw / 2)
-            self.text(_esc(labels[i]), cx + bw / 2, base - bh - 11, 7.5, self.ink,
-                      align="center", cx=cx + bw / 2)
-        self.y = base - h - 26
+            ly = base - bh - 11
+            for line in label_lines[i]:
+                self.text(line, cx + bw / 2, ly, 7.5, self.ink,
+                          align="center", cx=cx + bw / 2)
+                ly -= 9
+        self.y = y - 11 - label_max * 9 - 6
         if title:
-            self.text(_esc(title), x, self.y, 9.5, self.ink, italic=True)
-            self.y -= 14
+            for line in _wrap(title, w, 9.5, italic=True):
+                self.text(line, x, self.y, 9.5, self.ink, italic=True)
+                self.y -= 12
+            self.y -= 2
 
     # -------------------------------------------------- links & checkboxes
     def uri(self, x, y, w, h, url):
@@ -438,7 +551,9 @@ class Pdf:
 
     def checkbox(self, name, label, x=None, size=11, checked=False, size_pt=9.5):
         """A tickable form checkbox on its own row (the cursor advances by itself)."""
-        self.ensure(size + 8)
+        lines = _wrap(label, self.body_w - (size + 7), size_pt)
+        extra = max(0, len(lines) - 1) * (size_pt + 2)
+        self.ensure(size + 8 + extra)
         x = self.margin_x + 4 if x is None else x
         y = self.y - 12
         self.rect(x, y, size, size, (255, 255, 255), r=3)
@@ -446,10 +561,13 @@ class Pdf:
         if checked:
             self.line(x + 2.4, y + size / 2, x + 4.6, y + size - 3.4, self.accent, 1.6)
             self.line(x + 4.6, y + size - 3.4, x + size - 1.6, y + 2.6, self.accent, 1.6)
-        self.text(_esc(label), x + size + 7, y + size * 0.36, size_pt, self.ink)
+        ty = y + size * 0.36
+        for line in lines:
+            self.text(line, x + size + 7, ty, size_pt, self.ink)
+            ty -= size_pt + 2
         self._cur_links.append(("check", (x, y, size, size), _safe(name), bool(checked)))
         self._fields.append(_safe(name))
-        self.y -= size + 7
+        self.y -= size + 7 + extra
 
     # -------------------------------------------------------------- assembly
     def save(self):
