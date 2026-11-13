@@ -53,6 +53,11 @@ Dual audience, keep separate — they have opposite economics:
   **Owner action:** create the Stripe Payment Link, set `paid_checkout_url` and
   the webhook signing secret (`/webhook/stripe`), then re-verify. Highest-leverage
   unbuilt revenue line — this is the only audience that can pay us directly.
+- **`/report` is LIVE (7319730):** a $49 done-for-you Niche Validation Report
+  (`report.py`), sold to the operator audience. Works with zero config — CTA is
+  a prefilled mailto order until `report_checkout_url` (or
+  `PSTORE_REPORT_CHECKOUT`) and `report_price` are set, then it becomes a
+  checkout button. Free ungated sample at `/report/sample.pdf`.
 - Commission is category-driven, not flat: see `earnings.CATEGORY_AOV` /
   `SAMPLE_CATEGORIES`. Per-click value ranges **$0.03 (grocery) to $0.51
   (jewelry)** — an 17x spread on identical traffic. Prefer jewellery, tools,
