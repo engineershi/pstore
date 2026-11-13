@@ -477,6 +477,7 @@ def _footer():
         <div class="foot-links">
 <a href="/#top-picks">Today's top picks</a>
             <a href="/niches">All niches</a>
+          <a href="/report">Niche verdict report</a>
           <a href="/blog">Blog</a>
           <a href="/stories">Stories</a>
           {pro_link}
@@ -865,6 +866,7 @@ def render_landing(saved_niches):
   listicles, no guesswork: pick, price, reason.</p>
   <div class="hero-ctas">
     <a class="btn lg" href="#top-picks">See today's top picks</a>
+    <a class="btn ghost lg" href="/report">Get a niche verdict</a>
     <a class="btn ghost lg" href="#notify">Get the free picks guide</a>
   </div>
   <div class="hero-stats">
@@ -1403,7 +1405,8 @@ def indexable_urls(saved_niches, base_url=None, saved_topics=None):
     base = (base_url or BASE_URL).rstrip("/")
     # /niches is the hub that links the whole inventory; without it in
     # IndexNow/sitemap submissions the new pages are orphaned to crawlers.
-    urls = [base + "/", base + "/niches", base + "/blog", base + "/stories"]
+    urls = [base + "/", base + "/niches", base + "/report", base + "/blog",
+            base + "/stories"]
     for page in STATIC_PAGES:
         urls.append(base + "/" + page)
     seen = set()

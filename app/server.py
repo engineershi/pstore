@@ -53,6 +53,7 @@ import oauth
 import paapi
 import payments
 import pricedrop
+import report as report_mod
 import sales_events
 import seo
 import seobench
@@ -3964,11 +3965,11 @@ def _indexable_url_estimate():
         if kw in holds or kw in live:
             continue
         live.add(kw)
-    # home + /niches + /blog + /stories + static pages
-    # /niches is always emitted unconditionally (the way /blog is), so it must
-    # be counted here or this ceiling under-counts the sitemap by exactly one —
-    # which is what test_growth_safety caught.
-    total = 4 + len(seo.STATIC_PAGES)
+    # home + /niches + /report + /blog + /stories + static pages
+    # /niches and /report are always emitted unconditionally (the way /blog is),
+    # so they must be counted here or this ceiling under-counts the sitemap by
+    # exactly one per page — which is what test_growth_safety caught.
+    total = 5 + len(seo.STATIC_PAGES)
     total += len(live)                       # /n/<slug>
     total += len(live)                       # /stories/<slug>
     if _lp_pages_indexable():
@@ -7306,6 +7307,10 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
                 return self._pro_offer_html()
             if path == "/pro/download":
                 return self._pro_download(path, q)
+            if path == "/report":
+                return self._report_page_html()
+            if path == "/report/sample.pdf":
+                return self._report_sample_pdf()
             if path == "/admin":
                 return self._admin_page()
             if path == "/admin/ebooks/pdf":
@@ -8670,6 +8675,9 @@ border:1px solid var(--border);border-radius:999px;padding:5px 11px;margin:3px 4
         # identical listings as distinct destinations. The deep pages are
         # reachable from the pager, which is the point of them.
         entries.append(("/niches", today))
+        # The owned-revenue report page is always indexable (it renders 200 for
+        # visitors and needs no checkout to exist), so it belongs in the map.
+        entries.append(("/report", today))
         for page in seo.STATIC_PAGES:
             entries.append(("/" + page, "2026-08-28"))
         # The paid-offer page is indexable whenever it exists, so listing it
@@ -19223,6 +19231,171 @@ does not fit in a web page.</p>
        seo._clean(off["checkout_url"]), name)
         return self._send(200, head + body.encode("utf-8") + seo._footer(),
                           "text/html; charset=utf-8")
+
+    def _report_page_html(self):
+        """GET /report — the productized niche-validation offer.
+
+        Zero-config by design: the order button goes to a checkout link when the
+        owner has pasted one, and falls back to an email order otherwise. That
+        keeps the page sellable before a payment rail exists, without pretending
+        a checkout is live. The free sample is ungated on purpose — the buyer
+        has to see the quality of the decision before paying for one.
+        """
+        price = (os.environ.get("PSTORE_REPORT_PRICE")
+                 or _get_setting("report_price", "") or "$49").strip()
+        checkout = (os.environ.get("PSTORE_REPORT_CHECKOUT")
+                    or _get_setting("report_checkout_url", "") or "").strip()
+        contact = seo.CONTACT_EMAIL
+        subject = urllib.parse.quote("Niche Validation Report — order")
+        mail_body = urllib.parse.quote(
+            "Hi — I'd like a Niche Validation Report.\n\n"
+            "Niche / product idea:\n"
+            "Category (if known):\n"
+            "What I'm deciding (start a site, pick a product, enter a market):\n"
+            "Deadline:\n")
+        mailto = "mailto:%s?subject=%s&body=%s" % (contact, subject, mail_body)
+        cta = checkout or mailto
+        cta_label = "Order my report" if checkout else "Email to order"
+        numeric = re.sub(r"[^0-9.]", "", price) or "49"
+        title = "Amazon Niche Validation Report — is the niche worth building?"
+        desc = ("A decision-grade Amazon niche report: the verdict, the commission "
+                "math, the price band and the 90-day plan. One payment, no "
+                "subscription.")
+        canonical = "/report"
+        jsonld = {
+            "@context": "https://schema.org",
+            "@graph": [
+                {"@type": "Product", "name": "Niche Validation Report",
+                 "description": desc, "brand": {"@type": "Brand",
+                                                "name": seo.SITE_NAME},
+                 "offers": {"@type": "Offer", "price": numeric,
+                            "priceCurrency": "USD",
+                            "availability": "https://schema.org/InStock",
+                            "url": seo.BASE_URL + canonical}},
+                {"@type": "FAQPage", "mainEntity": [
+                    {"@type": "Question",
+                     "name": "What exactly do I get?",
+                     "acceptedAnswer": {"@type": "Answer", "text":
+                        "A PDF report with one verdict, the commission math per "
+                        "click, the price band the niche sells at, a ranked "
+                        "shortlist and a 90-day plan."}},
+                    {"@type": "Question",
+                     "name": "How long does it take?",
+                     "acceptedAnswer": {"@type": "Answer", "text":
+                        "Reports are delivered within 48 hours. You send the "
+                        "niche you want validated after checkout."}},
+                    {"@type": "Question",
+                     "name": "Is this a subscription?",
+                     "acceptedAnswer": {"@type": "Answer", "text":
+                        "No. One payment, one report, yours to keep."}},
+                ]},
+                {"@type": "BreadcrumbList", "itemListElement": [
+                    {"@type": "ListItem", "position": 1, "name": seo.SITE_NAME,
+                     "item": seo.BASE_URL + "/"},
+                    {"@type": "ListItem", "position": 2,
+                     "name": "Niche Validation Report",
+                     "item": seo.BASE_URL + canonical},
+                ]},
+            ],
+        }
+        head = seo._head(title, desc, canonical, canonical, jsonld=jsonld)
+        bullets = "".join("<li>%s</li>" % b for b in (
+            "A one-line verdict: build here, build with a narrow angle, or "
+            "skip it.",
+            "The commission math per click, so you know how much traffic "
+            "$1,000 actually takes.",
+            "The price band the niche sells at, with the median to position "
+            "against.",
+            "A ranked shortlist and the 90-day plan to reach the first $1,000.",
+            "Delivered as a PDF within 48 hours. One payment, no subscription.",
+        ))
+        body = """%s
+<main class="page">
+<article class="card offer">
+<h1>Is this niche actually worth building?</h1>
+<p class="hero-sub">A dashboard shows you data. This gives you a decision:
+whether the Amazon commission pays for the work, and exactly what it takes to
+reach the first $1,000.</p>
+<div class="offer-price">%s <span>one report &middot; no subscription</span></div>
+<ul class="offer-list">%s</ul>
+<p><a class="btn btn-primary btn-lg" href="%s">%s</a></p>
+<p class="hint">%s</p>
+<p><a href="/report/sample.pdf">Read a real sample report (PDF)</a> &mdash; no
+email required. It is the same format you get, built from the listing data that
+ranks this site.</p>
+<h2>Why this exists</h2>
+<p>Most niche research tools cost $49 to $99 a month and hand you another
+dashboard to interpret. This is the opposite: one question, one answer, one
+price. You are paying for the decision and the reasoning behind it, not for
+another login.</p>
+<h2>What is inside</h2>
+<ul class="offer-list">%s</ul>
+<h2>How it works</h2>
+<ol>
+<li>Order the report (checkout or email).</li>
+<li>Send the niche or product idea you want validated.</li>
+<li>Receive the PDF within 48 hours, with the verdict and the plan.</li>
+</ol>
+<h2>Who this is for</h2>
+<p>Amazon Associates, affiliate publishers and KDP authors who are about to
+invest weeks in a niche and want the money math before they start.</p>
+<h2>Who this is not for</h2>
+<p>Anyone looking for a list of links, or a guarantee of earnings. The report is
+an honest estimate from live listing data, not a promise.</p>
+<h2>If it does not help</h2>
+<p>If the report does not give you a decision you can act on, reply within 7
+days and it is refunded. No argument.</p>
+<h2>Questions</h2>
+<p>Ask before you buy &mdash; <a href="mailto:%s">%s</a>. Also read the
+<a href="/disclosure">disclosure</a> and <a href="/terms">terms</a>.</p>
+</article>
+<section class="card" style="margin-top:18px">
+<h2>Get new validated niches by email</h2>
+<p>One short email when a niche clears the bar. No course, no daily spam, and
+unsubscribe in one click.</p>
+<form class="courier" action="/subscribe" method="post">
+<input type="hidden" name="source" value="report">
+<input type="hidden" name="page" value="/report">
+<label style="display:block;font-size:12.5px;color:var(--muted);font-weight:700">
+Email
+<input type="email" name="email" required autocomplete="email"
+ placeholder="you@example.com" style="width:100%%;padding:12px 14px;border:1px solid var(--border);border-radius:12px;margin:6px 0 10px;background:#fff"></label>
+<label style="display:block;font-size:12.5px;color:var(--muted);font-weight:700">
+The niche you want validated (optional)
+<input name="keyword" maxlength="120" placeholder="e.g. gold jewelry"
+ style="width:100%%;padding:12px 14px;border:1px solid var(--border);border-radius:12px;margin:6px 0 10px;background:#fff"></label>
+<button class="btn warm" type="submit">Send me the sample + new niches</button>
+</form>
+</section>
+</main>
+""" % (seo._page_header(), seo._clean(price), bullets, seo._clean(cta),
+       cta_label,
+       ("Checkout opens on Stripe. " if checkout
+        else "Email your niche and we reply with a payment link. "),
+       bullets, seo._clean(contact), seo._clean(contact))
+        return self._send(200, head + body.encode("utf-8") + seo._footer(),
+                          "text/html; charset=utf-8")
+
+    def _report_sample_pdf(self):
+        """GET /report/sample.pdf — the free proof. Built from the best saved
+        niche so it shows the most instructive contrast: same traffic, more
+        money per click."""
+        sample = report_mod.pick_sample(DB)
+        if not sample:
+            return self._send(404, b"sample unavailable", "text/plain; charset=utf-8")
+        built = report_mod.build(sample["keyword"], sample["products"],
+                                 sample["score"], sample["saturation"])
+        data = built["pdf"]
+        self.send_response(200)
+        self.send_header("Content-Type", "application/pdf")
+        self.send_header("Content-Disposition", 'inline; filename="%s"'
+                         % built["pdf_name"].replace('"', ""))
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=3600")
+        self.end_headers()
+        if not getattr(self, "_head_only", False):
+            self.wfile.write(data)
+        return None
 
     def _pro_download(self, path, q):
         """GET /pro/download?token=... — serve the bought PDF to a buyer whose
