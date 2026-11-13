@@ -421,9 +421,10 @@ class Pdf:
         # Everything descends from the cursor; the badge sits flush with the
         # first title line instead of protruding into the page header.
         self.rect(self.margin_x, top - 34, 34, 34, self.accent, r=9)
-        self.text(str(num), self.margin_x + 17, top - 30, 15,
+        self.text(str(num), self.margin_x + 17, top - 22, 15,
                   (255, 255, 255), bold=True)
-        ty = top - size * 0.75
+        # Centre the first title line on the badge's centre (top - 17).
+        ty = top - 17 - size * 0.36
         for line in lines:
             self.text(line, self.margin_x + 44, ty, size, self.ink, bold=True)
             ty -= leading
